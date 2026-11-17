@@ -210,7 +210,7 @@ describe('Stripe refunds and disputes', () => {
     expect(await t.query(api.shop.refundsFor, { checkoutId })).toMatchObject([{ origin: 'external', amountCents: 700 }])
   })
 
-  test('a refund that comes back pending is finished by sweep (or fails, and can be sent again)', async () => {
+  test('a refund that comes back pending is finished by sweep', async () => {
     const { t, post, status, later, stripeCheckout } = setup()
     const { checkoutId, sessionId } = await stripeCheckout()
     await post('/stripe/webhook', await stripe.pay(sessionId))
@@ -221,11 +221,37 @@ describe('Stripe refunds and disputes', () => {
     later(11 * MIN)
     await t.action(internal.paymentsWorker.sweep, {})
     expect((await status(checkoutId)).refundedCents).toBe(2500)
-    const second = await stripeCheckout()
-    await post('/stripe/webhook', await stripe.pay(second.sessionId))
+  })
+
+  test('a refund Stripe refused is sent again as a new attempt with a new key, and only that one counts', async () => {
+    const { t, post, status, stripeCheckout } = setup()
+    const { checkoutId, sessionId } = await stripeCheckout()
+    await post('/stripe/webhook', await stripe.pay(sessionId))
     stripe.refundsCome('failed')
-    const r2 = await t.mutation(api.shop.requestRefund, { checkoutId: second.checkoutId, reason: 'x' })
-    expect(await t.action(api.shop.sendRefund, { refundId: r2, skipApproval: true })).toBe('failed')
+    const r = await t.mutation(api.shop.requestRefund, { checkoutId, reason: 'x' })
+    expect(await t.action(api.shop.sendRefund, { refundId: r, skipApproval: true })).toBe('failed')
+    stripe.refundsCome('succeeded')
+    expect(await t.action(api.shop.sendRefund, { refundId: r, skipApproval: true })).toBe('sent')
+    expect(stripe.refunds().map((x) => x.status)).toEqual(['failed', 'succeeded'])
+    const keys = stripe.calls.filter((c) => c.method === 'POST' && c.path === '/v1/refunds').length
+    expect(keys).toBe(2)
+    expect((await status(checkoutId)).refundedCents).toBe(2500)
+  })
+
+  test('a refund whose send got no answer stays sending; sweep sends it again under the same key, so it is made once', async () => {
+    const { t, post, status, later, stripeCheckout } = setup()
+    const { checkoutId, sessionId } = await stripeCheckout()
+    await post('/stripe/webhook', await stripe.pay(sessionId))
+    const r = await t.mutation(api.shop.requestRefund, { checkoutId, reason: 'x' })
+    // Stripe makes the refund, but the answer is lost on the way back.
+    stripe.refuse((c) => (c.method === 'POST' && c.path === '/v1/refunds' ? Response.json({ error: { message: 'Gateway timeout' } }, { status: 504 }) : undefined))
+    expect(await t.action(api.shop.sendRefund, { refundId: r, skipApproval: true })).toBe('sending')
+    stripe.refuse()
+    later(11 * MIN)
+    await t.action(internal.paymentsWorker.sweep, {})
+    expect((await t.query(api.shop.refundsFor, { checkoutId }))[0]).toMatchObject({ status: 'sent' })
+    expect(stripe.refunds()).toHaveLength(1)
+    expect((await status(checkoutId)).refundedCents).toBe(2500)
   })
 
   test('a dispute is recorded, the host told, and closed', async () => {
@@ -308,6 +334,32 @@ describe('PayPal checkouts', () => {
     const hook = pp.approve(orderId, { eventId: 'WH-ONCE' })
     expect((await post('/paypal/webhook', hook)).text).toBe('handled')
     expect((await post('/paypal/webhook', hook)).text).toBe('Already handled')
+  })
+
+  test('an order approved after its checkout was given up is not captured', async () => {
+    const { post, status, later, t, paypalCheckout, calls } = setup()
+    const { checkoutId, orderId } = await paypalCheckout()
+    later(3 * 60 * MIN + MIN)
+    await t.action(internal.paymentsWorker.sweep, {})
+    expect((await status(checkoutId)).status).toBe('abandoned')
+    expect(await post('/paypal/webhook', pp.approve(orderId))).toEqual({ status: 200, text: 'handled' })
+    expect(await t.action(api.shop.back, { processor: 'paypal', token: orderId })).toEqual({ checkoutId, status: 'abandoned' })
+    expect(pp.order(orderId).status).toBe('APPROVED')
+    expect(await calls('onPaid')).toEqual([])
+  })
+
+  test('a PayPal token that stopped working is replaced once and the call retried', async () => {
+    const { buy, t } = setup()
+    await buy({ processor: 'paypal', method: 'card' })
+    let refused = false
+    pp.refuse((c) => {
+      if (refused || c.path !== '/v2/checkout/orders') return undefined
+      refused = true
+      return Response.json({ error: 'invalid_token' }, { status: 401 })
+    })
+    await buy({ processor: 'paypal', method: 'card', email: 'ben@example.org' })
+    expect(pp.tokens).toBe(2)
+    expect(await t.query(api.shop.openRefunds, {})).toEqual([])
   })
 
   test('a declined capture fails the checkout and tells the host', async () => {
@@ -440,6 +492,20 @@ describe('reconcile', () => {
     expect(searches()).toBe(2)
     const kinds = (await t.query(api.shop.issues, {})).map((i) => i.kind)
     expect(kinds).toEqual(['missing_here'])
+  })
+
+  test('PayPal with Transaction Search on: the order comparison’s issue stays open (the search only decides missing_here)', async () => {
+    const { t, paypalCheckout } = setup()
+    pp.enableSearch()
+    const a = await paypalCheckout()
+    pp.approve(a.orderId)
+    await pp.fetch(`https://api-m.sandbox.paypal.com/v2/checkout/orders/${a.orderId}/capture`, { method: 'POST' })
+    const capture = pp.order(a.orderId).purchase_units?.[0]?.payments?.captures?.[0]?.id ?? ''
+    await t.run(async (ctx) => await ctx.runMutation(app.components.payments.checkouts.settlePaid, { id: a.checkoutId, paymentRef: capture, paidCents: 2400, now: Date.now() }))
+    await t.action(internal.paymentsWorker.reconcile, {})
+    await t.action(internal.paymentsWorker.reconcile, {})
+    const open = await t.run(async (ctx) => await ctx.runQuery(app.components.payments.issues.list, { open: true, paginationOpts: { numItems: 20, cursor: null } }))
+    expect(open.page.map((i) => i.kind)).toEqual(['amount_differs'])
   })
 
   test('PayPal: an order paid at PayPal but not here is status_differs', async () => {

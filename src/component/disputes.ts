@@ -37,11 +37,12 @@ export const record = mutation({
         now: a.now,
       })
     } else {
+      await ctx.db.patch(c._id, { disputed: false })
       await resolveIssue(ctx, a.disputeId, 'dispute', a.now)
     }
     await notifyHost(
       ctx,
-      { ...c, disputed: true },
+      { ...c, disputed: a.status === 'opened' },
       'onDispute',
       { paymentRef: a.paymentRef, disputeId: a.disputeId, status: a.status, outcome: a.outcome ?? null, reason: a.reason ?? null, amountCents: a.amountCents ?? null },
       a.now,

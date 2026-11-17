@@ -76,6 +76,8 @@ export const approve = mutation({
 const sendable = v.object({
   state: v.literal('send'),
   refundId: v.string(),
+  /** The idempotency key for this send. */
+  key: v.string(),
   checkoutId: v.string(),
   app: v.string(),
   processor,
@@ -101,21 +103,39 @@ export const begin = mutation({
     if (!c.paymentRef) throw new ConvexError('This payment has no processor reference to refund.')
     const left = await remaining(ctx, c, r._id)
     if (r.amountCents > left) throw new ConvexError(`Only ${dollarsOf(left)} is left to refund on this payment.`)
-    await ctx.db.patch(r._id, { status: 'sending', error: undefined, updatedAt: now, approvedBy: r.approvedBy ?? (r.status === 'requested' ? by : undefined) })
-    return { state: 'send' as const, refundId: r._id, checkoutId: c._id, app: c.app, processor: c.processor, paymentRef: c.paymentRef, amountCents: r.amountCents }
+    // A refund the processor refused is a new attempt under a new key; otherwise the same key, so a
+    // repeat can never refund twice.
+    const attempts = (r.attempts ?? 0) + (r.status === 'failed' ? 1 : 0)
+    await ctx.db.patch(r._id, { status: 'sending', error: undefined, attempts, updatedAt: now, approvedBy: r.approvedBy ?? (r.status === 'requested' ? by : undefined) })
+    const key = attempts ? `refund-${r._id}-${attempts}` : `refund-${r._id}`
+    return { state: 'send' as const, refundId: r._id, key, checkoutId: c._id, app: c.app, processor: c.processor, paymentRef: c.paymentRef, amountCents: r.amountCents }
   },
 })
 
 /**
  * After the processor call. ok + done: sent, counted, the host told. ok but the processor says it is
- * still pending: stays sending with its id (sweep or a webhook finishes it). Not ok: failed, may be sent again.
+ * still pending: stays sending with its id (sweep or a webhook finishes it). Unknown (the call timed
+ * out or the processor was down): stays sending, so sweep sends again under the same key. Not ok:
+ * the processor refused; failed, and may be sent again as a new attempt.
  */
 export const finish = mutation({
-  args: { refundId: v.string(), ok: v.boolean(), done: v.boolean(), processorRefundId: v.optional(v.string()), error: v.optional(v.string()), now: v.number() },
+  args: {
+    refundId: v.string(),
+    ok: v.boolean(),
+    done: v.boolean(),
+    unknown: v.optional(v.boolean()),
+    processorRefundId: v.optional(v.string()),
+    error: v.optional(v.string()),
+    now: v.number(),
+  },
   returns: v.null(),
-  handler: async (ctx, { refundId, ok, done, processorRefundId, error, now }) => {
+  handler: async (ctx, { refundId, ok, done, unknown, processorRefundId, error, now }) => {
     const r = await loadRefund(ctx, refundId)
     if (r.status !== 'sending') return null
+    if (unknown) {
+      await ctx.db.patch(r._id, { error: error ?? 'The processor didn’t answer; it will be asked again.', updatedAt: now })
+      return null
+    }
     if (!ok) {
       await ctx.db.patch(r._id, { status: 'failed', error: error ?? 'The processor refused the refund.', processorRefundId: processorRefundId ?? r.processorRefundId, updatedAt: now })
       return null
@@ -137,6 +157,23 @@ export const markManual = mutation({
   handler: async (ctx, { refundId, by, note, now }) => {
     const r = await loadRefund(ctx, refundId)
     if (r.status !== 'requested' && r.status !== 'approved' && r.status !== 'failed') throw new ConvexError(`This refund is already ${r.status}.`)
+    const c = await loadCheckout(ctx, r.checkoutId)
+    // Refunded in the dashboard, the processor's webhook usually arrives before anyone clicks here,
+    // as an external row: this request is that refund, so it is closed against it, not counted again.
+    const external = (await refundsOf(ctx, c._id)).find((x) => x.origin === 'external' && x.status === 'sent' && x.amountCents === r.amountCents && !x.requestedBy)
+    if (external) {
+      await ctx.db.patch(external._id, { reason: r.reason, requestedBy: r.requestedBy ?? by ?? 'unknown', note: note?.trim() || external.note })
+      await ctx.db.patch(r._id, {
+        status: 'dismissed',
+        approvedBy: r.approvedBy ?? by,
+        note: `Refunded at the processor as ${external.processorRefundId ?? 'an external refund'}.`,
+        updatedAt: now,
+      })
+      return null
+    }
+    if (c.refundedCents + r.amountCents > (c.paidCents ?? 0)) {
+      throw new ConvexError(`Only ${dollarsOf((c.paidCents ?? 0) - c.refundedCents)} is left unrefunded on this payment; check the processor before marking this one done.`)
+    }
     await ctx.db.patch(r._id, { status: 'manual', approvedBy: r.approvedBy ?? by, note: note?.trim() || undefined, sentAt: now, updatedAt: now })
     await counted(ctx, r, now)
     return null
@@ -224,8 +261,9 @@ export const recordExternal = mutation({
     }
     if (match.status === 'sent' || match.status === 'dismissed') return 'unchanged'
     if (a.state === 'pending') {
-      if (match.processorRefundId === a.processorRefundId) return 'unchanged'
-      await ctx.db.patch(match._id, { processorRefundId: a.processorRefundId, updatedAt: a.now })
+      if (match.processorRefundId === a.processorRefundId && match.status === 'sending') return 'unchanged'
+      // On its way after all: sending again, so sweep keeps asking until it is done or failed.
+      await ctx.db.patch(match._id, { status: 'sending', processorRefundId: a.processorRefundId, error: undefined, updatedAt: a.now })
       return 'updated'
     }
     if (a.state === 'failed') {

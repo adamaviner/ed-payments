@@ -445,6 +445,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           now: number;
           paidCents: number;
           paymentRef: string;
+          processorCheckoutId?: string;
           processorFeeCents?: number;
         },
         | { outcome: "paid" }
@@ -583,6 +584,12 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           }>;
           key: string;
           now: number;
+          only?: Array<
+            | "missing_here"
+            | "missing_there"
+            | "amount_differs"
+            | "status_differs"
+          >;
           paymentRef?: string;
           processor: "stripe" | "paypal";
         },
@@ -639,6 +646,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             amountCents: number;
             app: string;
             checkoutId: string;
+            key: string;
             paymentRef: string;
             processor: "stripe" | "paypal";
             refundId: string;
@@ -654,6 +662,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         Array<{
           amountCents: number;
           approvedBy: string | null;
+          attempts: number;
           checkoutId: string;
           createdAt: number;
           error: string | null;
@@ -693,6 +702,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           ok: boolean;
           processorRefundId?: string;
           refundId: string;
+          unknown?: boolean;
         },
         null,
         Name
@@ -704,6 +714,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         Array<{
           amountCents: number;
           approvedBy: string | null;
+          attempts: number;
           checkoutId: string;
           createdAt: number;
           error: string | null;
@@ -733,6 +744,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         {
           amountCents: number;
           approvedBy: string | null;
+          attempts: number;
           checkoutId: string;
           createdAt: number;
           error: string | null;
@@ -762,6 +774,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         Array<{
           amountCents: number;
           approvedBy: string | null;
+          attempts: number;
           checkoutId: string;
           createdAt: number;
           error: string | null;
@@ -827,6 +840,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         Array<{
           amountCents: number;
           approvedBy: string | null;
+          attempts: number;
           checkoutId: string;
           createdAt: number;
           error: string | null;

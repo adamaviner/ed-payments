@@ -120,12 +120,20 @@ const SETTLEABLE: ReadonlySet<Doc<'checkouts'>['status']> = new Set(['created', 
  * abandoned or failed is still money taken, so it is settled the same way.
  */
 export const settlePaid = mutation({
-  args: { id: v.string(), paymentRef: v.string(), paidCents: v.number(), processorFeeCents: v.optional(v.number()), now: v.number() },
+  args: {
+    id: v.string(),
+    paymentRef: v.string(),
+    paidCents: v.number(),
+    processorFeeCents: v.optional(v.number()),
+    /** Recorded when attach never ran (start died after the processor made its checkout). */
+    processorCheckoutId: v.optional(v.string()),
+    now: v.number(),
+  },
   returns: v.union(v.object({ outcome: v.literal('paid') }), v.object({ outcome: v.literal('refund_needed'), reason: v.string(), refundId: v.string() }), already),
-  handler: async (ctx, { id, paymentRef, paidCents, processorFeeCents, now }) => {
+  handler: async (ctx, { id, paymentRef, paidCents, processorFeeCents, processorCheckoutId, now }) => {
     const c = await load(ctx, id)
     if (!SETTLEABLE.has(c.status)) return { outcome: 'already_handled' as const, status: c.status }
-    await ctx.db.patch(c._id, { paymentRef, paidCents, processorFeeCents, settledAt: now, lastError: undefined })
+    await ctx.db.patch(c._id, { paymentRef, paidCents, processorFeeCents, settledAt: now, lastError: undefined, processorCheckoutId: c.processorCheckoutId ?? processorCheckoutId })
     let refusal: string | null = paidCents === c.amountCents ? null : `The processor took ${dollarsOf(paidCents)}, not the ${dollarsOf(c.amountCents)} asked.`
     if (!refusal && c.callbacks.onPaid) {
       const paid = { ...callbackBase(c), amountCents: c.amountCents, paidCents, paymentRef }

@@ -206,6 +206,7 @@ export const stripe = {
   expireSession: (keys: Keys, id: string, o: StripeCallOptions) => stripeCall<StripeSession>(keys, 'POST', `/v1/checkout/sessions/${encodeURIComponent(id)}/expire`, undefined, o),
   retrievePaymentIntent: (keys: Keys, id: string, o: StripeCallOptions) =>
     stripeCall<StripePaymentIntent>(keys, 'GET', `/v1/payment_intents/${encodeURIComponent(id)}`, { expand: ['latest_charge.balance_transaction'] }, o),
+  /** Keyed `refund-<refundId>` unless o.idempotencyKey says otherwise (a new attempt after Stripe refused one). */
   createRefund: (keys: Keys, r: { paymentIntent: string; amountCents: number; app: string; refundId: string }, o: StripeCallOptions) =>
     stripeCall<StripeRefund>(
       keys,

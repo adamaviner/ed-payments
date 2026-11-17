@@ -145,8 +145,7 @@ export async function handlePaypalWebhook(p: Payments, ctx: RunActionCtx, reques
   if (!event) return text(400, 'Not a PayPal event')
   let verified: boolean
   try {
-    const call = await p.paypalCall(ctx)
-    verified = await verifyPaypalWebhook(keys, call.token, request.headers, body, { fetch: p.fetch })
+    verified = await p.withPaypal(ctx, (call) => verifyPaypalWebhook(keys, call.token, request.headers, body, { fetch: p.fetch }))
   } catch (err) {
     // PayPal couldn't be asked: not the sender's fault, so let it retry.
     console.error(`payments: couldn’t verify PayPal event ${event.id}: ${errorText(err)}`)
@@ -171,6 +170,7 @@ async function actOnPaypal(p: Payments, ctx: RunActionCtx, event: PaypalEvent): 
       const order = event.resource as unknown as PaypalOrder
       const c = await paypalCheckout(p, ctx, orderCustomId(order), order.id)
       if (!c) return 'foreign'
+      // capturePaypal leaves a checkout that was given up alone; the buyer is simply never charged.
       await p.capturePaypal(ctx, c.id, order.id)
       return 'handled'
     }

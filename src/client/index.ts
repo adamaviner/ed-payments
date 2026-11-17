@@ -122,12 +122,12 @@ export class Payments {
     return k
   }
 
-  /** @internal A PayPal call context: the cached token while it has five minutes left, else a fresh one, cached (encrypted). */
-  async paypalCall(ctx: RunActionCtx) {
+  /** @internal A PayPal call context: the cached token while it has five minutes left (unless `fresh`), else a new one, cached (encrypted). */
+  async paypalCall(ctx: RunActionCtx, fresh = false) {
     const keys = this.paypalKeys()
     const account = await accountFingerprint(keys.apiBase, keys.clientId)
     const now = Date.now()
-    const cached = await ctx.runQuery(this.component.settings.paypalToken, {})
+    const cached = fresh ? null : await ctx.runQuery(this.component.settings.paypalToken, {})
     let token = cached && cached.account === account && cached.expiresAt > now + 5 * 60_000 ? await decryptToken(keys.clientSecret, cached.sealed) : null
     if (!token) {
       const got = await paypalToken(keys, now, { fetch: this.fetch })
@@ -135,6 +135,19 @@ export class Payments {
       await ctx.runMutation(this.component.settings.savePaypalToken, { sealed: await encryptToken(keys.clientSecret, got.token), expiresAt: got.expiresAt, account })
     }
     return { apiBase: keys.apiBase, token, fetch: this.fetch, keys }
+  }
+
+  /**
+   * @internal Runs PayPal calls with the cached token; if PayPal answers 401 (the token was revoked
+   * or the app's secret changed) it gets a new token and tries once more.
+   */
+  async withPaypal<T>(ctx: RunActionCtx, fn: (call: Awaited<ReturnType<Payments['paypalCall']>>) => Promise<T>): Promise<T> {
+    try {
+      return await fn(await this.paypalCall(ctx))
+    } catch (err) {
+      if (!(err instanceof ProcessorError && err.processor === 'paypal' && err.status === 401)) throw err
+      return await fn(await this.paypalCall(ctx, true))
+    }
   }
 
   private url(path: string): string {
@@ -209,11 +222,12 @@ export class Payments {
   }
 
   private async startPaypal(ctx: RunActionCtx, checkoutId: string, a: StartArgs, returnUrl: string, cancelUrl: string) {
-    const call = await this.paypalCall(ctx)
-    const order = await paypal.createOrder(
-      call,
-      { customId: tagFor(this.app, checkoutId), description: a.description, amountCents: a.amountCents, returnUrl, cancelUrl, brandName: this.options.brandName },
-      `checkout-${checkoutId}`,
+    const order = await this.withPaypal(ctx, (call) =>
+      paypal.createOrder(
+        call,
+        { customId: tagFor(this.app, checkoutId), description: a.description, amountCents: a.amountCents, returnUrl, cancelUrl, brandName: this.options.brandName },
+        `checkout-${checkoutId}`,
+      ),
     )
     const url = approveUrl(order)
     if (!url) throw new Error('PayPal returned no approval address.')
@@ -226,12 +240,15 @@ export class Payments {
     const pi = paymentIntentId(s)
     if (state === 'processing') return await ctx.runMutation(this.component.checkouts.markProcessing, { id: checkoutId, paymentRef: pi ?? undefined })
     if (state !== 'paid') return null
+    // Without an amount there is nothing safe to record; throwing makes the webhook answer 500 and Stripe retry.
+    if (s.amount_total === null) throw new Error(`Stripe session ${s.id} is paid but has no amount.`)
     const fee = stripeFee(s)
     const res = await ctx.runMutation(this.component.checkouts.settlePaid, {
       id: checkoutId,
       paymentRef: pi ?? s.id,
-      paidCents: s.amount_total ?? 0,
+      paidCents: s.amount_total,
       processorFeeCents: fee ?? undefined,
+      processorCheckoutId: s.id,
       now: Date.now(),
     })
     if (fee === null && pi && res.outcome !== 'already_handled') {
@@ -251,11 +268,14 @@ export class Payments {
     const capture = orderCapture(order)
     if (!capture) return null
     if (capture.status === 'COMPLETED' || capture.status === 'PARTIALLY_REFUNDED' || capture.status === 'REFUNDED') {
+      const paidCents = moneyCents(capture.amount)
+      if (paidCents === null) throw new Error(`PayPal capture ${capture.id} has no USD amount.`)
       return await ctx.runMutation(this.component.checkouts.settlePaid, {
         id: checkoutId,
         paymentRef: capture.id,
-        paidCents: moneyCents(capture.amount) ?? 0,
+        paidCents,
         processorFeeCents: captureFee(capture) ?? undefined,
+        processorCheckoutId: order.id || undefined,
         now: Date.now(),
       })
     }
@@ -266,19 +286,23 @@ export class Payments {
   /**
    * @internal Captures an approved PayPal order and settles it. A second capture (a reloaded
    * return page, the webhook and the sweep racing) gets ORDER_ALREADY_CAPTURED from PayPal: the
-   * order is then fetched and settled from what it says, instead of failing (fix b).
+   * order is then fetched and settled from what it says, instead of failing (fix b). A checkout
+   * that is no longer waiting (abandoned, failed, settled) is never captured: with PayPal no money
+   * moves until the capture, so taking it now would only mean refunding it.
    */
   async capturePaypal(ctx: RunActionCtx, checkoutId: string, orderId: string): Promise<void> {
-    const call = await this.paypalCall(ctx)
-    let order: PaypalOrder
-    try {
-      order = await paypal.captureOrder(call, orderId, `capture-${checkoutId}`)
-    } catch (err) {
-      if (err instanceof ProcessorError && err.code === 'ORDER_ALREADY_CAPTURED') order = await paypal.getOrder(call, orderId)
-      else if (err instanceof ProcessorError && err.code === 'ORDER_NOT_APPROVED') return
-      else throw err
-    }
-    await this.settlePaypalOrder(ctx, checkoutId, order)
+    const c = await ctx.runQuery(this.component.checkouts.get, { id: checkoutId })
+    if (c?.status !== 'pending' && c?.status !== 'created') return
+    const order = await this.withPaypal(ctx, async (call) => {
+      try {
+        return await paypal.captureOrder(call, orderId, `capture-${checkoutId}`)
+      } catch (err) {
+        if (err instanceof ProcessorError && err.code === 'ORDER_ALREADY_CAPTURED') return await paypal.getOrder(call, orderId)
+        if (err instanceof ProcessorError && err.code === 'ORDER_NOT_APPROVED') return null
+        throw err
+      }
+    })
+    if (order) await this.settlePaypalOrder(ctx, checkoutId, order)
   }
 
   /**
@@ -292,8 +316,7 @@ export class Payments {
     if (!found || found.processor !== processor || found.app !== this.app) return null
     if (!FINAL.has(found.status) || found.status === 'abandoned') {
       if (processor === 'paypal') {
-        const call = await this.paypalCall(ctx)
-        const order = await paypal.getOrder(call, token)
+        const order = await this.withPaypal(ctx, (call) => paypal.getOrder(call, token))
         if (order.status === 'APPROVED') await this.capturePaypal(ctx, found.id, token)
         else if (order.status === 'COMPLETED') await this.settlePaypalOrder(ctx, found.id, order)
       } else {
@@ -363,8 +386,8 @@ export class Payments {
   }
 
   /**
-   * Sends a refund through the processor (keyed by the refund id, so sending again after a failure
-   * or a crash never refunds twice). Needs approval first unless skipApproval.
+   * Sends a refund through the processor, keyed by the refund id (see pushRefund), so it is never made
+   * twice. Needs approval first unless skipApproval. Returns the refund as it stands after.
    */
   async sendRefund(ctx: RunActionCtx, refundId: string, o: { skipApproval?: boolean; by?: string } = {}): Promise<RefundView | null> {
     const go = await ctx.runMutation(this.component.refunds.begin, { refundId, skipApproval: o.skipApproval ?? false, by: o.by, now: Date.now() })
@@ -372,24 +395,34 @@ export class Payments {
     return await ctx.runQuery(this.component.refunds.get, { refundId })
   }
 
-  /** @internal The processor call for a refund already marked sending, and its outcome recorded. */
-  async pushRefund(ctx: RunActionCtx, r: { refundId: string; processor: Processor; paymentRef: string; amountCents: number }) {
-    const finish = (x: { ok: boolean; done: boolean; processorRefundId?: string; error?: string }) => ctx.runMutation(this.component.refunds.finish, { refundId: r.refundId, ...x, now: Date.now() })
+  /**
+   * @internal The processor call for a refund already marked sending, and its outcome recorded.
+   * The key is the refund's (a new one per attempt the processor refused), so sending again after a
+   * timeout or crash returns the same refund instead of making a second. When the outcome is unknown
+   * (no answer, a 5xx) the refund stays sending and sweep sends it again under the same key.
+   */
+  async pushRefund(ctx: RunActionCtx, r: { refundId: string; key: string; processor: Processor; paymentRef: string; amountCents: number }) {
+    const finish = (x: { ok: boolean; done: boolean; unknown?: boolean; processorRefundId?: string; error?: string }) =>
+      ctx.runMutation(this.component.refunds.finish, { refundId: r.refundId, ...x, now: Date.now() })
     try {
       if (r.processor === 'stripe') {
         if (!r.paymentRef.startsWith('pi_')) throw new ConvexError('This Stripe payment has no PaymentIntent to refund; refund it in the Stripe dashboard.')
-        const made = await stripe.createRefund(this.stripeKeys(), { paymentIntent: r.paymentRef, amountCents: r.amountCents, app: this.app, refundId: r.refundId }, { fetch: this.fetch })
+        const made = await stripe.createRefund(
+          this.stripeKeys(),
+          { paymentIntent: r.paymentRef, amountCents: r.amountCents, app: this.app, refundId: r.refundId },
+          { fetch: this.fetch, idempotencyKey: r.key },
+        )
         if (made.status === 'failed' || made.status === 'canceled')
           await finish({ ok: false, done: false, processorRefundId: made.id, error: `Stripe: the refund ${made.status}${made.failure_reason ? ` (${made.failure_reason})` : ''}.` })
         else await finish({ ok: true, done: made.status === 'succeeded', processorRefundId: made.id })
       } else {
-        const call = await this.paypalCall(ctx)
-        const made = await paypal.refundCapture(call, r.paymentRef, { amountCents: r.amountCents, customId: tagFor(this.app, r.refundId) }, `refund-${r.refundId}`)
+        const made = await this.withPaypal(ctx, (call) => paypal.refundCapture(call, r.paymentRef, { amountCents: r.amountCents, customId: tagFor(this.app, r.refundId) }, r.key))
         if (made.status === 'FAILED' || made.status === 'CANCELLED') await finish({ ok: false, done: false, processorRefundId: made.id, error: `PayPal: the refund ${made.status.toLowerCase()}.` })
         else await finish({ ok: true, done: made.status === 'COMPLETED', processorRefundId: made.id })
       }
     } catch (err) {
-      await finish({ ok: false, done: false, error: errorText(err) })
+      const unknown = !(err instanceof ConvexError) && !(err instanceof ProcessorError && !err.retryable)
+      await finish({ ok: false, done: false, unknown, error: errorText(err) })
     }
   }
 
@@ -460,15 +493,16 @@ export class Payments {
     const abandon = () => ctx.runMutation(this.component.checkouts.abandon, { id: c.id, now: Date.now() })
     if (!c.processorCheckoutId) return expired ? await abandon() : null
     if (c.processor === 'paypal') {
-      const call = await this.paypalCall(ctx)
-      let order: PaypalOrder | null
-      try {
-        order = await paypal.getOrder(call, c.processorCheckoutId)
-      } catch (err) {
-        // PayPal forgets orders nobody approved after a while.
-        if (err instanceof ProcessorError && err.status === 404) order = null
-        else throw err
-      }
+      const id = c.processorCheckoutId
+      const order = await this.withPaypal(ctx, async (call) => {
+        try {
+          return await paypal.getOrder(call, id)
+        } catch (err) {
+          // PayPal forgets orders nobody approved after a while.
+          if (err instanceof ProcessorError && err.status === 404) return null
+          throw err
+        }
+      })
       if (order?.status === 'APPROVED') return await this.capturePaypal(ctx, c.id, c.processorCheckoutId)
       if (order?.status === 'COMPLETED') return await this.settlePaypalOrder(ctx, c.id, order)
       return expired || order?.status === 'VOIDED' ? await abandon() : null
@@ -493,13 +527,14 @@ export class Payments {
     const c = await ctx.runQuery(this.component.checkouts.get, { id: r.checkoutId })
     if (!c?.paymentRef) return
     if (!r.processorRefundId) {
-      // Crashed between claiming and recording: send again under the same idempotency key.
-      return await this.pushRefund(ctx, { refundId: r.id, processor: c.processor, paymentRef: c.paymentRef, amountCents: r.amountCents })
+      // No answer, or a crash, between claiming and recording: send again under the same key.
+      return await this.pushRefund(ctx, { refundId: r.id, key: refundKey(r.id, r.attempts), processor: c.processor, paymentRef: c.paymentRef, amountCents: r.amountCents })
     }
+    const refundId = r.processorRefundId
     const state =
       c.processor === 'stripe'
-        ? stripeRefundState((await stripe.retrieveRefund(this.stripeKeys(), r.processorRefundId, { fetch: this.fetch })).status)
-        : paypalRefundState((await paypal.getRefund(await this.paypalCall(ctx), r.processorRefundId)).status)
+        ? stripeRefundState((await stripe.retrieveRefund(this.stripeKeys(), refundId, { fetch: this.fetch })).status)
+        : paypalRefundState((await this.withPaypal(ctx, (call) => paypal.getRefund(call, refundId))).status)
     await ctx.runMutation(this.component.refunds.recordExternal, {
       processor: c.processor,
       paymentRef: c.paymentRef,
@@ -584,3 +619,6 @@ export class Payments {
     }
   }
 }
+
+/** The idempotency key of a refund's send: the same for every repeat of one attempt (component refunds.begin makes the same). */
+export const refundKey = (refundId: string, attempts: number) => (attempts ? `refund-${refundId}-${attempts}` : `refund-${refundId}`)

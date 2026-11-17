@@ -76,6 +76,8 @@ export const refundView = v.object({
   createdAt: v.number(),
   updatedAt: v.number(),
   sentAt: v.union(v.number(), v.null()),
+  /** Sends the processor refused; the idempotency key of the next send depends on it. */
+  attempts: v.number(),
 })
 export type RefundView = Infer<typeof refundView>
 
@@ -95,6 +97,7 @@ export function refundViewOf(r: Doc<'refunds'>): RefundView {
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
     sentAt: r.sentAt ?? null,
+    attempts: r.attempts ?? 0,
   }
 }
 

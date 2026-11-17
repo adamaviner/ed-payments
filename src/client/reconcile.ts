@@ -26,6 +26,16 @@ type Checkout = NonNullable<CheckoutView>
 type Finding = { kind: 'missing_here' | 'missing_there' | 'amount_differs' | 'status_differs'; detail: string }
 
 const dollars = (cents: number | null | undefined) => `$${((cents ?? 0) / 100).toFixed(2)}`
+
+/**
+ * What the ledger says went back through the processor: refunds with a processor id that are done.
+ * Refunds recorded by hand without one (a cheque, cash) aren't at the processor, so they don't count
+ * when comparing with it.
+ */
+async function processorRefunded(p: Payments, ctx: RunActionCtx, c: Checkout): Promise<number> {
+  const rows = await ctx.runQuery(p.component.refunds.forCheckout, { checkoutId: c.id })
+  return rows.filter((r) => r.processorRefundId && (r.status === 'sent' || r.status === 'manual')).reduce((sum, r) => sum + r.amountCents, 0)
+}
 const isPaidHere = (c: Checkout) => c.status === 'paid' || c.status === 'refund_needed'
 
 export async function reconcile(p: Payments, ctx: RunActionCtx, days: number): Promise<ReconcileResult> {
@@ -33,8 +43,8 @@ export async function reconcile(p: Payments, ctx: RunActionCtx, days: number): P
   const since = now - Math.min(Math.max(days, 1), 31) * DAY
   const out: ReconcileResult = { checked: 0, opened: 0, resolved: 0, refundsRecorded: 0, searched: false, errors: 0 }
   const ours = await checkoutsSince(p, ctx, since)
-  const sync = async (processor: Processor, key: string, c: Checkout | null, found: Finding[]) => {
-    const r = await ctx.runMutation(p.component.issues.sync, { key, processor, checkoutId: c?.id, paymentRef: c?.paymentRef ?? undefined, found, now: Date.now() })
+  const sync: Sync = async (processor, key, c, found, only) => {
+    const r = await ctx.runMutation(p.component.issues.sync, { key, processor, checkoutId: c?.id, paymentRef: c?.paymentRef ?? undefined, found, only, now: Date.now() })
     out.opened += r.opened
     out.resolved += r.resolved
   }
@@ -63,7 +73,7 @@ async function checkoutsSince(p: Payments, ctx: RunActionCtx, since: number): Pr
   return all.filter((c) => c.app === p.app)
 }
 
-type Sync = (processor: Processor, key: string, c: Checkout | null, found: Finding[]) => Promise<void>
+type Sync = (processor: Processor, key: string, c: Checkout | null, found: Finding[], only?: Finding['kind'][]) => Promise<void>
 
 async function stripeSide(p: Payments, ctx: RunActionCtx, since: number, ours: Checkout[], out: ReconcileResult, sync: Sync) {
   const keys = p.stripeKeys()
@@ -138,7 +148,8 @@ async function stripeRefunds(p: Payments, ctx: RunActionCtx, sinceSec: number, o
     if (!c) continue
     const all = await stripe.refundsOf(keys, pi, o)
     const there = all.data.filter((r) => r.status === 'succeeded').reduce((sum, r) => sum + r.amount, 0)
-    const found: Finding[] = there === c.refundedCents ? [] : [{ kind: 'amount_differs', detail: `${c.description}: Stripe has refunded ${dollars(there)}, here ${dollars(c.refundedCents)}.` }]
+    const here = await processorRefunded(p, ctx, c)
+    const found: Finding[] = there === here ? [] : [{ kind: 'amount_differs', detail: `${c.description}: Stripe has refunded ${dollars(there)}, here ${dollars(here)}.` }]
     await sync('stripe', `refunds:${pi}`, c, found)
   }
 }
@@ -153,27 +164,27 @@ async function paypalSide(
   sync: Sync,
   guard: (what: string, fn: () => Promise<void>) => Promise<void>,
 ) {
-  const call = await p.paypalCall(ctx)
   for (const c of ours) {
     if (c.processor !== 'paypal' || !c.processorCheckoutId) continue
     // An abandoned or still pending checkout nobody approved is normal; sweep looks after pending ones.
     if (c.status === 'abandoned' || c.status === 'pending' || c.status === 'created') continue
     out.checked++
     await guard(`PayPal order ${c.processorCheckoutId}`, async () => {
-      let order: PaypalOrder | null
-      try {
-        order = await paypal.getOrder(call, c.processorCheckoutId ?? '')
-      } catch (err) {
-        if (err instanceof ProcessorError && err.status === 404) order = null
-        else throw err
-      }
-      await sync('paypal', c.paymentRef ?? c.processorCheckoutId ?? c.id, c, paypalFindings(c, order))
+      const order = await p.withPaypal(ctx, async (call): Promise<PaypalOrder | null> => {
+        try {
+          return await paypal.getOrder(call, c.processorCheckoutId ?? '')
+        } catch (err) {
+          if (err instanceof ProcessorError && err.status === 404) return null
+          throw err
+        }
+      })
+      await sync('paypal', c.paymentRef ?? c.processorCheckoutId ?? c.id, c, paypalFindings(c, order, await processorRefunded(p, ctx, c)))
     })
   }
-  await guard('PayPal Transaction Search', () => paypalSearch(p, ctx, call, since, now, out, sync))
+  await guard('PayPal Transaction Search', () => paypalSearch(p, ctx, since, now, out, sync))
 }
 
-function paypalFindings(c: Checkout, order: PaypalOrder | null): Finding[] {
+function paypalFindings(c: Checkout, order: PaypalOrder | null, refunded: number): Finding[] {
   if (!order) return isPaidHere(c) ? [{ kind: 'missing_there', detail: `${c.description} is ${c.status} here, but PayPal has no order ${c.processorCheckoutId}.` }] : []
   const capture = orderCapture(order)
   const paidThere = !!capture && ['COMPLETED', 'PARTIALLY_REFUNDED', 'REFUNDED'].includes(capture.status)
@@ -182,10 +193,9 @@ function paypalFindings(c: Checkout, order: PaypalOrder | null): Finding[] {
   if (!capture || !paidThere) return []
   const amount = moneyCents(capture.amount)
   if (amount !== c.paidCents) return [{ kind: 'amount_differs', detail: `${c.description}: PayPal took ${dollars(amount)}, here ${dollars(c.paidCents)}.` }]
-  if (capture.status === 'REFUNDED' && c.refundedCents < (c.paidCents ?? 0))
-    return [{ kind: 'status_differs', detail: `PayPal has refunded ${c.description} in full; here ${dollars(c.refundedCents)}.` }]
-  if (capture.status === 'PARTIALLY_REFUNDED' && c.refundedCents === 0) return [{ kind: 'status_differs', detail: `PayPal has refunded part of ${c.description}; nothing is refunded here.` }]
-  if (capture.status === 'COMPLETED' && c.refundedCents > 0) return [{ kind: 'status_differs', detail: `${c.description} has ${dollars(c.refundedCents)} refunded here, but PayPal shows no refund.` }]
+  if (capture.status === 'REFUNDED' && refunded < (c.paidCents ?? 0)) return [{ kind: 'status_differs', detail: `PayPal has refunded ${c.description} in full; here ${dollars(refunded)}.` }]
+  if (capture.status === 'PARTIALLY_REFUNDED' && refunded === 0) return [{ kind: 'status_differs', detail: `PayPal has refunded part of ${c.description}; nothing is refunded here.` }]
+  if (capture.status === 'COMPLETED' && refunded > 0) return [{ kind: 'status_differs', detail: `${c.description} has ${dollars(refunded)} refunded here, but PayPal shows no refund.` }]
   return []
 }
 
@@ -193,12 +203,12 @@ function paypalFindings(c: Checkout, order: PaypalOrder | null): Finding[] {
  * Captures tagged with this app that the component never heard of. Needs Transaction Search on the
  * PayPal REST app; when PayPal refuses (403), this is logged once a day and skipped.
  */
-async function paypalSearch(p: Payments, ctx: RunActionCtx, call: Parameters<typeof searchTransactions>[0], since: number, now: number, out: ReconcileResult, sync: Sync) {
+async function paypalSearch(p: Payments, ctx: RunActionCtx, since: number, now: number, out: ReconcileResult, sync: Sync) {
   const refusedAt = await ctx.runQuery(p.component.settings.searchRefusedAt, {})
   if (refusedAt !== null && now - refusedAt < DAY) return
   try {
     for (let page = 1; page <= MAX_PAGES; page++) {
-      const res = await searchTransactions(call, { start: since, end: now - 60_000, page })
+      const res = await p.withPaypal(ctx, (call) => searchTransactions(call, { start: since, end: now - 60_000, page }))
       for (const t of res.transactions) {
         const tag = parseTag(t.customField)
         if (tag?.app !== p.app || t.amountCents <= 0) continue
@@ -207,14 +217,16 @@ async function paypalSearch(p: Payments, ctx: RunActionCtx, call: Parameters<typ
         const found: Finding[] = c
           ? []
           : [{ kind: 'missing_here', detail: `PayPal has a payment of ${dollars(t.amountCents)} (capture ${t.transactionId}) tagged for this app that isn’t recorded here.` }]
-        await sync('paypal', t.transactionId, c, found)
+        // Only "missing here" is this check's to decide; the order comparison above owns the rest for this payment.
+        await sync('paypal', t.transactionId, c, found, ['missing_here'])
       }
       if (page >= res.totalPages) break
     }
     out.searched = true
     if (refusedAt !== null) await ctx.runMutation(p.component.settings.setSearchRefused, { at: null })
   } catch (err) {
-    if (err instanceof ProcessorError && (err.status === 403 || err.status === 401)) {
+    // 403 is PayPal refusing the permission. A 401 is a bad token, which withPaypal already retried, so it is a real failure.
+    if (err instanceof ProcessorError && err.status === 403) {
       console.info('payments: PayPal Transaction Search isn’t enabled for this REST app, so payments PayPal has but this app lacks can’t be looked for. Enable it in the PayPal developer dashboard.')
       await ctx.runMutation(p.component.settings.setSearchRefused, { at: now })
       return

@@ -190,6 +190,29 @@ describe('refunds', () => {
     await expect(mutate(pay.refunds.markManual, { refundId: d, now: NOW })).rejects.toThrow(/already dismissed/)
   })
 
+  test('refunded in the dashboard, webhook first, then marked done by hand: closed against the external refund, not counted twice', async () => {
+    const { mutate, read, create, checkout, calls } = setup()
+    const id = await create({ context: { paid: { refuse: 'Sold out' } } })
+    await mutate(pay.checkouts.settlePaid, { id, paymentRef: `pi_${id}`, paidCents: 2500, now: NOW })
+    const [needed] = await read(pay.refunds.forCheckout, { checkoutId: id })
+    await mutate(pay.refunds.recordExternal, { processor: 'stripe', paymentRef: `pi_${id}`, processorRefundId: 're_dash', amountCents: 2500, state: 'done', now: NOW })
+    await mutate(pay.refunds.markManual, { refundId: needed.id, by: 'admin', now: NOW })
+    expect((await checkout(id)).refundedCents).toBe(2500)
+    const rows = await read(pay.refunds.forCheckout, { checkoutId: id })
+    expect(rows.map((r) => `${r.origin} ${r.status}`).sort((a, b) => a.localeCompare(b))).toEqual(['external sent', 'needed dismissed'])
+    expect(rows.find((r) => r.origin === 'external')).toMatchObject({ reason: 'Sold out', requestedBy: 'admin' })
+    expect(await calls('onRefunded')).toHaveLength(1)
+  })
+
+  test('marking a refund done by hand never counts past what was paid', async () => {
+    const { mutate, paid, checkout } = setup()
+    const id = await paid()
+    const r = await mutate(pay.refunds.request, { checkoutId: id, amountCents: 2000, reason: 'x', now: NOW })
+    await mutate(pay.refunds.recordExternal, { processor: 'stripe', paymentRef: `pi_${id}`, processorRefundId: 're_other', amountCents: 1000, state: 'done', now: NOW })
+    await expect(mutate(pay.refunds.markManual, { refundId: r, now: NOW })).rejects.toThrow(/Only \$15.00 is left unrefunded/)
+    expect((await checkout(id)).refundedCents).toBe(1000)
+  })
+
   test('a refund made in the dashboard arrives as external and is counted once; another app’s is foreign', async () => {
     const { mutate, read, paid, checkout, calls } = setup()
     const id = await paid()

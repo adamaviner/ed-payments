@@ -85,10 +85,13 @@ example/convex a minimal app wired up the way an app should be (typechecked in c
   settle from it" (fix b).
 - **Refunds** are a ledger (many per checkout): requested → approved → sending → sent, or failed
   (send again), or recorded as done by hand, or dismissed. Amounts are checked against paid −
-  refunded − in progress. The processor call is keyed by the refund id, so sending again after a
-  failure or a crash never refunds twice. Refunds made in a dashboard arrive by webhook (or the
-  nightly comparison) and are added as `external`; one already recorded by hand is linked, not
-  counted twice. Paid checkouts and refunds are never deleted.
+  refunded − in progress. The processor call is keyed by the refund id: when the outcome is unknown
+  (no answer, a 5xx) the refund stays sending and the sweep sends it again under the same key, so it
+  is made once; when the processor refused it, sending again is a new attempt with a new key (the
+  processors replay a key's first answer). Refunds made in a dashboard arrive by webhook (or the
+  nightly comparison) and are added as `external`. Marking a refund done by hand closes it against
+  such an external refund of the same amount instead of counting it twice, and is refused if it
+  would count more than was paid. Paid checkouts and refunds are never deleted.
 - **Sweep** (every 10 minutes): PayPal checkouts pending over 5 minutes are captured if approved
   (fix a, when the webhook never came); expired ones are abandoned (Stripe sessions expired at
   Stripe first, or settled if they were paid after all); refunds left sending over 10 minutes are

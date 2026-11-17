@@ -93,6 +93,11 @@ export default defineSchema({
     /** When it last changed status; sweep asks the processor about refunds left sending. */
     updatedAt: v.number(),
     sentAt: v.optional(v.number()),
+    /**
+     * Sends the processor refused outright. Each new attempt gets its own idempotency key, because the
+     * processors replay a key's first answer; a send whose outcome is unknown keeps its key instead.
+     */
+    attempts: v.optional(v.number()),
   })
     .index('by_checkout', ['checkoutId'])
     .index('by_status', ['status', 'updatedAt'])

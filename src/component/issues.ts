@@ -47,6 +47,8 @@ export const sync = mutation({
     checkoutId: v.optional(v.string()),
     paymentRef: v.optional(v.string()),
     found: v.array(v.object({ kind: v.union(...COMPARED.map((k) => v.literal(k))), detail: v.string() })),
+    /** The kinds this check decides; others for the key are left alone. Default: all compared kinds. */
+    only: v.optional(v.array(v.union(...COMPARED.map((k) => v.literal(k))))),
     now: v.number(),
   },
   returns: v.object({ opened: v.number(), resolved: v.number() }),
@@ -55,7 +57,7 @@ export const sync = mutation({
     let opened = 0
     let resolved = 0
     for (const f of a.found) if (await openIssue(ctx, { kind: f.kind, key: a.key, checkoutId, processor: a.processor, paymentRef: a.paymentRef, detail: f.detail, now: a.now })) opened++
-    for (const kind of COMPARED) if (!a.found.some((f) => f.kind === kind) && (await resolveIssue(ctx, a.key, kind, a.now))) resolved++
+    for (const kind of a.only ?? COMPARED) if (!a.found.some((f) => f.kind === kind) && (await resolveIssue(ctx, a.key, kind, a.now))) resolved++
     return { opened, resolved }
   },
 })
