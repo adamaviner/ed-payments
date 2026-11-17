@@ -33,6 +33,7 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
   const orders = new Map<string, Order>()
   const refunds = new Map<string, PaypalRefund & { captureId: string }>()
   const replies = new Map<string, unknown>()
+  const webhooks = new Map<string, { id: string; url: string; event_types: { name: string }[] }>()
   const calls: { method: string; path: string; body: unknown }[] = []
   let n = 0
   let tokens = 0
@@ -69,7 +70,7 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
     }
     const method = init?.method ?? 'GET'
     const raw = typeof init?.body === 'string' ? init.body : ''
-    const body: unknown = raw && raw.startsWith('{') ? JSON.parse(raw) : raw
+    const body: unknown = raw && (raw.startsWith('{') || raw.startsWith('[')) ? JSON.parse(raw) : raw
     calls.push({ method, path: url.pathname, body })
     const refused = refuse?.({ method, path: url.pathname })
     if (refused) return refused
@@ -85,6 +86,26 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
     if (url.pathname === '/v1/notifications/verify-webhook-signature') {
       const sig = (body as { transmission_sig?: string }).transmission_sig
       return ok({ verification_status: sig === VALID_SIGNATURE ? 'SUCCESS' : 'FAILURE' })
+    }
+    if (url.pathname === '/v1/notifications/webhooks') {
+      if (method === 'GET') return ok({ webhooks: [...webhooks.values()] })
+      const w = body as { url: string; event_types: { name: string }[] }
+      if ([...webhooks.values()].some((x) => x.url === w.url)) return issue(400, 'WEBHOOK_URL_ALREADY_EXISTS', 'WEBHOOK_URL_ALREADY_EXISTS', 'Webhook URL already exists.')
+      const made = { id: `FAKEWH${++n}`, url: w.url, event_types: w.event_types.map((e) => ({ name: e.name })) }
+      webhooks.set(made.id, made)
+      return ok(made, 201)
+    }
+    if (path[0] === 'v1' && path[1] === 'notifications' && path[2] === 'webhooks' && path[3]) {
+      const w = webhooks.get(path[3])
+      if (!w) return issue(404, 'INVALID_RESOURCE_ID', 'INVALID_RESOURCE_ID', 'Webhook not found.')
+      if (method === 'DELETE') {
+        webhooks.delete(w.id)
+        return new Response(null, { status: 204 })
+      }
+      const patch = body as { op: string; path: string; value: { name: string }[] }[]
+      const events = patch.find((x) => x.path === '/event_types')?.value
+      if (events) w.event_types = events.map((e) => ({ name: e.name }))
+      return ok(w)
     }
     if (method === 'POST' && url.pathname === '/v2/checkout/orders') {
       const b = body as { purchase_units: { custom_id: string; amount: { value: string } }[] }
@@ -189,6 +210,7 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
 
   return {
     fetch,
+    webhooks: () => [...webhooks.values()],
     calls,
     webhook,
     order: (id: string) => orderJson(order(id)),

@@ -1,7 +1,8 @@
 // What grows with use and when it goes. Paid and refund_needed checkouts and every refund are kept
 // forever: they are the financial record. Abandoned and failed checkouts go after the retention
 // (default 90 days), webhook events after 30 days, resolved issues after 180 days, rate-limit
-// counters after a day.
+// counters after a day. Customers and their saved-method rows are kept: one per payer, small, and
+// the record of which methods were declined.
 import { v } from 'convex/values'
 import { mutation } from './_generated/server.js'
 import { readSettings } from './settings.js'

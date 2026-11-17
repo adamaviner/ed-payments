@@ -16,6 +16,24 @@ import sRefundFailed from './fixtures/stripe/refund.failed.json' with { type: 'j
 import sDisputeCreated from './fixtures/stripe/charge.dispute.created.json' with { type: 'json' }
 import sDisputeClosed from './fixtures/stripe/charge.dispute.closed.json' with { type: 'json' }
 import sPiSucceeded from './fixtures/stripe/payment_intent.succeeded.json' with { type: 'json' }
+import sPiProcessing from './fixtures/stripe/payment_intent.processing.json' with { type: 'json' }
+import sPiFailed from './fixtures/stripe/payment_intent.payment_failed.json' with { type: 'json' }
+import sCustomer from './fixtures/stripe/customer.json' with { type: 'json' }
+import sPmCard from './fixtures/stripe/payment-method-card.json' with { type: 'json' }
+import sPmBank from './fixtures/stripe/payment-method-bank.json' with { type: 'json' }
+import sPmList from './fixtures/stripe/customer-payment-methods.json' with { type: 'json' }
+import sSetupIntent from './fixtures/stripe/setup-intent.json' with { type: 'json' }
+import sPiOff from './fixtures/stripe/payment-intent-off-session.json' with { type: 'json' }
+import sPiOffBank from './fixtures/stripe/payment-intent-off-session-bank.json' with { type: 'json' }
+import sPiOn from './fixtures/stripe/payment-intent-on-session.json' with { type: 'json' }
+import sPiCanceled from './fixtures/stripe/payment-intent-canceled.json' with { type: 'json' }
+import sPiExpanded from './fixtures/stripe/payment-intent-expanded.json' with { type: 'json' }
+import sPiList from './fixtures/stripe/payment-intent-list.json' with { type: 'json' }
+import sWebhookEndpoint from './fixtures/stripe/webhook-endpoint.json' with { type: 'json' }
+import sErrorDeclined from './fixtures/stripe/error-card-declined.json' with { type: 'json' }
+import sErrorAuth from './fixtures/stripe/error-authentication-required.json' with { type: 'json' }
+import sErrorPmTypes from './fixtures/stripe/error-payment-method-types.json' with { type: 'json' }
+import sErrorPermissions from './fixtures/stripe/error-more-permissions.json' with { type: 'json' }
 import sSessionOpen from './fixtures/stripe/session-open.json' with { type: 'json' }
 import sSessionAchOpen from './fixtures/stripe/session-ach-open.json' with { type: 'json' }
 import sSessionExpired from './fixtures/stripe/session-expired.json' with { type: 'json' }
@@ -56,6 +74,8 @@ export const stripeEventFixtures = {
   'charge.dispute.created': sDisputeCreated,
   'charge.dispute.closed': sDisputeClosed,
   'payment_intent.succeeded': sPiSucceeded,
+  'payment_intent.processing': sPiProcessing,
+  'payment_intent.payment_failed': sPiFailed,
 }
 
 export const stripeObjectFixtures = {
@@ -67,6 +87,22 @@ export const stripeObjectFixtures = {
   refund: sRefund,
   errorResourceMissing: sErrorMissing,
   errorExpireNotOpen: sErrorExpire,
+  customer: sCustomer,
+  paymentMethodCard: sPmCard,
+  paymentMethodBank: sPmBank,
+  customerPaymentMethods: sPmList,
+  setupIntent: sSetupIntent,
+  paymentIntentOffSession: sPiOff,
+  paymentIntentOffSessionBank: sPiOffBank,
+  paymentIntentOnSession: sPiOn,
+  paymentIntentCanceled: sPiCanceled,
+  paymentIntentExpanded: sPiExpanded,
+  paymentIntentList: sPiList,
+  webhookEndpoint: sWebhookEndpoint,
+  errorCardDeclined: sErrorDeclined,
+  errorAuthenticationRequired: sErrorAuth,
+  errorPaymentMethodTypes: sErrorPmTypes,
+  errorMorePermissions: sErrorPermissions,
 }
 
 export const paypalEventFixtures = {

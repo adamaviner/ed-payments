@@ -12,6 +12,7 @@ import type * as crons from "../crons.js";
 import type * as http from "../http.js";
 import type * as payments from "../payments.js";
 import type * as paymentsWorker from "../paymentsWorker.js";
+import type * as scratch from "../scratch.js";
 import type * as shop from "../shop.js";
 
 import type {
@@ -25,6 +26,7 @@ declare const fullApi: ApiFromModules<{
   http: typeof http;
   payments: typeof payments;
   paymentsWorker: typeof paymentsWorker;
+  scratch: typeof scratch;
   shop: typeof shop;
 }>;
 

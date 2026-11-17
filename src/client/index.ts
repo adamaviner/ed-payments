@@ -1,27 +1,47 @@
-// What an app's convex/ code imports. The app makes one instance (convex/payments.ts):
+// What an app's convex/ code imports. The app makes one instance, in convex/payments.ts:
 //
-//   export const payments: Payments = new Payments(components.payments, { app: 'market', siteUrl, stripe, paypal })
+//   export const payments = definePayments(components.payments, { app: 'market', context, stripe: fromEnv.stripe(), paypal: fromEnv.paypal() })
+//     .withCallbacks({ on: { paid: internal.orders.onPaid, ... }, authorize: { admin: internal.auth.isAdmin }, worker: internal.payments })
+//   export const { sweep, reconcile, cleanup, issuesDigest, charge } = payments.worker()
+//   export const admin = payments.adminApi()
+//   export const { completeReturn } = payments.publicApi()
+//
+// Two calls, not one, because of TypeScript: the function references in withCallbacks name the
+// app's own modules, including this one, so a single generic call would have to infer its type from
+// itself (TS7022). The first call fixes the types from the context validator; the second takes the
+// references and has nothing left to infer.
 //
 // The component only stores rows. Everything that needs the network or the app's secrets runs here,
-// inside the app's own actions and HTTP actions: starting a checkout, the webhooks, the return page,
-// sending refunds, the sweep and the nightly comparison.
-import { createFunctionHandle, httpActionGeneric, internalActionGeneric, internalMutationGeneric, type FunctionReference, type HttpRouter, type PaginationOptions } from 'convex/server'
-import { ConvexError, v } from 'convex/values'
-import type { FunctionArgs, FunctionReturnType } from 'convex/server'
+// inside the app's own actions and HTTP actions.
+import {
+  createFunctionHandle,
+  httpActionGeneric,
+  type Crons,
+  type FunctionReference,
+  type FunctionArgs,
+  type FunctionReturnType,
+  type HttpRouter,
+  type PaginationOptions,
+  type Scheduler,
+} from 'convex/server'
+import { ConvexError, v, type GenericValidator, type Infer } from 'convex/values'
 import type { ComponentApi } from '../component/_generated/component.js'
 import { DEFAULT_FEE_RATES, feeRates, feeSchedule, type FeeRates, type FeeRatesInput, type FeeSchedule } from '../core/fees.js'
 import { PAYPAL_LIVE_API, PAYPAL_SANDBOX_API, approveUrl, captureFee, moneyCents, orderCapture, paypal, paypalToken, type PaypalKeys, type PaypalOrder } from '../core/paypal.js'
 import { sessionState, stripe, stripeFee, paymentIntentId, type StripeKeys, type StripeSession } from '../core/stripe.js'
 import { accountFingerprint, decryptToken, encryptToken } from '../core/tokenCrypt.js'
 import { ProcessorError, isMethodFor, tagFor, type Fetch, type Method, type Payer, type Processor, type Ref } from '../core/types.js'
+import { adminApi, publicApi, worker, type AdminApiOptions } from './api.js'
+import { mismatch } from './context.js'
 import { reconcile, type ReconcileResult } from './reconcile.js'
+import { chargeNow, completeIntentReturn, retryOnSession, savedMethods, setupPaymentMethod, sweepIntent, verifyMethodOwner, type SavedMethod } from './saved.js'
 import { errorText, paypalRefundState, stripeRefundState } from './util.js'
+import { callbackArgs, paidReturns, type Dispute, type Failed, type IssuesDigest, type Paid, type PaidResult, type Processing, type RefundNeeded, type Refunded } from './validators.js'
 import { handlePaypalWebhook, handleStripeWebhook, type UnhandledStripeEvent } from './webhooks.js'
-import type { Callbacks } from './validators.js'
 
-export type { ComponentApi }
+export type { ComponentApi, ReconcileResult, UnhandledStripeEvent, SavedMethod, AdminApiOptions }
 export * from './validators.js'
-export type { ReconcileResult, UnhandledStripeEvent }
+export { fromEnv, isLive, stripeProblems, paypalProblems, type KeySource, type Problem } from './env.js'
 export { PAYPAL_LIVE_API, PAYPAL_SANDBOX_API }
 export { errorText } from './util.js'
 
@@ -31,33 +51,87 @@ type RunMutation = <M extends FunctionReference<'mutation', 'public' | 'internal
 export type RunQueryCtx = { runQuery: RunQuery }
 export type RunMutationCtx = { runQuery: RunQuery; runMutation: RunMutation }
 /** Actions and HTTP actions: the ones that may call the processors. */
-export type RunActionCtx = RunMutationCtx
+export type RunActionCtx = RunMutationCtx & { auth?: AuthLike; scheduler?: Scheduler }
+/** Mutations and actions that schedule (chargeSaved queues the charge). */
+export type SchedulerCtx = RunMutationCtx & { scheduler: Scheduler; auth?: AuthLike }
+export type AuthLike = { getUserIdentity(): Promise<{ subject: string } | null> }
 
-export interface PaymentsOptions {
+export interface LimitOptions {
+  /** Per signed-in user (else per payer email), per window. Default 5. */
+  perKey?: number
+  windowMinutes?: number
+  /** Everyone together, per minute. Default 30. */
+  globalPerMinute?: number
+}
+
+export interface PaymentsOptions<C extends GenericValidator> {
   /** Tags every checkout (Stripe metadata.app, PayPal custom_id `<app>:<id>`) so apps can share a processor account. */
   app: string
-  /** The app's public site, for the return and cancel pages (e.g. process.env.SITE_URL). */
-  siteUrl: () => string
-  /** Stripe's secret key and webhook signing secret, read when called; null when Stripe isn't set up. */
-  stripe?: () => StripeKeys | null
-  /** PayPal's REST app and webhook id; null when PayPal isn't set up. apiBase is PAYPAL_SANDBOX_API or PAYPAL_LIVE_API. */
-  paypal?: () => PaypalKeys | null
+  /** What every checkout carries for the app's callbacks; checked when the checkout starts. */
+  context: C
+  /** The app's public site, for the return and cancel pages. Default: SITE_URL. */
+  siteUrl?: () => string
+  /** fromEnv.stripe(), or a function returning the keys (null: Stripe isn't set up). */
+  stripe?: (() => StripeKeys | null) & { check?: () => void }
+  /** fromEnv.paypal(), or a function returning the keys (null: PayPal isn't set up). */
+  paypal?: (() => PaypalKeys | null) & { check?: () => void }
   /** Fee rates per processor and method; the defaults are Stripe's published US rates for all of them. */
   fees?: FeeRatesInput
-  /** Limits on starting checkouts. false: none. */
-  limits?: false | { perKey?: number; windowMinutes?: number; globalPerMinute?: number }
+  /** Limits on every public entry (starting, saving a method, retrying, the return page). false: none (tests only). */
+  limits?: false | LimitOptions
   /** Shown on PayPal's page. */
   brandName?: string
   /** For tests: the fetch the processor calls go through (default: the global fetch, looked up at each call). */
   fetch?: Fetch
 }
 
-export interface StartArgs extends Callbacks {
+type Internal<Args extends Record<string, unknown>, R = unknown> = FunctionReference<'mutation', 'internal', Args, R>
+
+/** The app's internal mutations the library calls, each inside the transaction that records the change. All required. */
+export interface PaymentCallbacks<T> {
+  paid: Internal<Paid<T>, PaidResult>
+  failed: Internal<Failed<T>>
+  refunded: Internal<Refunded<T>>
+  refundNeeded: Internal<RefundNeeded<T>>
+  dispute: Internal<Dispute<T>>
+  processing: Internal<Processing<T>>
+  /** The nightly digest of new issues (send it to a person). */
+  issues: Internal<IssuesDigest>
+}
+
+/** Who is asking, as the app's check sees it; recorded on refunds. */
+export interface Who {
+  name: string
+}
+
+/** The functions payments.worker() makes, as the app exports them (e.g. internal.payments). */
+export interface WorkerRefs {
+  sweep: FunctionReference<'action', 'internal', Record<string, never>, null>
+  reconcile: FunctionReference<'action', 'internal', { days?: number }, null>
+  cleanup: FunctionReference<'mutation', 'internal', Record<string, never>, { deleted: number; more: boolean }>
+  issuesDigest: FunctionReference<'mutation', 'internal', Record<string, never>, number>
+  charge: FunctionReference<'action', 'internal', { checkoutId: string; manual?: boolean }, null>
+}
+
+export interface PaymentsWiring<T> {
+  on: PaymentCallbacks<T>
+  /**
+   * The app's own permission checks, as internal queries returning { name } or null (refused).
+   * `auth` is whatever the caller passed to the generated function (ed-schedule: its session token);
+   * apps that use Convex auth ignore it, as the caller's identity carries through.
+   */
+  authorize: { admin: FunctionReference<'query', 'internal', { auth?: unknown }, Who | null> }
+  /** Where the app exported payments.worker(), for scheduled charges and registerCrons. */
+  worker: WorkerRefs
+}
+
+export interface StartArgs<T> {
   ref: Ref
   /** A free word for the host, e.g. 'order'. */
   purpose: string
   /** What the buyer sees at the processor. */
   description: string
+  /** Priced on the server, never taken from the browser. */
   amountCents: number
   processor: Processor
   method: Method
@@ -67,15 +141,36 @@ export interface StartArgs extends Callbacks {
   cancelPath: string
   /** When an unpaid checkout is given up (ms). Default three hours. Stripe allows 30 minutes to 24 hours. */
   expiresAt?: number
-  /** Counted against the per-key limit, e.g. the buyer's email. */
+  /** Counted against the per-key limit instead of the signed-in user or the payer's email. */
   limitKey?: string
-  /** Passed to every callback. */
-  context?: unknown
+  /** Passed to every callback; checked against the context validator. */
+  context: T
+}
+
+export interface ChargeArgs<T> {
+  ref: Ref
+  purpose: string
+  description: string
+  amountCents: number
+  payer: Payer
+  /** Whose saved method it is (the owner given to setupPaymentMethod). */
+  owner: Ref
+  paymentMethodId: string
+  /**
+   * The app's key for this charge, e.g. `bid-<id>-<selectedAt>`: calling chargeSaved again with the
+   * same key returns the same checkout, and Stripe replays the same charge.
+   */
+  idempotencyKey: string
+  context: T
+  /** The Stripe Customer, when the library has none recorded for the owner (adopting one made before it). */
+  stripeCustomerId?: string
 }
 
 export type CheckoutView = FunctionReturnType<ComponentApi['checkouts']['get']>
-export type CheckoutStatus = NonNullable<CheckoutView>['status']
+export type Checkout = NonNullable<CheckoutView>
+export type CheckoutStatus = Checkout['status']
 export type RefundView = FunctionReturnType<ComponentApi['refunds']['forCheckout']>[number]
+export type IssueView = FunctionReturnType<ComponentApi['issues']['list']>['page'][number]
 
 const DEFAULT_EXPIRY_MS = 3 * 60 * 60_000
 /** A PayPal checkout still pending after this long is looked at by sweep (the buyer may have approved and closed the tab). */
@@ -85,15 +180,29 @@ const REFUND_STUCK_MS = 10 * 60_000
 
 const FINAL: ReadonlySet<CheckoutStatus> = new Set(['paid', 'refund_needed', 'failed', 'abandoned'])
 
-export class Payments {
-  readonly fees: FeeRates
+/**
+ * Step one: the app's tag, keys and context type. Returns { withCallbacks } for step two.
+ */
+export function definePayments<C extends GenericValidator>(component: ComponentApi, options: PaymentsOptions<C>): { withCallbacks(wiring: PaymentsWiring<Infer<C>>): Payments<C> } {
+  if (!/^[a-z0-9_-]+$/i.test(options.app)) throw new Error('The payments app tag must be letters, digits, - or _.')
+  return { withCallbacks: (wiring) => new Payments<C>(component, options, wiring) }
+}
 
+/** The app's payments; C is its context validator (definePayments). */
+export class Payments<C extends GenericValidator = GenericValidator> {
+  readonly fees: FeeRates
+  /** The callbacks' argument validators with this app's context: `internalMutation({ args: payments.args.paid, returns: paidReturns, ... })`. */
+  readonly args: ReturnType<typeof callbackArgs<C>>
+  readonly paidReturns = paidReturns
+
+  /** @internal Use definePayments. */
   constructor(
     public readonly component: ComponentApi,
-    public readonly options: PaymentsOptions,
+    public readonly options: PaymentsOptions<C>,
+    public readonly wiring: PaymentsWiring<Infer<C>>,
   ) {
-    if (!/^[a-z0-9_-]+$/i.test(options.app)) throw new Error('The payments app tag must be letters, digits, - or _.')
     this.fees = options.fees ? feeRates(options.fees) : DEFAULT_FEE_RATES
+    this.args = callbackArgs(options.context)
   }
 
   get app(): string {
@@ -122,6 +231,43 @@ export class Payments {
     return k
   }
 
+  /** @internal Throws (a ConvexError naming where) when the context doesn't fit the app's validator. */
+  checkContext(context: unknown) {
+    const wrong = mismatch(this.options.context, context)
+    if (wrong) throw new ConvexError(`The payment’s context doesn’t fit this app’s context validator: ${wrong}.`)
+  }
+
+  /** @internal The rate-limit keys of one public call: the signed-in user (else the given key), and everyone together. */
+  async limits(ctx: { auth?: AuthLike }, entry: string, fallbackKey: string | undefined, scale = 1) {
+    const l = this.options.limits
+    if (l === false) return undefined
+    const identity = ctx.auth ? await ctx.auth.getUserIdentity() : null
+    const who = identity ? `user:${identity.subject}` : fallbackKey ? `key:${fallbackKey.trim().toLowerCase()}` : null
+    const perKey = (l?.perKey ?? 5) * scale
+    const windowMs = (l?.windowMinutes ?? 10) * 60_000
+    const global = { key: `${this.app}:${entry}:all`, max: (l?.globalPerMinute ?? 30) * scale, windowMs: 60_000, message: 'Too many payments are being started right now. Try again in a minute.' }
+    return who ? [global, { key: `${this.app}:${entry}:${who}`, max: perKey, windowMs, message: 'Too many tries just now. Try again in a few minutes.' }] : [global]
+  }
+
+  /** @internal */
+  async takeLimits(ctx: RunMutationCtx & { auth?: AuthLike }, entry: string, fallbackKey: string | undefined, scale = 1) {
+    const limits = await this.limits(ctx, entry, fallbackKey, scale)
+    if (limits) await ctx.runMutation(this.component.limits.take, { limits, now: Date.now() })
+  }
+
+  /** @internal The callbacks as function handles, stored on each checkout so the component can call them. */
+  async handles() {
+    const on = this.wiring.on
+    return {
+      onPaid: await createFunctionHandle(on.paid),
+      onFailed: await createFunctionHandle(on.failed),
+      onRefunded: await createFunctionHandle(on.refunded),
+      onRefundNeeded: await createFunctionHandle(on.refundNeeded),
+      onDispute: await createFunctionHandle(on.dispute),
+      onProcessing: await createFunctionHandle(on.processing),
+    }
+  }
+
   /** @internal A PayPal call context: the cached token while it has five minutes left (unless `fresh`), else a new one, cached (encrypted). */
   async paypalCall(ctx: RunActionCtx, fresh = false) {
     const keys = this.paypalKeys()
@@ -141,7 +287,7 @@ export class Payments {
    * @internal Runs PayPal calls with the cached token; if PayPal answers 401 (the token was revoked
    * or the app's secret changed) it gets a new token and tries once more.
    */
-  async withPaypal<T>(ctx: RunActionCtx, fn: (call: Awaited<ReturnType<Payments['paypalCall']>>) => Promise<T>): Promise<T> {
+  async withPaypal<R>(ctx: RunActionCtx, fn: (call: Awaited<ReturnType<Payments['paypalCall']>>) => Promise<R>): Promise<R> {
     try {
       return await fn(await this.paypalCall(ctx))
     } catch (err) {
@@ -150,32 +296,29 @@ export class Payments {
     }
   }
 
-  private url(path: string): string {
-    return `${this.options.siteUrl().replace(/\/+$/, '')}/${path.replace(/^\/+/, '')}`
+  /** @internal */
+  url(path: string): string {
+    const site = (this.options.siteUrl ?? defaultSiteUrl)()
+    return `${site.replace(/\/+$/, '')}/${path.replace(/^\/+/, '')}`
   }
 
-  private limit(key: string | undefined) {
-    const l = this.options.limits
-    if (l === false) return undefined
-    return { key, perKey: l?.perKey ?? 5, windowMs: (l?.windowMinutes ?? 10) * 60_000, globalPerMinute: l?.globalPerMinute ?? 30 }
-  }
-
-  // ── Checkouts ─────────────────────────────────────────────────────────────────────────────────
+  // ── Hosted checkouts ─────────────────────────────────────────────────────────────────────────
 
   /**
    * Starts a checkout from an action: makes the row, asks the processor for its checkout (keyed by
-   * the row's id, so a retry gets the same one), and returns where to send the buyer.
+   * the row's id, so a retry gets the same one), and returns where to send the buyer. Rate-limited
+   * per signed-in user (else per payer email, or limitKey) and overall.
    */
-  async start(ctx: RunActionCtx, a: StartArgs): Promise<{ checkoutId: string; redirectUrl: string }> {
+  async start(ctx: RunActionCtx, a: StartArgs<Infer<C>>): Promise<{ checkoutId: string; redirectUrl: string }> {
     if (!isMethodFor(a.processor, a.method)) throw new ConvexError(`${a.processor === 'stripe' ? 'Stripe' : 'PayPal'} doesn’t take ${a.method} payments here.`)
     if (!Number.isInteger(a.amountCents) || a.amountCents < 1) throw new ConvexError('A checkout needs an amount of at least one cent.')
+    this.checkContext(a.context)
     if (a.processor === 'stripe') this.stripeKeys()
     else this.paypalKeys()
     const now = Date.now()
     const expiresAt = a.expiresAt ?? now + DEFAULT_EXPIRY_MS
     const returnUrl = this.url(a.returnPath)
     const cancelUrl = this.url(a.cancelPath)
-    const handle = async (fn: FunctionReference<'mutation', 'internal'> | undefined) => (fn ? await createFunctionHandle(fn) : undefined)
     const checkoutId = await ctx.runMutation(this.component.checkouts.create, {
       app: this.app,
       ref: a.ref,
@@ -184,19 +327,14 @@ export class Payments {
       amountCents: a.amountCents,
       processor: a.processor,
       method: a.method,
-      payer: { email: a.payer.email.trim(), ...(a.payer.name?.trim() ? { name: a.payer.name.trim() } : {}) },
+      kind: 'hosted',
+      payer: cleanPayer(a.payer),
       returnUrl,
       cancelUrl,
       expiresAt,
       context: a.context,
-      callbacks: {
-        onPaid: await handle(a.onPaid),
-        onFailed: await handle(a.onFailed),
-        onRefunded: await handle(a.onRefunded),
-        onRefundNeeded: await handle(a.onRefundNeeded),
-        onDispute: await handle(a.onDispute),
-      },
-      limit: this.limit(a.limitKey),
+      callbacks: await this.handles(),
+      limits: await this.limits(ctx, 'start', a.limitKey ?? a.payer.email),
       now,
     })
     try {
@@ -210,18 +348,18 @@ export class Payments {
     }
   }
 
-  private async startStripe(checkoutId: string, a: StartArgs, returnUrl: string, cancelUrl: string, expiresAt: number, now: number) {
+  private async startStripe(checkoutId: string, a: StartArgs<Infer<C>>, returnUrl: string, cancelUrl: string, expiresAt: number, now: number) {
     const successUrl = `${returnUrl}${returnUrl.includes('?') ? '&' : '?'}session_id={CHECKOUT_SESSION_ID}`
     const s = await stripe.createSession(
       this.stripeKeys(),
-      { app: this.app, checkoutId, description: a.description, amountCents: a.amountCents, method: a.method as 'card' | 'ach', email: a.payer.email, successUrl, cancelUrl, expiresAt, now },
+      { app: this.app, checkoutId, description: a.description, amountCents: a.amountCents, method: a.method === 'ach' ? 'ach' : 'card', email: a.payer.email, successUrl, cancelUrl, expiresAt, now },
       { fetch: this.fetch },
     )
     if (!s.url) throw new Error('Stripe returned no checkout address.')
     return { id: s.id, url: s.url }
   }
 
-  private async startPaypal(ctx: RunActionCtx, checkoutId: string, a: StartArgs, returnUrl: string, cancelUrl: string) {
+  private async startPaypal(ctx: RunActionCtx, checkoutId: string, a: StartArgs<Infer<C>>, returnUrl: string, cancelUrl: string) {
     const order = await this.withPaypal(ctx, (call) =>
       paypal.createOrder(
         call,
@@ -238,7 +376,7 @@ export class Payments {
   async settleStripeSession(ctx: RunActionCtx, checkoutId: string, s: StripeSession) {
     const state = sessionState(s)
     const pi = paymentIntentId(s)
-    if (state === 'processing') return await ctx.runMutation(this.component.checkouts.markProcessing, { id: checkoutId, paymentRef: pi ?? undefined })
+    if (state === 'processing') return await ctx.runMutation(this.component.checkouts.markProcessing, { id: checkoutId, paymentRef: pi ?? undefined, now: Date.now() })
     if (state !== 'paid') return null
     // Without an amount there is nothing safe to record; throwing makes the webhook answer 500 and Stripe retry.
     if (s.amount_total === null) throw new Error(`Stripe session ${s.id} is paid but has no amount.`)
@@ -279,7 +417,7 @@ export class Payments {
         now: Date.now(),
       })
     }
-    if (capture.status === 'PENDING') return await ctx.runMutation(this.component.checkouts.markProcessing, { id: checkoutId, paymentRef: capture.id })
+    if (capture.status === 'PENDING') return await ctx.runMutation(this.component.checkouts.markProcessing, { id: checkoutId, paymentRef: capture.id, now: Date.now() })
     return await ctx.runMutation(this.component.checkouts.settleFailed, { id: checkoutId, reason: `PayPal ${capture.status.toLowerCase()} the payment.`, now: Date.now() })
   }
 
@@ -306,16 +444,18 @@ export class Payments {
   }
 
   /**
-   * For the page the buyer comes back to (`token`: Stripe's session_id or PayPal's token). Returns
-   * the outcome at once if the checkout is already settled; otherwise asks the processor and settles
-   * (capturing an approved PayPal order), so the page doesn't wait for a webhook. Null: not ours.
+   * For the page the buyer comes back to (`token`: Stripe's session_id or payment_intent, or PayPal's
+   * token). Returns the outcome at once if the checkout is already settled; otherwise asks the
+   * processor and settles (capturing an approved PayPal order), so the page doesn't wait for a
+   * webhook. Null: not ours. publicApi().completeReturn wraps this with a rate limit.
    */
-  async completeReturn(ctx: RunActionCtx, { processor, token }: { processor: Processor; token: string }): Promise<{ checkoutId: string; ref: Ref; status: CheckoutStatus } | null> {
-    if (!token) return null
+  async completeReturn(ctx: RunActionCtx, { processor, token }: { processor: Processor; token: string }): Promise<{ checkoutId: string; ref: Ref; purpose: string; status: CheckoutStatus } | null> {
+    if (!token || token.length > 255) return null
     const found = await ctx.runQuery(this.component.checkouts.byProcessorId, { processorCheckoutId: token })
     if (!found || found.processor !== processor || found.app !== this.app) return null
     if (!FINAL.has(found.status) || found.status === 'abandoned') {
-      if (processor === 'paypal') {
+      if (found.kind !== 'hosted') await completeIntentReturn(this, ctx, found)
+      else if (processor === 'paypal') {
         const order = await this.withPaypal(ctx, (call) => paypal.getOrder(call, token))
         if (order.status === 'APPROVED') await this.capturePaypal(ctx, found.id, token)
         else if (order.status === 'COMPLETED') await this.settlePaypalOrder(ctx, found.id, order)
@@ -324,8 +464,94 @@ export class Payments {
       }
     }
     const now = await ctx.runQuery(this.component.checkouts.get, { id: found.id })
-    return { checkoutId: found.id, ref: found.ref, status: now?.status ?? found.status }
+    return { checkoutId: found.id, ref: found.ref, purpose: found.purpose, status: now?.status ?? found.status }
   }
+
+  // ── Saved payment methods ─────────────────────────────────────────────────────────────────────
+
+  /**
+   * Starts saving a card or bank account for `owner` (e.g. { type: 'user', id }): makes their Stripe
+   * Customer if needed and a SetupIntent for charging later with nobody present (bank accounts
+   * verified at once). Returns its client secret for Stripe's Payment Element. Rate-limited.
+   */
+  async setupPaymentMethod(ctx: RunActionCtx, a: { owner: Ref; payer: Payer; stripeCustomerId?: string }): Promise<{ clientSecret: string; stripeCustomerId: string }> {
+    return await setupPaymentMethod(this, ctx, a)
+  }
+
+  /** The owner's saved cards and bank accounts, newest first, each with whether a charge of it was declined. */
+  async savedMethods(ctx: RunActionCtx, a: { owner: Ref; stripeCustomerId?: string }): Promise<SavedMethod[]> {
+    return await savedMethods(this, ctx, a)
+  }
+
+  /**
+   * Checks that a payment method id (from the browser) is a card or bank account saved to this owner's
+   * Customer, and returns it; anything else throws, so nobody can pay with a made-up or someone else's method.
+   */
+  async verifyMethodOwner(ctx: RunActionCtx, a: { owner: Ref; paymentMethodId: string; stripeCustomerId?: string }): Promise<SavedMethod & { stripeCustomerId: string }> {
+    return await verifyMethodOwner(this, ctx, a)
+  }
+
+  /**
+   * Charges a saved method with nobody present, from a mutation or action: records the checkout and
+   * queues the charge (payments.worker().charge). A card that needs the buyer to authenticate is
+   * refused rather than left waiting. Outcomes come back through the callbacks: paid; processing then
+   * paid or failed for a bank account; failed (declined: true) when the bank says no. A charge whose
+   * outcome is unknown is tried again a few times under the same key, then left for a person as a
+   * charge_unknown issue. Same idempotencyKey, same checkout. Returns the checkout id.
+   */
+  async chargeSaved(ctx: SchedulerCtx, a: ChargeArgs<Infer<C>>): Promise<string> {
+    if (!Number.isInteger(a.amountCents) || a.amountCents < 1) throw new ConvexError('A charge needs an amount of at least one cent.')
+    if (!a.idempotencyKey || a.idempotencyKey.length > 200) throw new ConvexError('A charge needs an idempotency key of at most 200 characters.')
+    this.checkContext(a.context)
+    const existing = await ctx.runQuery(this.component.checkouts.byChargeKey, { chargeKey: `${this.app}:${a.idempotencyKey}` })
+    if (existing) return existing.id
+    const customer = await ctx.runQuery(this.component.customers.byOwner, { app: this.app, owner: a.owner })
+    const stripeCustomerId = customer?.stripeCustomerId ?? a.stripeCustomerId
+    if (!stripeCustomerId) throw new ConvexError('This payer has no saved payment method here.')
+    const method = await ctx.runQuery(this.component.customers.method, { stripePaymentMethodId: a.paymentMethodId })
+    const now = Date.now()
+    const site = this.url('/')
+    const checkoutId = await ctx.runMutation(this.component.checkouts.create, {
+      app: this.app,
+      ref: a.ref,
+      purpose: a.purpose,
+      description: a.description,
+      amountCents: a.amountCents,
+      processor: 'stripe',
+      method: method?.kind ?? 'card',
+      kind: 'offSession',
+      payer: cleanPayer(a.payer),
+      returnUrl: site,
+      cancelUrl: site,
+      // Never given up by time: an off-session charge ends paid, failed or by a person's decision.
+      expiresAt: now + 3650 * 24 * 60 * 60_000,
+      context: a.context,
+      callbacks: await this.handles(),
+      stripeCustomerId,
+      paymentMethodId: a.paymentMethodId,
+      chargeKey: `${this.app}:${a.idempotencyKey}`,
+      now,
+    })
+    await ctx.scheduler.runAfter(0, this.wiring.worker.charge, { checkoutId })
+    return checkoutId
+  }
+
+  /** @internal Makes (or retries) an off-session charge; payments.worker().charge runs this. */
+  async charge(ctx: RunActionCtx & { scheduler: Scheduler }, checkoutId: string, manual = false): Promise<void> {
+    await chargeNow(this, ctx, checkoutId, manual)
+  }
+
+  /**
+   * For the buyer to pay on the app's page after an off-session charge failed: a PaymentIntent
+   * (card or bank account, theirs to choose in the Payment Element) for the same amount, its outcome
+   * coming back through the same callbacks with kind 'onSession'. One that is still waiting is
+   * reused, so two tabs can't each take a payment; one already on its way is refused. Rate-limited.
+   */
+  async retryOnSession(ctx: RunActionCtx, a: { checkoutId: string; expiresAt?: number }): Promise<{ checkoutId: string; clientSecret: string }> {
+    return await retryOnSession(this, ctx, a)
+  }
+
+  // ── Queries ───────────────────────────────────────────────────────────────────────────────────
 
   /** One checkout, for the app's queries (e.g. a thank-you page). */
   async status(ctx: RunQueryCtx, checkoutId: string): Promise<CheckoutView> {
@@ -350,6 +576,11 @@ export class Payments {
     return await ctx.runQuery(this.component.checkouts.list, { paginationOpts })
   }
 
+  /** Paid checkouts with something left to refund, newest first, paginated (an index read, not a scan). */
+  async refundable(ctx: RunQueryCtx, o: { ref?: Ref; paginationOpts: PaginationOptions }) {
+    return await ctx.runQuery(this.component.checkouts.refundable, o)
+  }
+
   // ── Webhooks ──────────────────────────────────────────────────────────────────────────────────
 
   /** Stripe's webhook: verify, de-duplicate, act. 400 for a bad signature, 500 for a real failure (Stripe retries), 200 otherwise. */
@@ -362,14 +593,17 @@ export class Payments {
   }
 
   /**
-   * Adds the webhook routes to the app's router. Events the library doesn't handle, or for objects
-   * that aren't this app's checkouts, go to onUnhandledStripeEvent when given (ed-market: bid payments).
+   * Adds the webhook routes to the app's router, each only when its processor's keys exist. Runs the
+   * keys' start-up checks first (fromEnv): a live deployment set up wrongly fails to load. Events the
+   * library doesn't know, or for objects that aren't this app's, go to onUnhandledStripeEvent.
    */
   registerRoutes(http: HttpRouter, o: { stripePath?: string; paypalPath?: string; onUnhandledStripeEvent?: UnhandledStripeEvent } = {}) {
-    if (this.options.stripe) {
+    this.options.stripe?.check?.()
+    this.options.paypal?.check?.()
+    if (this.options.stripe?.()) {
       http.route({ path: o.stripePath ?? '/stripe/webhook', method: 'POST', handler: httpActionGeneric(async (ctx, req) => await this.handleStripeWebhook(ctx, req, o.onUnhandledStripeEvent)) })
     }
-    if (this.options.paypal) {
+    if (this.options.paypal?.()) {
       http.route({ path: o.paypalPath ?? '/paypal/webhook', method: 'POST', handler: httpActionGeneric(async (ctx, req) => await this.handlePaypalWebhook(ctx, req)) })
     }
   }
@@ -451,28 +685,32 @@ export class Payments {
   // ── Upkeep ────────────────────────────────────────────────────────────────────────────────────
 
   /**
-   * For a cron every 10 minutes. PayPal checkouts pending over 5 minutes: captured if the buyer
-   * approved (they may have closed the tab: fix a), abandoned once expired. Expired Stripe sessions:
-   * settled if paid, else expired at Stripe and abandoned. Refunds left sending over 10 minutes:
-   * asked about (or sent again, safely, under the same key).
+   * Every 10 minutes (registerCrons). PayPal checkouts pending over 5 minutes: captured if the buyer
+   * approved (they may have closed the tab: fix a), abandoned once expired. Expired Stripe sessions
+   * and on-session payments: settled if paid, else ended at Stripe and abandoned. Off-session charges
+   * whose outcome never came back: asked again. Refunds left sending over 10 minutes: asked about
+   * (or sent again, safely, under the same key).
    */
-  async sweep(ctx: RunActionCtx): Promise<{ checked: number; settled: number; abandoned: number; refunds: number; errors: number }> {
+  async sweep(ctx: RunActionCtx & { scheduler: Scheduler }): Promise<{ checked: number; settled: number; abandoned: number; refunds: number; errors: number }> {
     const now = Date.now()
     const out = { checked: 0, settled: 0, abandoned: 0, refunds: 0, errors: 0 }
     for (const c of await ctx.runQuery(this.component.checkouts.due, { limit: 200 })) {
       if (c.app !== this.app || c.status === 'processing') continue
       const expired = c.expiresAt <= now
-      if (!expired && !(c.processor === 'paypal' && c.status === 'pending' && c.createdAt <= now - PAYPAL_LOOK_AFTER_MS)) continue
-      out.checked++
+      const look = c.kind === 'offSession' ? true : expired || (c.processor === 'paypal' && c.status === 'pending' && c.createdAt <= now - PAYPAL_LOOK_AFTER_MS)
+      if (!look) continue
       try {
         const before = c.status
-        await this.sweepOne(ctx, c, expired)
+        const acted = c.kind === 'hosted' ? (await this.sweepOne(ctx, c, expired), true) : await sweepIntent(this, ctx, c, expired, now)
+        if (!acted) continue
+        out.checked++
         const after = (await ctx.runQuery(this.component.checkouts.get, { id: c.id }))?.status
         if (after && after !== before) {
           if (after === 'abandoned') out.abandoned++
           else out.settled++
         }
       } catch (err) {
+        out.checked++
         out.errors++
         console.error(`payments: sweep of checkout ${c.id} failed: ${errorText(err)}`)
       }
@@ -489,7 +727,7 @@ export class Payments {
     return out
   }
 
-  private async sweepOne(ctx: RunActionCtx, c: NonNullable<CheckoutView>, expired: boolean) {
+  private async sweepOne(ctx: RunActionCtx, c: Checkout, expired: boolean) {
     const abandon = () => ctx.runMutation(this.component.checkouts.abandon, { id: c.id, now: Date.now() })
     if (!c.processorCheckoutId) return expired ? await abandon() : null
     if (c.processor === 'paypal') {
@@ -547,31 +785,33 @@ export class Payments {
   }
 
   /**
-   * For a nightly cron: compares the last `days` of checkouts and refunds with each processor and
-   * opens an issue for each difference (resolving ones that went away). Refunds found at the
-   * processor that the ledger lacks are recorded. PayPal's Transaction Search, for captures tagged
-   * with this app that the component never heard of, is skipped (logged once a day) when PayPal
-   * refuses it.
+   * Nightly (registerCrons): compares the last `days` of checkouts, saved-method charges and refunds
+   * with each processor and opens an issue for each difference (resolving ones that went away).
+   * Refunds found at the processor that the ledger lacks are recorded. PayPal's Transaction Search,
+   * for captures tagged with this app that the component never heard of, is skipped (logged once a
+   * day) when PayPal refuses it.
    */
   async reconcile(ctx: RunActionCtx, o: { days?: number } = {}): Promise<ReconcileResult> {
     return await reconcile(this, ctx, o.days ?? 3)
   }
 
-  /** For the app's nightly cleanup: deletes what isn't kept (see the component's maintenance.ts), a batch at a time; call again while `more`. */
+  /** Nightly: deletes what isn't kept (see the component's maintenance.ts), a batch at a time; call again while `more`. */
   async cleanup(ctx: RunMutationCtx): Promise<{ deleted: number; more: boolean }> {
     return await ctx.runMutation(this.component.maintenance.cleanup, { now: Date.now() })
   }
 
+  /** Nightly: hands the issues nobody was told about yet to the app's on.issues, then marks them told. Returns how many. */
+  async issuesDigest(ctx: RunMutationCtx): Promise<number> {
+    const issues = await ctx.runQuery(this.component.issues.unreported, {})
+    if (!issues.length) return 0
+    await ctx.runMutation(this.wiring.on.issues, {
+      issues: issues.map((i) => ({ id: i.id, kind: i.kind, detail: i.detail, checkoutId: i.checkoutId, processor: i.processor, openedAt: i.openedAt })),
+    })
+    await ctx.runMutation(this.component.issues.markReported, { ids: issues.map((i) => i.id), now: Date.now() })
+    return issues.length
+  }
+
   // ── Issues ────────────────────────────────────────────────────────────────────────────────────
-
-  /** Issues nobody was told about yet, for the app's digest email; mark them after sending. */
-  async unreportedIssues(ctx: RunQueryCtx) {
-    return await ctx.runQuery(this.component.issues.unreported, {})
-  }
-
-  async markReported(ctx: RunMutationCtx, ids: string[]): Promise<void> {
-    await ctx.runMutation(this.component.issues.markReported, { ids, now: Date.now() })
-  }
 
   async issues(ctx: RunQueryCtx, o: { open: boolean; paginationOpts: PaginationOptions }) {
     return await ctx.runQuery(this.component.issues.list, o)
@@ -593,32 +833,50 @@ export class Payments {
     await ctx.runMutation(this.component.settings.update, s)
   }
 
-  /**
-   * The internal functions an app's crons call: `export const { sweep, reconcile, cleanup } = payments.worker()`
-   * in convex/paymentsWorker.ts, then crons.interval('payments sweep', { minutes: 10 }, internal.paymentsWorker.sweep).
-   */
+  // ── What the app exports ──────────────────────────────────────────────────────────────────────
+
+  /** The internal functions for the crons and scheduled charges: `export const { sweep, reconcile, cleanup, issuesDigest, charge } = payments.worker()`. */
   worker() {
-    return {
-      sweep: internalActionGeneric({
-        args: {},
-        returns: v.null(),
-        handler: async (ctx): Promise<null> => {
-          await this.sweep(ctx)
-          return null
-        },
-      }),
-      reconcile: internalActionGeneric({
-        args: { days: v.optional(v.number()) },
-        returns: v.null(),
-        handler: async (ctx, { days }): Promise<null> => {
-          await this.reconcile(ctx, { days })
-          return null
-        },
-      }),
-      cleanup: internalMutationGeneric({ args: {}, returns: v.object({ deleted: v.number(), more: v.boolean() }), handler: async (ctx) => await this.cleanup(ctx) }),
-    }
+    return worker(this)
+  }
+
+  /**
+   * Public queries, mutations and actions for an admin page (refunds, issues, charges with an unknown
+   * outcome), each behind authorize.admin: `export const admin = payments.adminApi()`.
+   */
+  adminApi(o: AdminApiOptions = {}) {
+    return adminApi(this, o)
+  }
+
+  /** The buyer-facing functions, rate-limited: `export const { completeReturn } = payments.publicApi()`. */
+  publicApi() {
+    return publicApi(this)
+  }
+
+  /**
+   * The library's crons, on the app's cron table: sweep every 10 minutes; reconcile, the issues digest
+   * and cleanup nightly (UTC hours; reconcile first, the digest half an hour after).
+   */
+  registerCrons(crons: Crons, o: { reconcileHourUTC?: number; cleanupHourUTC?: number } = {}) {
+    const w = this.wiring.worker
+    const h = o.reconcileHourUTC ?? 8
+    crons.interval('payments sweep', { minutes: 10 }, w.sweep, {})
+    crons.daily('payments reconcile', { hourUTC: h, minuteUTC: 0 }, w.reconcile, {})
+    crons.daily('payments issues digest', { hourUTC: h, minuteUTC: 30 }, w.issuesDigest, {})
+    crons.daily('payments cleanup', { hourUTC: o.cleanupHourUTC ?? (h + 1) % 24, minuteUTC: 0 }, w.cleanup, {})
   }
 }
 
+const defaultSiteUrl = () => {
+  const url = typeof process === 'undefined' ? undefined : process.env.SITE_URL
+  if (!url) throw new Error('SITE_URL isn’t set on this deployment (or pass siteUrl to definePayments).')
+  return url
+}
+
+const cleanPayer = (p: Payer): Payer => ({ email: p.email.trim(), ...(p.name?.trim() ? { name: p.name.trim() } : {}) })
+
 /** The idempotency key of a refund's send: the same for every repeat of one attempt (component refunds.begin makes the same). */
 export const refundKey = (refundId: string, attempts: number) => (attempts ? `refund-${refundId}-${attempts}` : `refund-${refundId}`)
+
+/** For the validators of the app's worker functions. */
+export const workerArgs = { charge: { checkoutId: v.string(), manual: v.optional(v.boolean()) } }

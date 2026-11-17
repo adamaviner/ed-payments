@@ -60,24 +60,29 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           },
         Name
       >;
-      byPaymentRef: FunctionReference<
+      byChargeKey: FunctionReference<
         "query",
         "internal",
-        { paymentRef: string },
+        { chargeKey: string },
         {
           amountCents: number;
           app: string;
           cancelUrl: string;
+          chargeAttempts: number;
+          chargeKey: string | null;
           context: any;
           createdAt: number;
           description: string;
           disputed: boolean;
           expiresAt: number;
           id: string;
+          kind: "hosted" | "offSession" | "onSession";
           lastError: string | null;
+          lastTriedAt: number | null;
           method: "card" | "ach" | "paypal";
           paidCents: number | null;
           payer: { email: string; name?: string };
+          paymentMethodId: string | null;
           paymentRef: string | null;
           processor: "stripe" | "paypal";
           processorCheckoutId: string | null;
@@ -85,6 +90,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           purpose: string;
           ref: { id: string; type: string };
           refundedCents: number;
+          retryOf: string | null;
           returnUrl: string;
           settledAt: number | null;
           status:
@@ -95,6 +101,52 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             | "failed"
             | "abandoned"
             | "refund_needed";
+          stripeCustomerId: string | null;
+        } | null,
+        Name
+      >;
+      byPaymentRef: FunctionReference<
+        "query",
+        "internal",
+        { paymentRef: string },
+        {
+          amountCents: number;
+          app: string;
+          cancelUrl: string;
+          chargeAttempts: number;
+          chargeKey: string | null;
+          context: any;
+          createdAt: number;
+          description: string;
+          disputed: boolean;
+          expiresAt: number;
+          id: string;
+          kind: "hosted" | "offSession" | "onSession";
+          lastError: string | null;
+          lastTriedAt: number | null;
+          method: "card" | "ach" | "paypal";
+          paidCents: number | null;
+          payer: { email: string; name?: string };
+          paymentMethodId: string | null;
+          paymentRef: string | null;
+          processor: "stripe" | "paypal";
+          processorCheckoutId: string | null;
+          processorFeeCents: number | null;
+          purpose: string;
+          ref: { id: string; type: string };
+          refundedCents: number;
+          retryOf: string | null;
+          returnUrl: string;
+          settledAt: number | null;
+          status:
+            | "created"
+            | "pending"
+            | "processing"
+            | "paid"
+            | "failed"
+            | "abandoned"
+            | "refund_needed";
+          stripeCustomerId: string | null;
         } | null,
         Name
       >;
@@ -106,16 +158,21 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           amountCents: number;
           app: string;
           cancelUrl: string;
+          chargeAttempts: number;
+          chargeKey: string | null;
           context: any;
           createdAt: number;
           description: string;
           disputed: boolean;
           expiresAt: number;
           id: string;
+          kind: "hosted" | "offSession" | "onSession";
           lastError: string | null;
+          lastTriedAt: number | null;
           method: "card" | "ach" | "paypal";
           paidCents: number | null;
           payer: { email: string; name?: string };
+          paymentMethodId: string | null;
           paymentRef: string | null;
           processor: "stripe" | "paypal";
           processorCheckoutId: string | null;
@@ -123,6 +180,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           purpose: string;
           ref: { id: string; type: string };
           refundedCents: number;
+          retryOf: string | null;
           returnUrl: string;
           settledAt: number | null;
           status:
@@ -133,6 +191,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             | "failed"
             | "abandoned"
             | "refund_needed";
+          stripeCustomerId: string | null;
         } | null,
         Name
       >;
@@ -144,16 +203,21 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           amountCents: number;
           app: string;
           cancelUrl: string;
+          chargeAttempts: number;
+          chargeKey: string | null;
           context: any;
           createdAt: number;
           description: string;
           disputed: boolean;
           expiresAt: number;
           id: string;
+          kind: "hosted" | "offSession" | "onSession";
           lastError: string | null;
+          lastTriedAt: number | null;
           method: "card" | "ach" | "paypal";
           paidCents: number | null;
           payer: { email: string; name?: string };
+          paymentMethodId: string | null;
           paymentRef: string | null;
           processor: "stripe" | "paypal";
           processorCheckoutId: string | null;
@@ -161,6 +225,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           purpose: string;
           ref: { id: string; type: string };
           refundedCents: number;
+          retryOf: string | null;
           returnUrl: string;
           settledAt: number | null;
           status:
@@ -171,6 +236,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             | "failed"
             | "abandoned"
             | "refund_needed";
+          stripeCustomerId: string | null;
         }>,
         Name
       >;
@@ -184,26 +250,32 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             onDispute?: string;
             onFailed?: string;
             onPaid?: string;
+            onProcessing?: string;
             onRefundNeeded?: string;
             onRefunded?: string;
           };
           cancelUrl: string;
+          chargeKey?: string;
           context?: any;
           description: string;
           expiresAt: number;
-          limit?: {
-            globalPerMinute: number;
-            key?: string;
-            perKey: number;
+          kind?: "hosted" | "offSession" | "onSession";
+          limits?: Array<{
+            key: string;
+            max: number;
+            message: string;
             windowMs: number;
-          };
+          }>;
           method: "card" | "ach" | "paypal";
           now: number;
           payer: { email: string; name?: string };
+          paymentMethodId?: string;
           processor: "stripe" | "paypal";
           purpose: string;
           ref: { id: string; type: string };
+          retryOf?: string;
           returnUrl: string;
+          stripeCustomerId?: string;
         },
         string,
         Name
@@ -216,16 +288,21 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           amountCents: number;
           app: string;
           cancelUrl: string;
+          chargeAttempts: number;
+          chargeKey: string | null;
           context: any;
           createdAt: number;
           description: string;
           disputed: boolean;
           expiresAt: number;
           id: string;
+          kind: "hosted" | "offSession" | "onSession";
           lastError: string | null;
+          lastTriedAt: number | null;
           method: "card" | "ach" | "paypal";
           paidCents: number | null;
           payer: { email: string; name?: string };
+          paymentMethodId: string | null;
           paymentRef: string | null;
           processor: "stripe" | "paypal";
           processorCheckoutId: string | null;
@@ -233,6 +310,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           purpose: string;
           ref: { id: string; type: string };
           refundedCents: number;
+          retryOf: string | null;
           returnUrl: string;
           settledAt: number | null;
           status:
@@ -243,6 +321,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             | "failed"
             | "abandoned"
             | "refund_needed";
+          stripeCustomerId: string | null;
         }>,
         Name
       >;
@@ -254,16 +333,21 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           amountCents: number;
           app: string;
           cancelUrl: string;
+          chargeAttempts: number;
+          chargeKey: string | null;
           context: any;
           createdAt: number;
           description: string;
           disputed: boolean;
           expiresAt: number;
           id: string;
+          kind: "hosted" | "offSession" | "onSession";
           lastError: string | null;
+          lastTriedAt: number | null;
           method: "card" | "ach" | "paypal";
           paidCents: number | null;
           payer: { email: string; name?: string };
+          paymentMethodId: string | null;
           paymentRef: string | null;
           processor: "stripe" | "paypal";
           processorCheckoutId: string | null;
@@ -271,6 +355,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           purpose: string;
           ref: { id: string; type: string };
           refundedCents: number;
+          retryOf: string | null;
           returnUrl: string;
           settledAt: number | null;
           status:
@@ -281,6 +366,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             | "failed"
             | "abandoned"
             | "refund_needed";
+          stripeCustomerId: string | null;
         }>,
         Name
       >;
@@ -299,16 +385,21 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           amountCents: number;
           app: string;
           cancelUrl: string;
+          chargeAttempts: number;
+          chargeKey: string | null;
           context: any;
           createdAt: number;
           description: string;
           disputed: boolean;
           expiresAt: number;
           id: string;
+          kind: "hosted" | "offSession" | "onSession";
           lastError: string | null;
+          lastTriedAt: number | null;
           method: "card" | "ach" | "paypal";
           paidCents: number | null;
           payer: { email: string; name?: string };
+          paymentMethodId: string | null;
           paymentRef: string | null;
           processor: "stripe" | "paypal";
           processorCheckoutId: string | null;
@@ -316,6 +407,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           purpose: string;
           ref: { id: string; type: string };
           refundedCents: number;
+          retryOf: string | null;
           returnUrl: string;
           settledAt: number | null;
           status:
@@ -326,6 +418,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             | "failed"
             | "abandoned"
             | "refund_needed";
+          stripeCustomerId: string | null;
         } | null,
         Name
       >;
@@ -349,16 +442,21 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             amountCents: number;
             app: string;
             cancelUrl: string;
+            chargeAttempts: number;
+            chargeKey: string | null;
             context: any;
             createdAt: number;
             description: string;
             disputed: boolean;
             expiresAt: number;
             id: string;
+            kind: "hosted" | "offSession" | "onSession";
             lastError: string | null;
+            lastTriedAt: number | null;
             method: "card" | "ach" | "paypal";
             paidCents: number | null;
             payer: { email: string; name?: string };
+            paymentMethodId: string | null;
             paymentRef: string | null;
             processor: "stripe" | "paypal";
             processorCheckoutId: string | null;
@@ -366,6 +464,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             purpose: string;
             ref: { id: string; type: string };
             refundedCents: number;
+            retryOf: string | null;
             returnUrl: string;
             settledAt: number | null;
             status:
@@ -376,6 +475,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
               | "failed"
               | "abandoned"
               | "refund_needed";
+            stripeCustomerId: string | null;
           }>;
           pageStatus?: "SplitRecommended" | "SplitRequired" | null;
           splitCursor?: string | null;
@@ -385,7 +485,12 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
       markProcessing: FunctionReference<
         "mutation",
         "internal",
-        { id: string; paymentRef?: string },
+        {
+          id: string;
+          method?: "card" | "ach" | "paypal";
+          now?: number;
+          paymentRef?: string;
+        },
         | { outcome: "processing" }
         | {
             outcome: "already_handled";
@@ -398,6 +503,26 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
               | "abandoned"
               | "refund_needed";
           },
+        Name
+      >;
+      noteChargeAttempt: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          error: string;
+          giveUp: boolean;
+          id: string;
+          now: number;
+          processorCheckoutId?: string;
+        },
+        number,
+        Name
+      >;
+      noteError: FunctionReference<
+        "mutation",
+        "internal",
+        { error: string; id: string },
+        null,
         Name
       >;
       noteIssue: FunctionReference<
@@ -419,10 +544,129 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         null,
         Name
       >;
+      refundable: FunctionReference<
+        "query",
+        "internal",
+        {
+          paginationOpts: {
+            cursor: string | null;
+            endCursor?: string | null;
+            id?: number;
+            maximumBytesRead?: number;
+            maximumRowsRead?: number;
+            numItems: number;
+          };
+          ref?: { id: string; type: string };
+        },
+        {
+          continueCursor: string;
+          isDone: boolean;
+          page: Array<{
+            amountCents: number;
+            app: string;
+            cancelUrl: string;
+            chargeAttempts: number;
+            chargeKey: string | null;
+            context: any;
+            createdAt: number;
+            description: string;
+            disputed: boolean;
+            expiresAt: number;
+            id: string;
+            kind: "hosted" | "offSession" | "onSession";
+            lastError: string | null;
+            lastTriedAt: number | null;
+            method: "card" | "ach" | "paypal";
+            paidCents: number | null;
+            payer: { email: string; name?: string };
+            paymentMethodId: string | null;
+            paymentRef: string | null;
+            processor: "stripe" | "paypal";
+            processorCheckoutId: string | null;
+            processorFeeCents: number | null;
+            purpose: string;
+            ref: { id: string; type: string };
+            refundedCents: number;
+            retryOf: string | null;
+            returnUrl: string;
+            settledAt: number | null;
+            status:
+              | "created"
+              | "pending"
+              | "processing"
+              | "paid"
+              | "failed"
+              | "abandoned"
+              | "refund_needed";
+            stripeCustomerId: string | null;
+          }>;
+          pageStatus?: "SplitRecommended" | "SplitRequired" | null;
+          splitCursor?: string | null;
+        },
+        Name
+      >;
+      reopenCharge: FunctionReference<
+        "mutation",
+        "internal",
+        { id: string; now: number },
+        null,
+        Name
+      >;
+      retriesOf: FunctionReference<
+        "query",
+        "internal",
+        { id: string },
+        Array<{
+          amountCents: number;
+          app: string;
+          cancelUrl: string;
+          chargeAttempts: number;
+          chargeKey: string | null;
+          context: any;
+          createdAt: number;
+          description: string;
+          disputed: boolean;
+          expiresAt: number;
+          id: string;
+          kind: "hosted" | "offSession" | "onSession";
+          lastError: string | null;
+          lastTriedAt: number | null;
+          method: "card" | "ach" | "paypal";
+          paidCents: number | null;
+          payer: { email: string; name?: string };
+          paymentMethodId: string | null;
+          paymentRef: string | null;
+          processor: "stripe" | "paypal";
+          processorCheckoutId: string | null;
+          processorFeeCents: number | null;
+          purpose: string;
+          ref: { id: string; type: string };
+          refundedCents: number;
+          retryOf: string | null;
+          returnUrl: string;
+          settledAt: number | null;
+          status:
+            | "created"
+            | "pending"
+            | "processing"
+            | "paid"
+            | "failed"
+            | "abandoned"
+            | "refund_needed";
+          stripeCustomerId: string | null;
+        }>,
+        Name
+      >;
       settleFailed: FunctionReference<
         "mutation",
         "internal",
-        { id: string; now: number; reason: string },
+        {
+          declined?: boolean;
+          id: string;
+          now: number;
+          processorCheckoutId?: string;
+          reason: string;
+        },
         | { outcome: "failed" }
         | {
             outcome: "already_handled";
@@ -442,6 +686,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         "internal",
         {
           id: string;
+          method?: "card" | "ach" | "paypal";
           now: number;
           paidCents: number;
           paymentRef: string;
@@ -461,6 +706,62 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
               | "abandoned"
               | "refund_needed";
           },
+        Name
+      >;
+    };
+    customers: {
+      byOwner: FunctionReference<
+        "query",
+        "internal",
+        { app: string; owner: { id: string; type: string } },
+        { email: string; id: string; stripeCustomerId: string } | null,
+        Name
+      >;
+      method: FunctionReference<
+        "query",
+        "internal",
+        { stripePaymentMethodId: string },
+        {
+          declineReason: string | null;
+          declined: boolean;
+          kind: "card" | "ach";
+          label: string;
+          stripePaymentMethodId: string;
+        } | null,
+        Name
+      >;
+      save: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          app: string;
+          email: string;
+          now: number;
+          owner: { id: string; type: string };
+          stripeCustomerId: string;
+        },
+        { email: string; id: string; stripeCustomerId: string },
+        Name
+      >;
+      saveMethods: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          methods: Array<{
+            kind: "card" | "ach";
+            label: string;
+            stripePaymentMethodId: string;
+          }>;
+          now: number;
+          stripeCustomerId: string;
+        },
+        Array<{
+          declineReason: string | null;
+          declined: boolean;
+          kind: "card" | "ach";
+          label: string;
+          stripePaymentMethodId: string;
+        }>,
         Name
       >;
     };
@@ -536,7 +837,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
               | "amount_differs"
               | "status_differs"
               | "dispute"
-              | "callback_failed";
+              | "callback_failed"
+              | "charge_unknown";
             openedAt: number;
             paymentRef: string | null;
             processor: "stripe" | "paypal";
@@ -611,13 +913,31 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             | "amount_differs"
             | "status_differs"
             | "dispute"
-            | "callback_failed";
+            | "callback_failed"
+            | "charge_unknown";
           openedAt: number;
           paymentRef: string | null;
           processor: "stripe" | "paypal";
           reportedAt: number | null;
           resolvedAt: number | null;
         }>,
+        Name
+      >;
+    };
+    limits: {
+      take: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          limits: Array<{
+            key: string;
+            max: number;
+            message: string;
+            windowMs: number;
+          }>;
+          now: number;
+        },
+        null,
         Name
       >;
     };

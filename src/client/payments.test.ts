@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { app, defined } from '../testing/app.js'
 import { fakePaypal, type FakePaypal } from '../testing/fakePaypal.js'
 import { fakeStripe, type FakeStripe } from '../testing/fakeStripe.js'
+import { stripeEvent } from '../testing/fixtures.js'
 
 const { api, internal, createTest } = defined
 const MIN = 60_000
@@ -106,10 +107,13 @@ describe('Stripe checkouts', () => {
     expect((await calls('unhandledStripe')).map((c) => c.args.type)).toEqual(['checkout.session.completed', 'checkout.session.completed'])
   })
 
-  test('events the library doesn’t handle (bid PaymentIntents) go to the host’s handler', async () => {
+  test('events for objects that aren’t this app’s (an untagged PaymentIntent), or of kinds the library doesn’t know, go to the host’s handler', async () => {
     const { post, calls } = setup()
-    expect(await post('/stripe/webhook', await stripe.event('payment_intent.succeeded'))).toEqual({ status: 200, text: 'ignored' })
-    expect((await calls('unhandledStripe'))[0].args).toMatchObject({ type: 'payment_intent.succeeded' })
+    expect(await post('/stripe/webhook', await stripe.event('payment_intent.succeeded', { metadata: { bidId: 'b1' } }))).toEqual({ status: 200, text: 'foreign' })
+    const other = stripeEvent('payment_intent.succeeded', { metadata: { app: 'test' } })
+    other.type = 'customer.created'
+    expect(await post('/stripe/webhook', await stripe.webhook(other))).toEqual({ status: 200, text: 'ignored' })
+    expect((await calls('unhandledStripe')).map((c) => c.args.type)).toEqual(['payment_intent.succeeded', 'customer.created'])
   })
 
   test('bank transfer: accepted (processing), then paid; or bounced (failed, onFailed)', async () => {
@@ -172,7 +176,7 @@ describe('Stripe checkouts', () => {
     await expect(buy({ processor: 'stripe', method: 'paypal' })).rejects.toThrow(/doesn’t take paypal/)
     await expect(buy({ processor: 'paypal', method: 'ach' })).rejects.toThrow(/doesn’t take ach/)
     for (let i = 0; i < 3; i++) await buy({ processor: 'stripe', method: 'card', email: 'eve@example.org' })
-    await expect(buy({ processor: 'stripe', method: 'card', email: 'eve@example.org' })).rejects.toThrow(/Too many checkouts/)
+    await expect(buy({ processor: 'stripe', method: 'card', email: 'eve@example.org' })).rejects.toThrow(/Too many tries/)
   })
 })
 

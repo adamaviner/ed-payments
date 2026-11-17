@@ -99,7 +99,7 @@ export async function paypalToken(keys: Pick<PaypalKeys, 'clientId' | 'clientSec
 export async function paypalCall<T>(
   apiBase: string,
   token: string,
-  method: 'GET' | 'POST',
+  method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
   path: string,
   body: unknown,
   o: PaypalOptions & { requestId?: string; representation?: boolean; rawBody?: string },
@@ -181,7 +181,45 @@ export const paypal = {
       { ...opts(c), requestId, representation: true },
     ),
   getRefund: (c: Call, id: string) => paypalCall<PaypalRefund>(c.apiBase, c.token, 'GET', `/v2/payments/refunds/${encodeURIComponent(id)}`, undefined, opts(c)),
+
+  // Webhooks Management v1 (https://developer.paypal.com/docs/api/webhooks/v1/). An app may have ten webhooks.
+  listWebhooks: (c: Call) => paypalCall<{ webhooks?: PaypalWebhook[] }>(c.apiBase, c.token, 'GET', '/v1/notifications/webhooks', undefined, opts(c)),
+  createWebhook: (c: Call, url: string, events: readonly string[]) =>
+    paypalCall<PaypalWebhook>(c.apiBase, c.token, 'POST', '/v1/notifications/webhooks', { url, event_types: events.map((name) => ({ name })) }, opts(c)),
+  /** Only `replace` of /url and /event_types is allowed; the same list again answers 400 WEBHOOK_PATCH_REQUEST_NO_CHANGE. */
+  setWebhookEvents: (c: Call, id: string, events: readonly string[]) =>
+    paypalCall<PaypalWebhook>(
+      c.apiBase,
+      c.token,
+      'PATCH',
+      `/v1/notifications/webhooks/${encodeURIComponent(id)}`,
+      [{ op: 'replace', path: '/event_types', value: events.map((name) => ({ name })) }],
+      opts(c),
+    ),
+  deleteWebhook: (c: Call, id: string) => paypalCall<null>(c.apiBase, c.token, 'DELETE', `/v1/notifications/webhooks/${encodeURIComponent(id)}`, undefined, opts(c)),
 }
+
+export interface PaypalWebhook {
+  id: string
+  url: string
+  event_types: { name: string }[]
+}
+
+/**
+ * Every PayPal event the library acts on; the webhook is registered with exactly these. DECLINED is
+ * the v2 capture failure and DENIED the v1 one; both are taken.
+ */
+export const PAYPAL_EVENTS = [
+  'CHECKOUT.ORDER.APPROVED',
+  'PAYMENT.CAPTURE.COMPLETED',
+  'PAYMENT.CAPTURE.PENDING',
+  'PAYMENT.CAPTURE.DECLINED',
+  'PAYMENT.CAPTURE.DENIED',
+  'PAYMENT.CAPTURE.REFUNDED',
+  'PAYMENT.CAPTURE.REVERSED',
+  'CUSTOMER.DISPUTE.CREATED',
+  'CUSTOMER.DISPUTE.RESOLVED',
+] as const
 
 /** The capture of a captured order (the first unit's first capture). */
 export function orderCapture(order: PaypalOrder): PaypalCapture | null {

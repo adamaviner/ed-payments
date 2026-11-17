@@ -2,7 +2,7 @@
 // difference opens an issue (one per payment and kind) and a difference that has gone away resolves
 // it. Refunds found at Stripe that the ledger lacks are recorded on the way (a missed webhook heals).
 import { orderCapture, moneyCents, paypal, searchTransactions, type PaypalOrder } from '../core/paypal.js'
-import { paymentIntentId, sessionState, stripe, type StripeRefund, type StripeSession } from '../core/stripe.js'
+import { intentState, paymentIntentId, sessionState, stripe, type StripePaymentIntent, type StripeRefund, type StripeSession } from '../core/stripe.js'
 import { ProcessorError, parseTag, type Processor } from '../core/types.js'
 import type { CheckoutView, Payments, RunActionCtx } from './index.js'
 import { errorText, stripeRefundState } from './util.js'
@@ -107,12 +107,45 @@ async function stripeSide(p: Payments, ctx: RunActionCtx, since: number, ours: C
     }
     await sync('stripe', c?.paymentRef ?? pi ?? s.id, c, found)
   }
+  await stripeIntents(p, ctx, sinceSec, out, sync, seen)
   for (const c of ours) {
     if (c.processor !== 'stripe' || seen.has(c.id) || !(isPaidHere(c) || c.status === 'processing')) continue
     out.checked++
-    await sync('stripe', c.paymentRef ?? c.processorCheckoutId ?? c.id, c, [{ kind: 'missing_there', detail: `${c.description} is ${c.status} here, but Stripe has no such session for this app.` }])
+    const what = c.kind === 'hosted' ? 'session' : 'PaymentIntent'
+    await sync('stripe', c.paymentRef ?? c.processorCheckoutId ?? c.id, c, [{ kind: 'missing_there', detail: `${c.description} is ${c.status} here, but Stripe has no such ${what} for this app.` }])
   }
   await stripeRefunds(p, ctx, sinceSec, out, sync)
+}
+
+/**
+ * Saved-method charges and on-session payments: PaymentIntents tagged for this app that aren't a
+ * hosted checkout's (those are compared through their sessions).
+ */
+async function stripeIntents(p: Payments, ctx: RunActionCtx, sinceSec: number, out: ReconcileResult, sync: Sync, seen: Set<string>) {
+  const keys = p.stripeKeys()
+  const intents: StripePaymentIntent[] = []
+  let after: string | undefined
+  for (let i = 0; i < MAX_PAGES; i++) {
+    const page = await stripe.listPaymentIntents(keys, sinceSec, after, { fetch: p.fetch })
+    intents.push(...page.data.filter((pi) => pi.metadata?.app === p.app && pi.metadata.checkoutId))
+    if (!page.has_more || !page.data.length) break
+    after = page.data[page.data.length - 1].id
+  }
+  for (const pi of intents) {
+    const c = await ctx.runQuery(p.component.checkouts.get, { id: pi.metadata?.checkoutId ?? '' })
+    if (c?.kind === 'hosted') continue
+    const state = intentState(pi)
+    // A refused or abandoned try that left nothing paid: nothing to compare.
+    if (!c && state !== 'paid' && state !== 'processing') continue
+    out.checked++
+    if (c) seen.add(c.id)
+    const found: Finding[] = []
+    if (!c) found.push({ kind: 'missing_here', detail: `Stripe has a ${state} payment of ${dollars(pi.amount)} (PaymentIntent ${pi.id}) that isn’t recorded here.` })
+    else if (state === 'paid' && !isPaidHere(c)) found.push({ kind: 'status_differs', detail: `Stripe says ${c.description} was paid; here it is ${c.status}.` })
+    else if (isPaidHere(c) && state !== 'paid') found.push({ kind: 'status_differs', detail: `${c.description} is ${c.status} here, but Stripe’s PaymentIntent is ${pi.status}.` })
+    else if (isPaidHere(c) && c.paidCents !== pi.amount_received) found.push({ kind: 'amount_differs', detail: `${c.description}: Stripe took ${dollars(pi.amount_received)}, here ${dollars(c.paidCents)}.` })
+    await sync('stripe', c?.paymentRef ?? pi.id, c, found)
+  }
 }
 
 /** Records refunds the ledger missed, then compares each touched payment's refunded total with Stripe's. */

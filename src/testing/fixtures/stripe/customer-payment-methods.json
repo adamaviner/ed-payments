@@ -1,0 +1,209 @@
+{
+  "_source": "Stripe test mode, API 2026-10-28.endive, GET /v1/customers/:id/payment_methods, captured 2026-11-17 by scripts/capture (scrubbed)",
+  "object": "list",
+  "data": [
+    {
+      "id": "pm_1UcsRZL4sVH3OBLn8lKDcNMI",
+      "object": "payment_method",
+      "allow_redisplay": "unspecified",
+      "billing_details": {
+        "address": {
+          "city": "city",
+          "country": "US",
+          "line1": "Test line1",
+          "line2": null,
+          "postal_code": "12345",
+          "state": "CA"
+        },
+        "email": "payer@example.org",
+        "name": "Created from pm_usBankAccount_success",
+        "phone": null,
+        "tax_id": null
+      },
+      "created": 1794945209,
+      "customer": "cus_VeAnCyTUNRwJxu",
+      "customer_account": null,
+      "livemode": false,
+      "metadata": {},
+      "shared_payment_granted_token": null,
+      "type": "us_bank_account",
+      "us_bank_account": {
+        "account_holder_type": "individual",
+        "account_type": "checking",
+        "bank_name": "STRIPE TEST BANK",
+        "financial_connections_account": null,
+        "fingerprint": "scrubbed",
+        "last4": "6789",
+        "networks": {
+          "preferred": "ach",
+          "supported": [
+            "ach"
+          ]
+        },
+        "routing_number": "110000000",
+        "status_details": {}
+      }
+    },
+    {
+      "id": "pm_1UcsRZL4sVH3OBLnkwQQtnkl",
+      "object": "payment_method",
+      "allow_redisplay": "unspecified",
+      "billing_details": {
+        "address": {
+          "city": null,
+          "country": null,
+          "line1": null,
+          "line2": null,
+          "postal_code": null,
+          "state": null
+        },
+        "email": null,
+        "name": null,
+        "phone": null,
+        "tax_id": null
+      },
+      "card": {
+        "brand": "visa",
+        "checks": {
+          "address_line1_check": null,
+          "address_postal_code_check": null,
+          "cvc_check": "pass"
+        },
+        "country": "DE",
+        "display_brand": "visa",
+        "exp_month": 11,
+        "exp_year": 2027,
+        "fingerprint": "scrubbed",
+        "funding": "credit",
+        "generated_from": null,
+        "last4": "3184",
+        "networks": {
+          "available": [
+            "visa"
+          ],
+          "preferred": null
+        },
+        "regulated_status": "unregulated",
+        "three_d_secure_usage": {
+          "supported": true
+        },
+        "wallet": null
+      },
+      "created": 1794945209,
+      "customer": "cus_VeAnCyTUNRwJxu",
+      "customer_account": null,
+      "livemode": false,
+      "metadata": {},
+      "shared_payment_granted_token": null,
+      "type": "card"
+    },
+    {
+      "id": "pm_1UcsRYL4sVH3OBLn261b2qSa",
+      "object": "payment_method",
+      "allow_redisplay": "unspecified",
+      "billing_details": {
+        "address": {
+          "city": null,
+          "country": null,
+          "line1": null,
+          "line2": null,
+          "postal_code": null,
+          "state": null
+        },
+        "email": null,
+        "name": null,
+        "phone": null,
+        "tax_id": null
+      },
+      "card": {
+        "brand": "visa",
+        "checks": {
+          "address_line1_check": null,
+          "address_postal_code_check": null,
+          "cvc_check": "pass"
+        },
+        "country": "US",
+        "display_brand": "visa",
+        "exp_month": 11,
+        "exp_year": 2027,
+        "fingerprint": "scrubbed",
+        "funding": "credit",
+        "generated_from": null,
+        "last4": "0341",
+        "networks": {
+          "available": [
+            "visa"
+          ],
+          "preferred": null
+        },
+        "regulated_status": "unregulated",
+        "three_d_secure_usage": {
+          "supported": true
+        },
+        "wallet": null
+      },
+      "created": 1794945209,
+      "customer": "cus_VeAnCyTUNRwJxu",
+      "customer_account": null,
+      "livemode": false,
+      "metadata": {},
+      "shared_payment_granted_token": null,
+      "type": "card"
+    },
+    {
+      "id": "pm_1UcsRYL4sVH3OBLntlTG79Ko",
+      "object": "payment_method",
+      "allow_redisplay": "unspecified",
+      "billing_details": {
+        "address": {
+          "city": null,
+          "country": null,
+          "line1": null,
+          "line2": null,
+          "postal_code": null,
+          "state": null
+        },
+        "email": null,
+        "name": null,
+        "phone": null,
+        "tax_id": null
+      },
+      "card": {
+        "brand": "visa",
+        "checks": {
+          "address_line1_check": null,
+          "address_postal_code_check": null,
+          "cvc_check": "pass"
+        },
+        "country": "US",
+        "display_brand": "visa",
+        "exp_month": 11,
+        "exp_year": 2027,
+        "fingerprint": "scrubbed",
+        "funding": "credit",
+        "generated_from": null,
+        "last4": "4242",
+        "networks": {
+          "available": [
+            "visa"
+          ],
+          "preferred": null
+        },
+        "regulated_status": "unregulated",
+        "three_d_secure_usage": {
+          "supported": true
+        },
+        "wallet": null
+      },
+      "created": 1794945208,
+      "customer": "cus_VeAnCyTUNRwJxu",
+      "customer_account": null,
+      "livemode": false,
+      "metadata": {},
+      "shared_payment_granted_token": null,
+      "type": "card"
+    }
+  ],
+  "has_more": false,
+  "url": "/v1/customers/cus_VeAnCyTUNRwJxu/payment_methods"
+}

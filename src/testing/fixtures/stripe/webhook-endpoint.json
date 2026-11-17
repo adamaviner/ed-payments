@@ -1,0 +1,18 @@
+{
+  "_source": "Documented sample: the webhook endpoint object from https://docs.stripe.com/api/webhook_endpoints/object (API 2026-10-28.endive); the test key has no Webhook Endpoints permission, so none could be captured",
+  "id": "we_1Mr5jULkdIwHu7ix1ibLTM0x",
+  "object": "webhook_endpoint",
+  "api_version": "2026-10-28.endive",
+  "application": null,
+  "created": 1680122196,
+  "description": "ed-payments",
+  "enabled_events": [
+    "charge.succeeded",
+    "charge.failed"
+  ],
+  "livemode": false,
+  "metadata": {},
+  "status": "enabled",
+  "url": "https://example.com/my/webhook/endpoint",
+  "secret": "whsec_scrubbed"
+}

@@ -1,0 +1,58 @@
+{
+  "_source": "Stripe test mode, API 2026-10-28.endive, POST /v1/setup_intents, captured 2026-11-17 by scripts/capture (scrubbed)",
+  "id": "seti_1UcsRaL4sVH3OBLnwGPqUELm",
+  "object": "setup_intent",
+  "allowed_payment_method_types": [
+    "card",
+    "us_bank_account"
+  ],
+  "application": null,
+  "automatic_payment_methods": null,
+  "cancellation_reason": null,
+  "client_secret": "<scrubbed>",
+  "created": 1794945210,
+  "customer": "cus_VeAnCyTUNRwJxu",
+  "customer_account": null,
+  "description": null,
+  "excluded_payment_method_types": null,
+  "flow_directions": null,
+  "last_setup_error": null,
+  "latest_attempt": null,
+  "livemode": false,
+  "managed_payments": {
+    "enabled": false
+  },
+  "mandate": null,
+  "metadata": {
+    "app": "test",
+    "owner": "user:fixture"
+  },
+  "next_action": null,
+  "on_behalf_of": null,
+  "payment_method": null,
+  "payment_method_configuration_details": null,
+  "payment_method_options": {
+    "card": {
+      "mandate_options": null,
+      "network": null,
+      "request_three_d_secure": "automatic"
+    },
+    "us_bank_account": {
+      "financial_connections": {
+        "permissions": [
+          "payment_method"
+        ],
+        "prefetch": []
+      },
+      "mandate_options": {},
+      "verification_method": "instant"
+    }
+  },
+  "payment_method_types": [
+    "card",
+    "us_bank_account"
+  ],
+  "single_use_mandate": null,
+  "status": "requires_payment_method",
+  "usage": "off_session"
+}

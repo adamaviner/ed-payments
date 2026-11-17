@@ -5,12 +5,13 @@
 import type { PaypalCapture, PaypalDispute, PaypalEvent, PaypalOrder, PaypalRefund } from '../core/paypal.js'
 import { captureOrderId, moneyCents, orderCustomId, parsePaypalEvent, refundCaptureId, verifyPaypalWebhook } from '../core/paypal.js'
 import type { StripeCharge, StripeDispute, StripeEvent, StripeRefund, StripeSession } from '../core/stripe.js'
-import { parseStripeEvent, paymentIntentId, stripe, verifyStripeSignature } from '../core/stripe.js'
+import { STRIPE_EVENTS, parseStripeEvent, paymentIntentId, stripe, verifyStripeSignature, type StripePaymentIntent } from '../core/stripe.js'
 import { parseTag } from '../core/types.js'
 import type { Payments, RunActionCtx } from './index.js'
+import { onIntentEvent } from './saved.js'
 import { errorText, paypalRefundState, stripeRefundState } from './util.js'
 
-/** What the app does with Stripe events the library doesn't handle (ed-market: its bid PaymentIntents). */
+/** What the app does with Stripe events the library doesn't know, or for objects that aren't this app's. */
 export type UnhandledStripeEvent = (ctx: RunActionCtx, event: StripeEvent) => Promise<void>
 
 type Outcome = 'handled' | 'ignored' | 'foreign'
@@ -40,16 +41,23 @@ export async function handleStripeWebhook(p: Payments, ctx: RunActionCtx, reques
   if (!event) return text(400, 'Not a Stripe event')
   return await once(p, ctx, 'stripe', event.id, event.type, async () => {
     const outcome = await actOnStripe(p, ctx, event)
-    if (outcome === 'handled' || !onUnhandled) return outcome
-    await onUnhandled(ctx, event)
+    // An event of a kind the library handles, for one of this app's objects, is the library's alone.
+    const ours = outcome === 'handled' || (outcome === 'ignored' && KNOWN.has(event.type))
+    if (!ours && onUnhandled) await onUnhandled(ctx, event)
     return outcome
   })
 }
+
+const KNOWN: ReadonlySet<string> = new Set(STRIPE_EVENTS)
 
 async function actOnStripe(p: Payments, ctx: RunActionCtx, event: StripeEvent): Promise<Outcome> {
   const object = event.data.object
   if (event.type.startsWith('checkout.session.')) return await onSession(p, ctx, event.type, object as unknown as StripeSession)
   switch (event.type) {
+    case 'payment_intent.succeeded':
+    case 'payment_intent.processing':
+    case 'payment_intent.payment_failed':
+      return await onIntentEvent(p, ctx, event.type, object as unknown as StripePaymentIntent)
     case 'charge.refunded':
       return await onChargeRefunded(p, ctx, object as unknown as StripeCharge)
     case 'refund.created':

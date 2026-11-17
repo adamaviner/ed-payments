@@ -25,7 +25,13 @@ export const callbacks = v.object({
   onRefunded: v.optional(v.string()),
   onRefundNeeded: v.optional(v.string()),
   onDispute: v.optional(v.string()),
+  onProcessing: v.optional(v.string()),
 })
+
+/** hosted: Stripe Checkout or PayPal. offSession: a saved method charged with nobody present. onSession: the buyer pays on the app's page. Unset on rows from v0.1: hosted. */
+export const checkoutKind = v.union(v.literal('hosted'), v.literal('offSession'), v.literal('onSession'))
+
+export const savedMethodKind = v.union(v.literal('card'), v.literal('ach'))
 
 export const refundOrigin = v.union(v.literal('requested'), v.literal('needed'), v.literal('external'))
 
@@ -37,7 +43,7 @@ export const refundStatus = v.union(v.literal('requested'), v.literal('approved'
 
 export const eventOutcome = v.union(v.literal('received'), v.literal('handled'), v.literal('ignored'), v.literal('foreign'))
 
-export const issueKind = v.union(v.literal('missing_here'), v.literal('missing_there'), v.literal('amount_differs'), v.literal('status_differs'), v.literal('dispute'), v.literal('callback_failed'))
+export const issueKind = v.union(v.literal('missing_here'), v.literal('missing_there'), v.literal('amount_differs'), v.literal('status_differs'), v.literal('dispute'), v.literal('callback_failed'), v.literal('charge_unknown'))
 
 export default defineSchema({
   checkouts: defineTable({
@@ -51,7 +57,19 @@ export default defineSchema({
     method,
     payer,
     status: checkoutStatus,
-    /** Stripe's Checkout Session id, or PayPal's order id. */
+    kind: v.optional(checkoutKind),
+    /** offSession and onSession: the Stripe Customer charged, and the saved method an offSession charge uses. */
+    stripeCustomerId: v.optional(v.string()),
+    paymentMethodId: v.optional(v.string()),
+    /** offSession: the app's idempotency key for the charge, so every retry of it replays one charge. */
+    chargeKey: v.optional(v.string()),
+    /** offSession: charge calls whose outcome was unknown (no answer, a 5xx), retried under the same key. */
+    chargeAttempts: v.optional(v.number()),
+    /** offSession: when the last of those was. */
+    lastTriedAt: v.optional(v.number()),
+    /** onSession: the checkout this one retries (a declined offSession charge). */
+    retryOf: v.optional(v.id('checkouts')),
+    /** Stripe's Checkout Session id, PayPal's order id, or (offSession, onSession) Stripe's PaymentIntent id. */
     processorCheckoutId: v.optional(v.string()),
     /** Stripe's PaymentIntent id, or PayPal's capture id: what refunds and disputes point at. */
     paymentRef: v.optional(v.string()),
@@ -74,7 +92,37 @@ export default defineSchema({
     .index('by_processorCheckoutId', ['processorCheckoutId'])
     .index('by_paymentRef', ['paymentRef'])
     .index('by_ref', ['ref.type', 'ref.id'])
-    .index('by_createdAt', ['createdAt']),
+    .index('by_createdAt', ['createdAt'])
+    .index('by_status_createdAt', ['status', 'createdAt'])
+    .index('by_retryOf', ['retryOf'])
+    .index('by_chargeKey', ['chargeKey']),
+
+  /** One Stripe Customer per payer of the app (owner: e.g. { type: 'user', id }), for saved payment methods. */
+  customers: defineTable({
+    app: v.string(),
+    owner: ref,
+    stripeCustomerId: v.string(),
+    email: v.string(),
+    createdAt: v.number(),
+  })
+    .index('by_owner', ['app', 'owner.type', 'owner.id'])
+    .index('by_stripeCustomerId', ['stripeCustomerId']),
+
+  /**
+   * Saved methods the library has seen for a customer: what they are, and whether an off-session
+   * charge of one was declined, so it isn't offered again. Stripe holds the method itself.
+   */
+  paymentMethods: defineTable({
+    customerId: v.id('customers'),
+    stripePaymentMethodId: v.string(),
+    kind: savedMethodKind,
+    label: v.string(),
+    declinedAt: v.optional(v.number()),
+    declineReason: v.optional(v.string()),
+    createdAt: v.number(),
+  })
+    .index('by_customer', ['customerId'])
+    .index('by_stripePaymentMethodId', ['stripePaymentMethodId']),
 
   /** The refund ledger: many per checkout. Kept forever, as a financial record. */
   refunds: defineTable({
@@ -130,7 +178,7 @@ export default defineSchema({
     .index('by_key_kind', ['key', 'kind', 'resolvedAt'])
     .index('by_reportedAt', ['reportedAt', 'openedAt']),
 
-  /** Fixed-window counters for starting checkouts. */
+  /** Fixed-window counters for the public entries (starting checkouts, saving methods, retries, return pages). */
   limits: defineTable({
     key: v.string(),
     windowStart: v.number(),

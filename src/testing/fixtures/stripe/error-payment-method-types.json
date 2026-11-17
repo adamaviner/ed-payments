@@ -1,0 +1,8 @@
+{
+  "_source": "Stripe test mode, API 2026-10-28.endive, POST /v1/setup_intents with payment_method_types (refused since 2026-09-30.endive), captured 2026-11-17 by scripts/capture (scrubbed)",
+  "error": {
+    "message": "The `payment_method_types` parameter is no longer supported. Payment methods are now managed from your Dashboard settings (https://dashboard.stripe.com/settings/payment_methods). For migration guidance, see https://docs.stripe.com/payments/payment-methods/dynamic-payment-methods.",
+    "request_log_url": "https://dashboard.stripe.com/acct_scrubbed/test/workbench/logs?object=req_KhgP07SEFC0wD6",
+    "type": "invalid_request_error"
+  }
+}

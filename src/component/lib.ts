@@ -4,7 +4,7 @@ import { ConvexError, v, type Infer } from 'convex/values'
 import type { FunctionHandle } from 'convex/server'
 import type { Doc, Id } from './_generated/dataModel.js'
 import type { MutationCtx } from './_generated/server.js'
-import { checkoutStatus, issueKind, method, payer, processor, ref, refundOrigin, refundStatus } from './schema.js'
+import { checkoutKind, checkoutStatus, issueKind, method, payer, processor, ref, refundOrigin, refundStatus } from './schema.js'
 
 export const checkoutView = v.object({
   id: v.string(),
@@ -17,6 +17,13 @@ export const checkoutView = v.object({
   method,
   payer,
   status: checkoutStatus,
+  kind: checkoutKind,
+  stripeCustomerId: v.union(v.string(), v.null()),
+  paymentMethodId: v.union(v.string(), v.null()),
+  retryOf: v.union(v.string(), v.null()),
+  chargeKey: v.union(v.string(), v.null()),
+  chargeAttempts: v.number(),
+  lastTriedAt: v.union(v.number(), v.null()),
   processorCheckoutId: v.union(v.string(), v.null()),
   paymentRef: v.union(v.string(), v.null()),
   paidCents: v.union(v.number(), v.null()),
@@ -45,6 +52,13 @@ export function view(c: Doc<'checkouts'>): CheckoutView {
     method: c.method,
     payer: c.payer,
     status: c.status,
+    kind: c.kind ?? 'hosted',
+    stripeCustomerId: c.stripeCustomerId ?? null,
+    paymentMethodId: c.paymentMethodId ?? null,
+    retryOf: c.retryOf ?? null,
+    chargeKey: c.chargeKey ?? null,
+    chargeAttempts: c.chargeAttempts ?? 0,
+    lastTriedAt: c.lastTriedAt ?? null,
     processorCheckoutId: c.processorCheckoutId ?? null,
     paymentRef: c.paymentRef ?? null,
     paidCents: c.paidCents ?? null,
@@ -127,7 +141,7 @@ export async function callHost<R>(ctx: MutationCtx, handle: string, args: Record
 
 /** The fields every callback gets about its checkout. */
 export function callbackBase(c: Doc<'checkouts'>) {
-  return { checkoutId: c._id as string, ref: c.ref, purpose: c.purpose, processor: c.processor, method: c.method, payer: c.payer, context: c.context ?? null }
+  return { checkoutId: c._id as string, ref: c.ref, purpose: c.purpose, kind: c.kind ?? 'hosted', processor: c.processor, method: c.method, payer: c.payer, context: c.context ?? null }
 }
 
 export type IssueKind = Infer<typeof issueKind>
@@ -159,8 +173,8 @@ export async function resolveIssue(ctx: MutationCtx, key: string, kind: IssueKin
   return true
 }
 
-/** Calls a callback that can't refuse anything (failed, refunded, refund needed, dispute); a throw becomes a callback_failed issue. */
-export async function notifyHost(ctx: MutationCtx, c: Doc<'checkouts'>, name: 'onFailed' | 'onRefunded' | 'onRefundNeeded' | 'onDispute', args: Record<string, unknown>, now: number) {
+/** Calls a callback that can't refuse anything (failed, refunded, refund needed, dispute, processing); a throw becomes a callback_failed issue. */
+export async function notifyHost(ctx: MutationCtx, c: Doc<'checkouts'>, name: 'onFailed' | 'onRefunded' | 'onRefundNeeded' | 'onDispute' | 'onProcessing', args: Record<string, unknown>, now: number) {
   const handle = c.callbacks[name]
   if (!handle) return
   const res = await callHost<unknown>(ctx, handle, { ...callbackBase(c), ...args })

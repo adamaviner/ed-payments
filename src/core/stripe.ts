@@ -40,12 +40,12 @@ export interface StripeCallOptions {
 }
 
 /** One Stripe API call; an error answer becomes a ProcessorError with Stripe's message and code. */
-export async function stripeCall<T>(keys: Pick<StripeKeys, 'secretKey'>, method: 'GET' | 'POST', path: string, params: FormParams | undefined, o: StripeCallOptions): Promise<T> {
+export async function stripeCall<T>(keys: Pick<StripeKeys, 'secretKey'>, method: 'GET' | 'POST' | 'DELETE', path: string, params: FormParams | undefined, o: StripeCallOptions): Promise<T> {
   const headers: Record<string, string> = { Authorization: `Bearer ${keys.secretKey}`, 'Stripe-Version': STRIPE_API_VERSION }
   let url = `${o.apiBase ?? STRIPE_API_BASE}${path}`
   let body: string | undefined
   const encoded = params ? formEncode(params) : ''
-  if (method === 'GET') {
+  if (method !== 'POST') {
     if (encoded) url += `?${encoded}`
   } else {
     body = encoded
@@ -60,10 +60,24 @@ export async function stripeCall<T>(keys: Pick<StripeKeys, 'secretKey'>, method:
   }
   const json: unknown = await res.json().catch(() => null)
   if (!res.ok) {
-    const error = (json as { error?: { message?: string; code?: string } } | null)?.error
-    throw new ProcessorError('stripe', res.status, error?.message ?? `Stripe answered ${res.status}.`, error?.code)
+    const error = (json as { error?: StripeErrorBody } | null)?.error
+    const pi = error?.payment_intent
+    throw new ProcessorError('stripe', res.status, error?.message ?? `Stripe answered ${res.status}.`, error?.code, {
+      type: error?.type,
+      declineCode: error?.decline_code,
+      paymentIntent: pi && typeof pi.id === 'string' ? { id: pi.id, status: String(pi.status) } : undefined,
+    })
   }
   return json as T
+}
+
+/** Stripe's error object (https://docs.stripe.com/api/errors): a refused confirm carries the PaymentIntent it refused. */
+interface StripeErrorBody {
+  type?: string
+  code?: string
+  decline_code?: string
+  message?: string
+  payment_intent?: { id?: string; status?: string }
 }
 
 // ── The objects the library reads (only those fields) ─────────────────────────────────────────
@@ -86,14 +100,63 @@ export interface StripeCharge {
   metadata: Metadata | null
 }
 
+export type StripePaymentIntentStatus = 'requires_payment_method' | 'requires_confirmation' | 'requires_action' | 'processing' | 'requires_capture' | 'canceled' | 'succeeded'
+
 export interface StripePaymentIntent {
   id: string
   object: 'payment_intent'
   amount: number
   amount_received: number
-  status: string
+  status: StripePaymentIntentStatus
   metadata: Metadata | null
   latest_charge: string | StripeCharge | null
+  /** For the browser's Payment Element only; never stored or logged. */
+  client_secret?: string | null
+  customer?: string | { id: string } | null
+  payment_method?: string | StripePaymentMethod | null
+  last_payment_error?: { message?: string; code?: string; decline_code?: string } | null
+  created: number
+}
+
+export interface StripeCustomer {
+  id: string
+  object: 'customer'
+  email: string | null
+  metadata: Metadata | null
+}
+
+export interface StripePaymentMethod {
+  id: string
+  object: 'payment_method'
+  type: string
+  customer: string | { id: string } | null
+  card?: { brand: string; last4: string; exp_month?: number; exp_year?: number } | null
+  us_bank_account?: { bank_name: string | null; last4: string | null } | null
+  created: number
+}
+
+export interface StripeSetupIntent {
+  id: string
+  object: 'setup_intent'
+  status: string
+  /** For the browser's Payment Element only; never stored or logged. */
+  client_secret: string | null
+  customer: string | { id: string } | null
+  payment_method: string | null
+  usage: string
+  metadata: Metadata | null
+}
+
+export interface StripeWebhookEndpoint {
+  id: string
+  object: 'webhook_endpoint'
+  url: string
+  enabled_events: string[]
+  status: string
+  api_version: string | null
+  description: string | null
+  /** Only in the answer to creating it. */
+  secret?: string
 }
 
 export interface StripeSession {
@@ -197,6 +260,51 @@ export function sessionParams(i: SessionInput): FormParams {
 
 type Keys = Pick<StripeKeys, 'secretKey'>
 
+/**
+ * What a saved method may be: a card or a US bank account. Since 2026-09-30.endive PaymentIntents and
+ * SetupIntents take `allowed_payment_method_types` (`payment_method_types` answers 400
+ * payment_method_types_no_longer_supported); Stripe drops a listed type the account hasn't switched on.
+ */
+export const SAVED_METHOD_TYPES = ['card', 'us_bank_account'] as const
+
+/**
+ * Bank accounts are verified at once through Financial Connections only: micro-deposits take a day
+ * or two, which would leave the payer unable to use the account when it matters.
+ */
+export const SAVED_METHOD_OPTIONS: FormParams = { us_bank_account: { verification_method: 'instant', financial_connections: { permissions: ['payment_method'] } } }
+
+export interface PaymentIntentInput {
+  app: string
+  checkoutId: string
+  amountCents: number
+  customer: string
+  description: string
+  /** offSession: confirm now with the saved method and nobody present; a card that needs the buyer to authenticate is refused (error_on_requires_action). onSession: the browser confirms it. */
+  offSession: boolean
+  paymentMethod?: string
+}
+
+export function paymentIntentParams(i: PaymentIntentInput): FormParams {
+  const metadata = { app: i.app, checkoutId: i.checkoutId }
+  const common = { amount: i.amountCents, currency: 'usd', customer: i.customer, description: i.description.slice(0, 1000), metadata, allowed_payment_method_types: [...SAVED_METHOD_TYPES] }
+  if (!i.offSession) return { ...common, payment_method_options: SAVED_METHOD_OPTIONS }
+  return { ...common, payment_method: i.paymentMethod, off_session: true, confirm: true, error_on_requires_action: true }
+}
+
+/** card or ach for a Stripe payment method type; null for anything the library doesn't save. */
+export const savedMethodKind = (type: string): 'card' | 'ach' | null => (type === 'card' ? 'card' : type === 'us_bank_account' ? 'ach' : null)
+
+const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1)
+
+/** How a saved method reads to its owner, e.g. "Visa •••• 4242" or "Chase bank account •••• 6789". */
+export function savedMethodLabel(pm: StripePaymentMethod): string | null {
+  if (pm.card) return `${capitalize(pm.card.brand)} •••• ${pm.card.last4}`
+  if (pm.us_bank_account) return `${pm.us_bank_account.bank_name ?? 'Bank'} account •••• ${pm.us_bank_account.last4 ?? '????'}`
+  return null
+}
+
+export const customerOf = (x: { customer?: string | { id: string } | null }) => idOf(x.customer)
+
 export const stripe = {
   createSession: (keys: Keys, i: SessionInput, o: StripeCallOptions) =>
     stripeCall<StripeSession>(keys, 'POST', '/v1/checkout/sessions', sessionParams(i), { idempotencyKey: `checkout-${i.checkoutId}`, ...o }),
@@ -223,7 +331,63 @@ export const stripe = {
   refundsOf: (keys: Keys, paymentIntent: string, o: StripeCallOptions) => stripeCall<StripeList<StripeRefund>>(keys, 'GET', '/v1/refunds', { payment_intent: paymentIntent, limit: 100 }, o),
   listRefunds: (keys: Keys, sinceSec: number, startingAfter: string | undefined, o: StripeCallOptions) =>
     stripeCall<StripeList<StripeRefund>>(keys, 'GET', '/v1/refunds', { limit: 100, created: { gte: sinceSec }, starting_after: startingAfter }, o),
+
+  /** A Customer for one payer of one app; the caller's idempotency key makes a repeat return the same one. */
+  createCustomer: (keys: Keys, c: { app: string; owner: string; email: string; name?: string }, o: StripeCallOptions) =>
+    stripeCall<StripeCustomer>(keys, 'POST', '/v1/customers', { email: c.email, name: c.name, metadata: { app: c.app, owner: c.owner } }, o),
+  /** A customer's saved payment methods, newest first. */
+  customerMethods: (keys: Keys, customer: string, o: StripeCallOptions) =>
+    stripeCall<StripeList<StripePaymentMethod>>(keys, 'GET', `/v1/customers/${encodeURIComponent(customer)}/payment_methods`, { limit: 100 }, o),
+  retrievePaymentMethod: (keys: Keys, id: string, o: StripeCallOptions) => stripeCall<StripePaymentMethod>(keys, 'GET', `/v1/payment_methods/${encodeURIComponent(id)}`, undefined, o),
+  /** Saves a card or bank account for charging later with nobody present (usage off_session also collects a bank account's debit mandate). */
+  createSetupIntent: (keys: Keys, s: { customer: string; app: string; owner: string }, o: StripeCallOptions) =>
+    stripeCall<StripeSetupIntent>(
+      keys,
+      'POST',
+      '/v1/setup_intents',
+      { customer: s.customer, usage: 'off_session', allowed_payment_method_types: [...SAVED_METHOD_TYPES], payment_method_options: SAVED_METHOD_OPTIONS, metadata: { app: s.app, owner: s.owner } },
+      o,
+    ),
+  createPaymentIntent: (keys: Keys, i: PaymentIntentInput, o: StripeCallOptions) => stripeCall<StripePaymentIntent>(keys, 'POST', '/v1/payment_intents', paymentIntentParams(i), o),
+  /** Without the expansions, for its status and client secret. */
+  paymentIntent: (keys: Keys, id: string, o: StripeCallOptions) => stripeCall<StripePaymentIntent>(keys, 'GET', `/v1/payment_intents/${encodeURIComponent(id)}`, undefined, o),
+  /** With the payment method used, for whether it was a card or a bank account. */
+  paymentIntentWithMethod: (keys: Keys, id: string, o: StripeCallOptions) =>
+    stripeCall<StripePaymentIntent>(keys, 'GET', `/v1/payment_intents/${encodeURIComponent(id)}`, { expand: ['payment_method', 'latest_charge.balance_transaction'] }, o),
+  cancelPaymentIntent: (keys: Keys, id: string, o: StripeCallOptions) => stripeCall<StripePaymentIntent>(keys, 'POST', `/v1/payment_intents/${encodeURIComponent(id)}/cancel`, undefined, o),
+  /** Created at or after `sinceSec`, newest first, 100 a page. */
+  listPaymentIntents: (keys: Keys, sinceSec: number, startingAfter: string | undefined, o: StripeCallOptions) =>
+    stripeCall<StripeList<StripePaymentIntent>>(keys, 'GET', '/v1/payment_intents', { limit: 100, created: { gte: sinceSec }, starting_after: startingAfter }, o),
+
+  listWebhookEndpoints: (keys: Keys, startingAfter: string | undefined, o: StripeCallOptions) =>
+    stripeCall<StripeList<StripeWebhookEndpoint>>(keys, 'GET', '/v1/webhook_endpoints', { limit: 100, starting_after: startingAfter }, o),
+  /** Pinned to the library's API version, so events arrive in the shape the library reads. The answer carries the signing secret, once. */
+  createWebhookEndpoint: (keys: Keys, w: { url: string; events: readonly string[]; description: string }, o: StripeCallOptions) =>
+    stripeCall<StripeWebhookEndpoint>(keys, 'POST', '/v1/webhook_endpoints', { url: w.url, enabled_events: [...w.events], api_version: STRIPE_API_VERSION, description: w.description }, o),
+  updateWebhookEndpoint: (keys: Keys, id: string, events: readonly string[], o: StripeCallOptions) =>
+    stripeCall<StripeWebhookEndpoint>(keys, 'POST', `/v1/webhook_endpoints/${encodeURIComponent(id)}`, { enabled_events: [...events], disabled: false }, o),
+  deleteWebhookEndpoint: (keys: Keys, id: string, o: StripeCallOptions) => stripeCall<{ id: string; deleted: boolean }>(keys, 'DELETE', `/v1/webhook_endpoints/${encodeURIComponent(id)}`, undefined, o),
 }
+
+/**
+ * Every Stripe event the library acts on; the webhook endpoint is registered with exactly these
+ * (`npx ed-payments webhooks --stripe <url>`). Others reach the app's onUnhandledStripeEvent.
+ */
+export const STRIPE_EVENTS = [
+  'checkout.session.completed',
+  'checkout.session.async_payment_succeeded',
+  'checkout.session.async_payment_failed',
+  'checkout.session.expired',
+  'payment_intent.succeeded',
+  'payment_intent.processing',
+  'payment_intent.payment_failed',
+  'charge.refunded',
+  'refund.created',
+  'refund.updated',
+  'refund.failed',
+  'charge.dispute.created',
+  'charge.dispute.closed',
+] as const
 
 /** The fee Stripe kept, when the session or PaymentIntent was fetched with its balance transaction expanded. */
 export function stripeFee(x: StripeSession | StripePaymentIntent): number | null {
@@ -240,6 +404,30 @@ export function sessionState(s: StripeSession): 'paid' | 'processing' | 'open' |
   if (s.payment_status === 'paid' || s.payment_status === 'no_payment_required') return 'paid'
   if (s.status === 'complete') return 'processing'
   return s.status === 'expired' ? 'expired' : 'open'
+}
+
+/**
+ * Where a PaymentIntent stands, in the library's words. open: waiting for a payment method (the buyer
+ * on-session, or after a refused confirm). action: waiting for the buyer to authenticate, normal on
+ * the app's page and never expected off-session. odd: requires_capture, which the library never asks
+ * for, so a person should look.
+ */
+export function intentState(pi: Pick<StripePaymentIntent, 'status'>): 'paid' | 'processing' | 'open' | 'action' | 'canceled' | 'odd' {
+  switch (pi.status) {
+    case 'succeeded':
+      return 'paid'
+    case 'processing':
+      return 'processing'
+    case 'canceled':
+      return 'canceled'
+    case 'requires_payment_method':
+    case 'requires_confirmation':
+      return 'open'
+    case 'requires_action':
+      return 'action'
+    default:
+      return 'odd'
+  }
 }
 
 // ── Webhooks ───────────────────────────────────────────────────────────────────────────────────
