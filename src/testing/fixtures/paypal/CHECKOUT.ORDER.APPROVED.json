@@ -1,0 +1,51 @@
+{
+  "_source": "Built from the real sandbox order (resource) in the documented webhook envelope",
+  "id": "WH-FIXTURE-APPROVED",
+  "event_version": "1.0",
+  "create_time": "2026-11-17T12:11:00.000Z",
+  "resource_type": "checkout-order",
+  "resource_version": "2.0",
+  "event_type": "CHECKOUT.ORDER.APPROVED",
+  "summary": "An order has been approved by buyer",
+  "resource": {
+    "id": "4RL70785FP7758548",
+    "intent": "CAPTURE",
+    "status": "APPROVED",
+    "payment_source": {
+      "paypal": {}
+    },
+    "purchase_units": [
+      {
+        "reference_id": "default",
+        "amount": {
+          "currency_code": "USD",
+          "value": "25.00",
+          "breakdown": {}
+        },
+        "payee": {
+          "email_address": "merchant@example.org",
+          "merchant_id": "TESTMERCHANT",
+          "display_data": {
+            "brand_name": "Fixture"
+          }
+        },
+        "description": "Fixture item",
+        "custom_id": "fixture:fixtureorder1",
+        "invoice_id": "fixture-1794917422931"
+      }
+    ],
+    "create_time": "2026-11-17T12:10:23Z",
+    "links": [
+      {
+        "href": "https://api.sandbox.paypal.com/v2/checkout/orders/4RL70785FP7758548",
+        "rel": "self",
+        "method": "GET"
+      },
+      {
+        "href": "https://api.sandbox.paypal.com/v2/checkout/orders/4RL70785FP7758548/capture",
+        "rel": "capture",
+        "method": "POST"
+      }
+    ]
+  }
+}

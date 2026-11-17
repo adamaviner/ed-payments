@@ -1,0 +1,94 @@
+{
+  "_source": "PayPal documented sample (Orders v2 capture, return=representation), custom_id added",
+  "id": "5O190127TN364715T",
+  "status": "COMPLETED",
+  "payment_source": {
+    "paypal": {
+      "name": {
+        "given_name": "Test",
+        "surname": "Buyer"
+      },
+      "email_address": "buyer@example.org",
+      "account_id": "TESTPAYER",
+      "account_status": "VERIFIED"
+    }
+  },
+  "purchase_units": [
+    {
+      "reference_id": "d9f80740-38f0-11e8-b467-0ed5f89f718b",
+      "shipping": {
+        "address": {
+          "address_line_1": "1 Test Street",
+          "address_line_2": "",
+          "admin_area_2": "Testville",
+          "admin_area_1": "CA",
+          "postal_code": "00000",
+          "country_code": "US"
+        }
+      },
+      "payments": {
+        "captures": [
+          {
+            "id": "3C679366HH908993F",
+            "status": "COMPLETED",
+            "amount": {
+              "currency_code": "USD",
+              "value": "100.00"
+            },
+            "seller_protection": {
+              "status": "ELIGIBLE",
+              "dispute_categories": ["ITEM_NOT_RECEIVED", "UNAUTHORIZED_TRANSACTION"]
+            },
+            "final_capture": true,
+            "disbursement_mode": "INSTANT",
+            "seller_receivable_breakdown": {
+              "gross_amount": {
+                "currency_code": "USD",
+                "value": "100.00"
+              },
+              "paypal_fee": {
+                "currency_code": "USD",
+                "value": "3.00"
+              },
+              "net_amount": {
+                "currency_code": "USD",
+                "value": "97.00"
+              }
+            },
+            "create_time": "2018-04-01T21:20:49Z",
+            "update_time": "2018-04-01T21:20:49Z",
+            "links": [
+              {
+                "href": "https://api-m.paypal.com/v2/payments/captures/3C679366HH908993F",
+                "rel": "self",
+                "method": "GET"
+              },
+              {
+                "href": "https://api-m.paypal.com/v2/payments/captures/3C679366HH908993F/refund",
+                "rel": "refund",
+                "method": "POST"
+              }
+            ],
+            "custom_id": "fixture:fixtureorder1"
+          }
+        ]
+      },
+      "custom_id": "fixture:fixtureorder1"
+    }
+  ],
+  "payer": {
+    "name": {
+      "given_name": "Test",
+      "surname": "Buyer"
+    },
+    "email_address": "buyer@example.org",
+    "payer_id": "TESTPAYER"
+  },
+  "links": [
+    {
+      "href": "https://api-m.paypal.com/v2/checkout/orders/5O190127TN364715T",
+      "rel": "self",
+      "method": "GET"
+    }
+  ]
+}

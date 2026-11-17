@@ -1,0 +1,8 @@
+{
+  "_source": "Stripe test mode, API 2026-10-28.endive, captured 2026-11-17 (400)",
+  "error": {
+    "message": "Only Checkout Sessions with a status in [\"open\"] can be expired. This Checkout Session has a status of `expired`.",
+    "request_log_url": "https://dashboard.stripe.com/acct_TEST/test/workbench/logs?object=req_rFAIrLi5BZiM8f",
+    "type": "invalid_request_error"
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "_source": "Built from a real Stripe test-mode object, fields changed as Stripe documents them (no event-read permission on the test key)",
+  "id": "evt_1FixtureRefundFailed",
+  "object": "event",
+  "api_version": "2026-10-28.endive",
+  "created": 1794917500,
+  "data": {
+    "object": {
+      "id": "re_1Nispe2eZvKYlo2Cd31jOCgZ",
+      "object": "refund",
+      "amount": 1000,
+      "balance_transaction": "txn_1Nispe2eZvKYlo2CYezqFhEx",
+      "charge": "ch_3UclDAL4sVH3OBLn1rlCLR54",
+      "created": 1692942318,
+      "currency": "usd",
+      "metadata": {},
+      "payment_intent": "pi_3UclDAL4sVH3OBLn1lmyuwx6",
+      "reason": null,
+      "receipt_number": null,
+      "source_transfer_reversal": null,
+      "status": "failed",
+      "transfer_reversal": null,
+      "failure_reason": "expired_or_canceled_card"
+    }
+  },
+  "livemode": false,
+  "pending_webhooks": 1,
+  "request": {
+    "id": null,
+    "idempotency_key": null
+  },
+  "type": "refund.failed"
+}
