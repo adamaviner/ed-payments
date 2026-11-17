@@ -1,0 +1,23 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "oxc"],
+  "options": { "reportUnusedDisableDirectives": "error" },
+  "categories": { "suspicious": "error" },
+  "ignorePatterns": ["dist", "**/_generated"],
+  "rules": {
+    "typescript/no-floating-promises": "error",
+    "typescript/no-misused-promises": "error",
+    "typescript/await-thenable": "error",
+    // A default: case is a decision about the rest; only a switch with neither is flagged.
+    "typescript/switch-exhaustiveness-check": ["error", { "considerDefaultExhaustiveForUnions": true }],
+    "typescript/no-explicit-any": "error",
+    // The library reports through the host's logs; warn and error only.
+    "no-console": ["error", { "allow": ["warn", "error", "info"] }],
+    // Convex names its system fields _id and _creationTime.
+    "no-underscore-dangle": "off",
+    // Processor JSON is narrowed with `as` after a shape check, as in ed-schedule.
+    "typescript/no-unsafe-type-assertion": "off",
+    // Short callback names (q, r) reused in nested callbacks.
+    "no-shadow": "off"
+  }
+}

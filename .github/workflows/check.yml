@@ -1,0 +1,25 @@
+# The same checks as `npm run check`, on every PR and on main. Tests use convex-test in memory, so
+# no Convex deployment or secrets are needed.
+name: Check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      # The example app's typecheck resolves the package through dist.
+      - run: npm run build
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run format:check
+      - run: npm test
