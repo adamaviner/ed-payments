@@ -8,7 +8,11 @@
  * @module
  */
 
-import type * as probe from "../probe.js";
+import type * as crons from "../crons.js";
+import type * as http from "../http.js";
+import type * as payments from "../payments.js";
+import type * as paymentsWorker from "../paymentsWorker.js";
+import type * as shop from "../shop.js";
 
 import type {
   ApiFromModules,
@@ -17,7 +21,11 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
-  probe: typeof probe;
+  crons: typeof crons;
+  http: typeof http;
+  payments: typeof payments;
+  paymentsWorker: typeof paymentsWorker;
+  shop: typeof shop;
 }>;
 
 /**

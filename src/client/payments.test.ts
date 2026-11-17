@@ -1,0 +1,454 @@
+// The client against fake processors: starting checkouts, both webhook routes, the return page,
+// refunds, sweep and the nightly comparison, through the host app in src/testing/app.ts.
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
+import { app, defined } from '../testing/app.js'
+import { fakePaypal, type FakePaypal } from '../testing/fakePaypal.js'
+import { fakeStripe, type FakeStripe } from '../testing/fakeStripe.js'
+
+const { api, internal, createTest } = defined
+const MIN = 60_000
+
+let stripe: FakeStripe
+let pp: FakePaypal
+
+beforeEach(() => {
+  vi.useFakeTimers()
+  vi.setSystemTime(new Date('2030-01-01T12:00:00Z'))
+  pp = fakePaypal()
+  stripe = fakeStripe({ fallback: pp.fetch })
+  vi.stubGlobal('fetch', stripe.fetch)
+  vi.spyOn(console, 'warn').mockImplementation(() => {})
+  vi.spyOn(console, 'error').mockImplementation(() => {})
+  vi.spyOn(console, 'info').mockImplementation(() => {})
+})
+afterEach(() => {
+  vi.unstubAllGlobals()
+  vi.restoreAllMocks()
+  vi.useRealTimers()
+})
+
+function setup() {
+  const t = createTest()
+  const pay = app.components.payments
+  const status = async (id: string) => (await t.query(api.shop.status, { id }))!
+  const calls = (name?: string) => t.query(api.host.calls, {}).then((cs) => cs.filter((c) => !name || c.name === name))
+  const post = async (path: string, init: RequestInit) => {
+    const res = await t.fetch(path, init)
+    return { status: res.status, text: await res.text() }
+  }
+  const buy = (a: { processor: 'stripe' | 'paypal'; method: 'card' | 'ach' | 'paypal'; amountCents?: number; email?: string; context?: unknown; expiresAt?: number }) => t.action(api.shop.buy, a)
+  const issues = () => t.query(api.shop.issues, {})
+  const later = (ms: number) => vi.setSystemTime(Date.now() + ms)
+  const stripeCheckout = async (o: { method?: 'card' | 'ach'; amountCents?: number; context?: unknown } = {}) => {
+    const { checkoutId } = await buy({ processor: 'stripe', method: o.method ?? 'card', amountCents: o.amountCents, context: o.context })
+    const c = await status(checkoutId)
+    return { checkoutId, sessionId: c.processorCheckoutId! }
+  }
+  const paypalCheckout = async (o: { amountCents?: number; context?: unknown } = {}) => {
+    const { checkoutId } = await buy({ processor: 'paypal', method: 'card', amountCents: o.amountCents, context: o.context })
+    return { checkoutId, orderId: (await status(checkoutId)).processorCheckoutId! }
+  }
+  return { t, pay, status, calls, post, buy, issues, later, stripeCheckout, paypalCheckout }
+}
+
+describe('Stripe checkouts', () => {
+  test('start makes a tagged Checkout Session and sends the buyer there', async () => {
+    const { buy, status } = setup()
+    const { checkoutId, redirectUrl } = await buy({ processor: 'stripe', method: 'card' })
+    const c = await status(checkoutId)
+    expect(c).toMatchObject({
+      status: 'pending',
+      app: 'test',
+      processor: 'stripe',
+      amountCents: 2500,
+      returnUrl: 'https://app.example.org/checkout/o1/return',
+      cancelUrl: 'https://app.example.org/checkout/o1',
+    })
+    expect(redirectUrl).toBe(`https://checkout.stripe.com/c/pay/${c.processorCheckoutId}`)
+    const call = stripe.calls.find((x) => x.path === '/v1/checkout/sessions')!
+    expect(Object.fromEntries(call.params)).toMatchObject({
+      'allowed_payment_method_types[0]': 'card',
+      client_reference_id: checkoutId,
+      'metadata[app]': 'test',
+      'payment_intent_data[metadata][checkoutId]': checkoutId,
+      success_url: 'https://app.example.org/checkout/o1/return?session_id={CHECKOUT_SESSION_ID}',
+      customer_email: 'ana@example.org',
+    })
+    expect(Number(call.params.get('expires_at'))).toBe(Date.now() / 1000 + 3 * 60 * 60)
+  })
+
+  test('the paid webhook records the sale through onPaid, with Stripe’s fee; a duplicate delivery is answered at once', async () => {
+    const { t, post, status, calls, stripeCheckout } = setup()
+    const { checkoutId, sessionId } = await stripeCheckout()
+    const hook = await stripe.pay(sessionId, { eventId: 'evt_dup' })
+    expect(await post('/stripe/webhook', hook)).toEqual({ status: 200, text: 'handled' })
+    expect(await status(checkoutId)).toMatchObject({ status: 'paid', paidCents: 2500, processorFeeCents: 103, paymentRef: expect.stringMatching(/^pi_/) })
+    expect(await post('/stripe/webhook', hook)).toEqual({ status: 200, text: 'Already handled' })
+    expect(await calls('onPaid')).toHaveLength(1)
+    expect(await t.query(api.host.orders, {})).toHaveLength(1)
+  })
+
+  test('a bad or stale signature is refused with 400', async () => {
+    const { post, stripeCheckout, status } = setup()
+    const { checkoutId, sessionId } = await stripeCheckout()
+    const hook = await stripe.pay(sessionId)
+    expect((await post('/stripe/webhook', { ...hook, headers: { 'stripe-signature': 't=1,v1=00' } })).status).toBe(400)
+    const stale = await stripe.webhook(JSON.parse(hook.body as string), { at: Date.now() - 10 * MIN })
+    expect((await post('/stripe/webhook', stale)).status).toBe(400)
+    expect((await status(checkoutId)).status).toBe('pending')
+  })
+
+  test('fix c: a session not tagged for this app, or one it doesn’t know, is answered 200 and passed on, never retried', async () => {
+    const { post, calls } = setup()
+    expect(await post('/stripe/webhook', await stripe.event('checkout.session.completed-foreign'))).toEqual({ status: 200, text: 'foreign' })
+    const unknown = await stripe.event('checkout.session.completed', { metadata: { app: 'test', checkoutId: 'gone' }, client_reference_id: 'gone' })
+    expect(await post('/stripe/webhook', unknown)).toEqual({ status: 200, text: 'foreign' })
+    expect((await calls('unhandledStripe')).map((c) => c.args.type)).toEqual(['checkout.session.completed', 'checkout.session.completed'])
+  })
+
+  test('events the library doesn’t handle (bid PaymentIntents) go to the host’s handler', async () => {
+    const { post, calls } = setup()
+    expect(await post('/stripe/webhook', await stripe.event('payment_intent.succeeded'))).toEqual({ status: 200, text: 'ignored' })
+    expect((await calls('unhandledStripe'))[0].args).toMatchObject({ type: 'payment_intent.succeeded' })
+  })
+
+  test('bank transfer: accepted (processing), then paid; or bounced (failed, onFailed)', async () => {
+    const { post, status, calls, stripeCheckout } = setup()
+    const a = await stripeCheckout({ method: 'ach' })
+    await post('/stripe/webhook', await stripe.pay(a.sessionId))
+    expect((await status(a.checkoutId)).status).toBe('processing')
+    await post('/stripe/webhook', await stripe.settleBank(a.sessionId, true))
+    expect((await status(a.checkoutId)).status).toBe('paid')
+    const b = await stripeCheckout({ method: 'ach' })
+    await post('/stripe/webhook', await stripe.pay(b.sessionId))
+    await post('/stripe/webhook', await stripe.settleBank(b.sessionId, false))
+    expect(await status(b.checkoutId)).toMatchObject({ status: 'failed', lastError: 'The bank payment failed.' })
+    expect((await calls('onFailed'))[0].args).toMatchObject({ checkoutId: b.checkoutId })
+  })
+
+  test('an expired session abandons the checkout', async () => {
+    const { post, status, stripeCheckout } = setup()
+    const { checkoutId, sessionId } = await stripeCheckout()
+    await post('/stripe/webhook', await stripe.expire(sessionId))
+    expect((await status(checkoutId)).status).toBe('abandoned')
+  })
+
+  test('the return page settles a paid session before the webhook comes, and again harmlessly', async () => {
+    const { t, status, stripeCheckout, post, calls } = setup()
+    const { checkoutId, sessionId } = await stripeCheckout()
+    const hook = await stripe.pay(sessionId)
+    expect(await t.action(api.shop.back, { processor: 'stripe', token: sessionId })).toEqual({ checkoutId, status: 'paid' })
+    expect(await t.action(api.shop.back, { processor: 'stripe', token: sessionId })).toEqual({ checkoutId, status: 'paid' })
+    expect(await post('/stripe/webhook', hook)).toEqual({ status: 200, text: 'handled' })
+    expect(await calls('onPaid')).toHaveLength(1)
+    expect((await status(checkoutId)).status).toBe('paid')
+    expect(await t.action(api.shop.back, { processor: 'stripe', token: 'cs_unknown' })).toBeNull()
+  })
+
+  test('a thrown error after the signature check answers 500, and the retry is acted on', async () => {
+    const { post, status, stripeCheckout, t } = setup()
+    const { checkoutId, sessionId } = await stripeCheckout()
+    await post('/stripe/webhook', await stripe.pay(sessionId))
+    const pi = (await status(checkoutId)).paymentRef!
+    const { charge } = await stripe.refundInDashboard(pi, 500)
+    stripe.refuse((c) => (c.path === '/v1/refunds' ? Response.json({ error: { message: 'down' } }, { status: 500 }) : undefined))
+    expect((await post('/stripe/webhook', charge)).status).toBe(500)
+    stripe.refuse()
+    expect(await post('/stripe/webhook', charge)).toEqual({ status: 200, text: 'handled' })
+    expect((await status(checkoutId)).refundedCents).toBe(500)
+    expect(await t.query(api.shop.refundsFor, { checkoutId })).toMatchObject([{ origin: 'external', amountCents: 500, status: 'sent' }])
+  })
+
+  test('a processor failure at start closes the row and tells the buyer plainly', async () => {
+    const { buy, t } = setup()
+    stripe.refuse(() => Response.json({ error: { message: 'Invalid API key' } }, { status: 401 }))
+    await expect(buy({ processor: 'stripe', method: 'card' })).rejects.toThrow(/Stripe couldn’t start the payment/)
+    const rows = await t.run(async (ctx) => await ctx.runQuery(app.components.payments.checkouts.list, { paginationOpts: { numItems: 10, cursor: null } }))
+    expect(rows.page).toMatchObject([{ status: 'failed', lastError: 'Invalid API key' }])
+  })
+
+  test('refused combinations and the rate limit', async () => {
+    const { buy } = setup()
+    await expect(buy({ processor: 'stripe', method: 'paypal' })).rejects.toThrow(/doesn’t take paypal/)
+    await expect(buy({ processor: 'paypal', method: 'ach' })).rejects.toThrow(/doesn’t take ach/)
+    for (let i = 0; i < 3; i++) await buy({ processor: 'stripe', method: 'card', email: 'eve@example.org' })
+    await expect(buy({ processor: 'stripe', method: 'card', email: 'eve@example.org' })).rejects.toThrow(/Too many checkouts/)
+  })
+})
+
+describe('Stripe refunds and disputes', () => {
+  test('partial refunds up to the remaining amount; the refund webhook doesn’t count it twice; approval unless skipped', async () => {
+    const { t, post, status, calls, stripeCheckout } = setup()
+    const { checkoutId, sessionId } = await stripeCheckout()
+    await post('/stripe/webhook', await stripe.pay(sessionId))
+    const r1 = await t.mutation(api.shop.requestRefund, { checkoutId, amountCents: 1000, reason: 'Chipped' })
+    await expect(t.action(api.shop.sendRefund, { refundId: r1 })).rejects.toThrow(/needs approving/)
+    await t.mutation(api.shop.approveRefund, { refundId: r1 })
+    expect(await t.action(api.shop.sendRefund, { refundId: r1 })).toBe('sent')
+    const sent = stripe.refunds()[0]
+    expect(sent).toMatchObject({ amount: 1000, metadata: { app: 'test', refundId: r1 } })
+    expect(stripe.calls.find((c) => c.method === 'POST' && c.path === '/v1/refunds')).toBeTruthy()
+    expect(await post('/stripe/webhook', await stripe.event('refund.created', { ...sent }))).toEqual({ status: 200, text: 'handled' })
+    expect((await status(checkoutId)).refundedCents).toBe(1000)
+    await expect(t.mutation(api.shop.requestRefund, { checkoutId, amountCents: 1501, reason: 'x' })).rejects.toThrow(/Only \$15.00 is left/)
+    const r2 = await t.mutation(api.shop.requestRefund, { checkoutId, reason: 'The rest' })
+    expect(await t.action(api.shop.sendRefund, { refundId: r2, skipApproval: true })).toBe('sent')
+    expect(await t.action(api.shop.sendRefund, { refundId: r2, skipApproval: true })).toBe('sent')
+    expect(stripe.refunds()).toHaveLength(2)
+    expect((await status(checkoutId)).refundedCents).toBe(2500)
+    expect((await calls('onRefunded')).map((c) => c.args.refundedCents)).toEqual([1000, 2500])
+  })
+
+  test('a refund made in the dashboard arrives by webhook and is recorded once, whichever event comes', async () => {
+    const { t, post, status, stripeCheckout } = setup()
+    const { checkoutId, sessionId } = await stripeCheckout()
+    await post('/stripe/webhook', await stripe.pay(sessionId))
+    const { created, charge } = await stripe.refundInDashboard((await status(checkoutId)).paymentRef!, 700)
+    await post('/stripe/webhook', charge)
+    await post('/stripe/webhook', created)
+    expect((await status(checkoutId)).refundedCents).toBe(700)
+    expect(await t.query(api.shop.refundsFor, { checkoutId })).toMatchObject([{ origin: 'external', amountCents: 700 }])
+  })
+
+  test('a refund that comes back pending is finished by sweep (or fails, and can be sent again)', async () => {
+    const { t, post, status, later, stripeCheckout } = setup()
+    const { checkoutId, sessionId } = await stripeCheckout()
+    await post('/stripe/webhook', await stripe.pay(sessionId))
+    stripe.refundsCome('pending')
+    const r = await t.mutation(api.shop.requestRefund, { checkoutId, reason: 'x' })
+    expect(await t.action(api.shop.sendRefund, { refundId: r, skipApproval: true })).toBe('sending')
+    stripe.refunds()[0].status = 'succeeded'
+    later(11 * MIN)
+    await t.action(internal.paymentsWorker.sweep, {})
+    expect((await status(checkoutId)).refundedCents).toBe(2500)
+    const second = await stripeCheckout()
+    await post('/stripe/webhook', await stripe.pay(second.sessionId))
+    stripe.refundsCome('failed')
+    const r2 = await t.mutation(api.shop.requestRefund, { checkoutId: second.checkoutId, reason: 'x' })
+    expect(await t.action(api.shop.sendRefund, { refundId: r2, skipApproval: true })).toBe('failed')
+  })
+
+  test('a dispute is recorded, the host told, and closed', async () => {
+    const { post, status, issues, calls, stripeCheckout } = setup()
+    const { checkoutId, sessionId } = await stripeCheckout()
+    await post('/stripe/webhook', await stripe.pay(sessionId))
+    const pi = (await status(checkoutId)).paymentRef!
+    await post('/stripe/webhook', await stripe.dispute(pi, 'created'))
+    expect((await status(checkoutId)).disputed).toBe(true)
+    expect((await issues()).map((i) => i.kind)).toEqual(['dispute'])
+    await post('/stripe/webhook', await stripe.dispute(pi, 'closed', 'won'))
+    expect((await calls('onDispute')).map((c) => [c.args.status, c.args.outcome])).toEqual([
+      ['opened', null],
+      ['closed', 'won'],
+    ])
+  })
+})
+
+describe('PayPal checkouts', () => {
+  test('start makes an order with experience_context, tagged <app>:<id>, and sends the buyer to the payer-action link', async () => {
+    const { buy, status } = setup()
+    const { checkoutId, redirectUrl } = await buy({ processor: 'paypal', method: 'card', amountCents: 2529 })
+    const c = await status(checkoutId)
+    expect(redirectUrl).toBe(`https://www.sandbox.paypal.com/checkoutnow?token=${c.processorCheckoutId}`)
+    const created = pp.calls.find((x) => x.path === '/v2/checkout/orders')!.body as Record<string, unknown>
+    expect(created).toMatchObject({
+      intent: 'CAPTURE',
+      purchase_units: [{ custom_id: `test:${checkoutId}`, amount: { currency_code: 'USD', value: '25.29' } }],
+      payment_source: { paypal: { experience_context: { return_url: 'https://app.example.org/checkout/o1/return', cancel_url: 'https://app.example.org/checkout/o1', brand_name: 'Test shop' } } },
+    })
+  })
+
+  test('fix a: the buyer approves and closes the tab; the approval webhook captures and records the sale', async () => {
+    const { post, status, calls, paypalCheckout } = setup()
+    const { checkoutId, orderId } = await paypalCheckout()
+    expect(await post('/paypal/webhook', pp.approve(orderId))).toEqual({ status: 200, text: 'handled' })
+    expect(await status(checkoutId)).toMatchObject({ status: 'paid', paidCents: 2500, processorFeeCents: 103, paymentRef: expect.stringMatching(/^FAKECAP/) })
+    expect(await calls('onPaid')).toHaveLength(1)
+    expect(await post('/paypal/webhook', pp.captureEvent(orderId))).toEqual({ status: 200, text: 'handled' })
+    expect(await calls('onPaid')).toHaveLength(1)
+  })
+
+  test('fix a, second half: no webhook at all; sweep captures an approved order after five minutes', async () => {
+    const { t, status, later, paypalCheckout } = setup()
+    const { checkoutId, orderId } = await paypalCheckout()
+    pp.approve(orderId)
+    await t.action(internal.paymentsWorker.sweep, {})
+    expect((await status(checkoutId)).status).toBe('pending')
+    later(6 * MIN)
+    await t.action(internal.paymentsWorker.sweep, {})
+    expect((await status(checkoutId)).status).toBe('paid')
+  })
+
+  test('fix b: reloading the return page, or a capture that already happened, settles instead of failing', async () => {
+    const { t, post, status, calls, paypalCheckout } = setup()
+    const a = await paypalCheckout()
+    pp.approve(a.orderId)
+    expect(await t.action(api.shop.back, { processor: 'paypal', token: a.orderId })).toEqual({ checkoutId: a.checkoutId, status: 'paid' })
+    expect(await t.action(api.shop.back, { processor: 'paypal', token: a.orderId })).toEqual({ checkoutId: a.checkoutId, status: 'paid' })
+    // Captured at PayPal (by an earlier attempt that died before recording it); the late approval webhook gets ORDER_ALREADY_CAPTURED.
+    const b = await paypalCheckout()
+    const stale = pp.approve(b.orderId)
+    await pp.fetch(`https://api-m.sandbox.paypal.com/v2/checkout/orders/${b.orderId}/capture`, { method: 'POST' })
+    expect(await post('/paypal/webhook', stale)).toEqual({ status: 200, text: 'handled' })
+    expect((await status(b.checkoutId)).status).toBe('paid')
+    expect(await calls('onPaid')).toHaveLength(2)
+  })
+
+  test('fix c: a capture tagged for another app, or with no tag for an order nobody knows, is answered 200', async () => {
+    const { post } = setup()
+    expect(await post('/paypal/webhook', pp.event('PAYMENT.CAPTURE.COMPLETED-foreign'))).toEqual({ status: 200, text: 'foreign' })
+    expect(await post('/paypal/webhook', pp.event('PAYMENT.CAPTURE.COMPLETED', { custom_id: undefined }))).toEqual({ status: 200, text: 'foreign' })
+    expect(await post('/paypal/webhook', pp.event('CUSTOMER.DISPUTE.CREATED'))).toEqual({ status: 200, text: 'foreign' })
+  })
+
+  test('a forged webhook is refused; a duplicate is answered at once', async () => {
+    const { post, paypalCheckout } = setup()
+    const { orderId } = await paypalCheckout()
+    expect((await post('/paypal/webhook', pp.event('CHECKOUT.ORDER.APPROVED', {}, 'WH-X', { valid: false }))).status).toBe(400)
+    const hook = pp.approve(orderId, { eventId: 'WH-ONCE' })
+    expect((await post('/paypal/webhook', hook)).text).toBe('handled')
+    expect((await post('/paypal/webhook', hook)).text).toBe('Already handled')
+  })
+
+  test('a declined capture fails the checkout and tells the host', async () => {
+    const { post, status, calls, paypalCheckout } = setup()
+    pp.capturesCome('DECLINED')
+    const { checkoutId, orderId } = await paypalCheckout()
+    await post('/paypal/webhook', pp.approve(orderId))
+    expect((await status(checkoutId)).status).toBe('failed')
+    expect(await calls('onFailed')).toHaveLength(1)
+  })
+
+  test('onPaid refusing (sold out mid-checkout): refund_needed, refund waiting, buyer told on the return page', async () => {
+    const { t, post, status, calls, paypalCheckout } = setup()
+    const { checkoutId, orderId } = await paypalCheckout({ context: { paid: { refuse: 'Sold out' } } })
+    await post('/paypal/webhook', pp.approve(orderId))
+    expect(await t.action(api.shop.back, { processor: 'paypal', token: orderId })).toEqual({ checkoutId, status: 'refund_needed' })
+    expect(await t.query(api.shop.openRefunds, {})).toMatchObject([{ checkoutId, origin: 'needed', amountCents: 2500 }])
+    expect((await calls('onRefundNeeded'))[0].args).toMatchObject({ reason: 'Sold out' })
+    const [refund] = await t.query(api.shop.openRefunds, {})
+    expect(await t.action(api.shop.sendRefund, { refundId: refund.id, skipApproval: true })).toBe('sent')
+    expect(pp.refunds()[0]).toMatchObject({ custom_id: `test:${refund.id}`, amount: { value: '25.00' } })
+    expect((await status(checkoutId)).refundedCents).toBe(2500)
+  })
+
+  test('refunds: partial through the app, one in the dashboard; each counted once', async () => {
+    const { t, post, status, paypalCheckout } = setup()
+    const { checkoutId, orderId } = await paypalCheckout()
+    await post('/paypal/webhook', pp.approve(orderId))
+    const r = await t.mutation(api.shop.requestRefund, { checkoutId, amountCents: 1000, reason: 'x' })
+    await t.action(api.shop.sendRefund, { refundId: r, skipApproval: true })
+    const mine = pp.refunds()[0]
+    const { captureId: _c, ...resource } = mine
+    await post('/paypal/webhook', pp.event('PAYMENT.CAPTURE.REFUNDED', { ...resource }))
+    expect((await status(checkoutId)).refundedCents).toBe(1000)
+    const { hook } = pp.refundInDashboard((await status(checkoutId)).paymentRef!, 500)
+    await post('/paypal/webhook', hook)
+    await post('/paypal/webhook', hook)
+    expect((await status(checkoutId)).refundedCents).toBe(1500)
+    expect((await t.query(api.shop.refundsFor, { checkoutId })).map((x) => x.origin).sort()).toEqual(['external', 'requested'])
+  })
+
+  test('a dispute through PayPal', async () => {
+    const { post, status, issues, paypalCheckout } = setup()
+    const { checkoutId, orderId } = await paypalCheckout()
+    await post('/paypal/webhook', pp.approve(orderId))
+    const capture = (await status(checkoutId)).paymentRef!
+    expect((await post('/paypal/webhook', pp.dispute(capture, 'CREATED'))).text).toBe('handled')
+    expect((await status(checkoutId)).disputed).toBe(true)
+    expect((await issues()).find((i) => i.kind === 'dispute')?.detail).toMatch(/^The buyer disputed A bowl for \$10.00 \(MERCHANDISE_OR_SERVICE_NOT_RECEIVED\)\.$/)
+  })
+
+  test('the PayPal token is fetched once, cached encrypted, and reused', async () => {
+    const { t, paypalCheckout } = setup()
+    await paypalCheckout()
+    await paypalCheckout()
+    expect(pp.tokens).toBe(1)
+    const saved = await t.run(async (ctx) => await ctx.runQuery(app.components.payments.settings.paypalToken, {}))
+    expect(saved?.sealed).not.toContain('A21-fake')
+  })
+})
+
+describe('sweep', () => {
+  test('an expired open Stripe session is expired at Stripe and abandoned; an expired unapproved PayPal order is abandoned', async () => {
+    const { t, status, later, stripeCheckout, paypalCheckout } = setup()
+    const s = await stripeCheckout()
+    const p = await paypalCheckout()
+    later(3 * 60 * MIN + MIN)
+    await t.action(internal.paymentsWorker.sweep, {})
+    expect(stripe.session(s.sessionId).status).toBe('expired')
+    expect((await status(s.checkoutId)).status).toBe('abandoned')
+    expect((await status(p.checkoutId)).status).toBe('abandoned')
+  })
+
+  test('an expired Stripe session that was paid after all is settled, not abandoned', async () => {
+    const { t, status, later, stripeCheckout } = setup()
+    const { checkoutId, sessionId } = await stripeCheckout()
+    await stripe.pay(sessionId)
+    later(3 * 60 * MIN + MIN)
+    await t.action(internal.paymentsWorker.sweep, {})
+    expect((await status(checkoutId)).status).toBe('paid')
+  })
+})
+
+describe('reconcile', () => {
+  test('Stripe: clean when both sides agree; a lost webhook shows as status_differs until it arrives', async () => {
+    const { t, post, issues, stripeCheckout } = setup()
+    const a = await stripeCheckout()
+    await post('/stripe/webhook', await stripe.pay(a.sessionId))
+    const b = await stripeCheckout()
+    const lost = await stripe.pay(b.sessionId)
+    await t.action(internal.paymentsWorker.reconcile, {})
+    expect((await issues()).map((i) => i.kind)).toEqual(['status_differs'])
+    await post('/stripe/webhook', lost)
+    await t.action(internal.paymentsWorker.reconcile, {})
+    expect(await t.run(async (ctx) => await ctx.runQuery(app.components.payments.issues.openCount, {}))).toBe(0)
+  })
+
+  test('Stripe: missing here, missing there, and a refund the ledger missed is recorded', async () => {
+    const { t, post, status, stripeCheckout } = setup()
+    const a = await stripeCheckout()
+    await post('/stripe/webhook', await stripe.pay(a.sessionId))
+    await stripe.refundInDashboard((await status(a.checkoutId)).paymentRef!, 300)
+    const b = await stripeCheckout()
+    await post('/stripe/webhook', await stripe.pay(b.sessionId))
+    stripe.forget(b.sessionId)
+    stripe.paidElsewhere('test', 4000)
+    stripe.paidElsewhere('other', 4000)
+    expect(await t.action(internal.paymentsWorker.reconcile, {})).toBeNull()
+    const open = await t.run(async (ctx) => await ctx.runQuery(app.components.payments.issues.list, { open: true, paginationOpts: { numItems: 20, cursor: null } }))
+    expect(open.page.map((i) => i.kind).sort()).toEqual(['missing_here', 'missing_there'])
+    expect((await status(a.checkoutId)).refundedCents).toBe(300)
+  })
+
+  test('PayPal: Transaction Search refused is skipped and asked again only a day later; once enabled, an unknown capture is missing_here', async () => {
+    const { t, later, paypalCheckout, post } = setup()
+    const a = await paypalCheckout()
+    await post('/paypal/webhook', pp.approve(a.orderId))
+    const reconcile = () => t.action(internal.paymentsWorker.reconcile, {})
+    const searches = () => pp.calls.filter((c) => c.path === '/v1/reporting/transactions').length
+    await reconcile()
+    expect(searches()).toBe(1)
+    expect(console.info).toHaveBeenCalledTimes(1)
+    await reconcile()
+    expect(searches()).toBe(1)
+    pp.enableSearch()
+    pp.capturedElsewhere('test', 'lost', 1200)
+    pp.capturedElsewhere('other', 'x', 1200)
+    later(25 * 60 * MIN)
+    await reconcile()
+    expect(searches()).toBe(2)
+    const kinds = (await t.query(api.shop.issues, {})).map((i) => i.kind)
+    expect(kinds).toEqual(['missing_here'])
+  })
+
+  test('PayPal: an order paid at PayPal but not here is status_differs', async () => {
+    const { t, paypalCheckout } = setup()
+    const a = await paypalCheckout()
+    pp.approve(a.orderId)
+    await pp.fetch(`https://api-m.sandbox.paypal.com/v2/checkout/orders/${a.orderId}/capture`, { method: 'POST' })
+    await t.run(async (ctx) => await ctx.runMutation(app.components.payments.checkouts.settleFailed, { id: a.checkoutId, reason: 'test', now: Date.now() }))
+    await t.action(internal.paymentsWorker.reconcile, {})
+    expect((await t.query(api.shop.issues, {})).map((i) => i.detail)).toEqual(['PayPal says A bowl was paid; here it is failed.'])
+  })
+})

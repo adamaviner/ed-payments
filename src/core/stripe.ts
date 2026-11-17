@@ -218,6 +218,8 @@ export const stripe = {
   /** Created at or after `sinceSec`, newest first, 100 a page. */
   listSessions: (keys: Keys, sinceSec: number, startingAfter: string | undefined, o: StripeCallOptions) =>
     stripeCall<StripeList<StripeSession>>(keys, 'GET', '/v1/checkout/sessions', { limit: 100, created: { gte: sinceSec }, starting_after: startingAfter }, o),
+  /** Every refund of one PaymentIntent (up to 100). */
+  refundsOf: (keys: Keys, paymentIntent: string, o: StripeCallOptions) => stripeCall<StripeList<StripeRefund>>(keys, 'GET', '/v1/refunds', { payment_intent: paymentIntent, limit: 100 }, o),
   listRefunds: (keys: Keys, sinceSec: number, startingAfter: string | undefined, o: StripeCallOptions) =>
     stripeCall<StripeList<StripeRefund>>(keys, 'GET', '/v1/refunds', { limit: 100, created: { gte: sinceSec }, starting_after: startingAfter }, o),
 }

@@ -7,6 +7,10 @@ import { componentsGeneric, type GenericSchema, type SchemaDefinition } from 'co
 import schema from './component/schema.js'
 import type { ComponentApi } from './component/_generated/component.js'
 
+export { fakeStripe, FAKE_STRIPE_WEBHOOK_SECRET, type FakeStripe, type FakeStripeOptions } from './testing/fakeStripe.js'
+export { fakePaypal, type FakePaypal, type FakePaypalOptions } from './testing/fakePaypal.js'
+export { fixture, paypalEvent, paypalEventFixtures, paypalObjectFixtures, stripeEvent, stripeEventFixtures, stripeObjectFixtures } from './testing/fixtures.js'
+
 const modules = import.meta.glob('./component/**/*.ts')
 
 /**
