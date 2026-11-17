@@ -512,6 +512,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           error: string;
           giveUp: boolean;
           id: string;
+          max: number;
           now: number;
           processorCheckoutId?: string;
         },

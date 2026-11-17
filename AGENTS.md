@@ -24,6 +24,8 @@ The README has the API and the "Adopt in 5 steps" set-up.
    Every callback is required, even if it only logs. Use `payments.args.*` as their `args`.
 6. **Who may do what is the app's.** Gate your own actions (`setupPaymentMethod`, `chargeSaved`,
    `retryOnSession` callers) with your own login; the admin functions go through `authorize.admin`.
+   A `stripeCustomerId` passed to adopt an existing Customer must come from your own records, never
+   from the browser: the library records it as that owner's for good.
 7. **Webhooks with the CLI.** Register them with `npx ed-payments webhooks`, not by hand, and run it
    again after upgrading the library.
 8. **Test through the fakes.** `registerPayments(t)` from `@earthdance/payments/test`; don't mock

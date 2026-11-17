@@ -356,8 +356,8 @@ export const stripe = {
     stripeCall<StripePaymentIntent>(keys, 'GET', `/v1/payment_intents/${encodeURIComponent(id)}`, { expand: ['payment_method', 'latest_charge.balance_transaction'] }, o),
   cancelPaymentIntent: (keys: Keys, id: string, o: StripeCallOptions) => stripeCall<StripePaymentIntent>(keys, 'POST', `/v1/payment_intents/${encodeURIComponent(id)}/cancel`, undefined, o),
   /** Created at or after `sinceSec`, newest first, 100 a page. */
-  listPaymentIntents: (keys: Keys, sinceSec: number, startingAfter: string | undefined, o: StripeCallOptions) =>
-    stripeCall<StripeList<StripePaymentIntent>>(keys, 'GET', '/v1/payment_intents', { limit: 100, created: { gte: sinceSec }, starting_after: startingAfter }, o),
+  listPaymentIntents: (keys: Keys, sinceSec: number, startingAfter: string | undefined, o: StripeCallOptions, customer?: string) =>
+    stripeCall<StripeList<StripePaymentIntent>>(keys, 'GET', '/v1/payment_intents', { limit: 100, created: { gte: sinceSec }, starting_after: startingAfter, customer }, o),
 
   listWebhookEndpoints: (keys: Keys, startingAfter: string | undefined, o: StripeCallOptions) =>
     stripeCall<StripeList<StripeWebhookEndpoint>>(keys, 'GET', '/v1/webhook_endpoints', { limit: 100, starting_after: startingAfter }, o),

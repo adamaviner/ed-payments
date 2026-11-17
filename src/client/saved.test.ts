@@ -2,7 +2,7 @@
 // nobody present (paid, declined, a transient error, an unknown outcome, a bank payment), the buyer
 // retrying on the app's page, and the refunds, disputes, sweep and comparison that now cover them.
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
-import { defined } from '../testing/app.js'
+import { app, defined } from '../testing/app.js'
 import { fakePaypal } from '../testing/fakePaypal.js'
 import { fakeStripe, type FakeStripe } from '../testing/fakeStripe.js'
 
@@ -159,11 +159,71 @@ describe('charging a saved method with nobody present', () => {
     await t.mutation(api.payments.retryCharge, { auth: 'boss', checkoutId: a })
     await settle()
     expect((await status(a)).status).toBe('paid')
-    await t.mutation(api.payments.giveUpCharge, { auth: 'boss', checkoutId: b })
+    expect(await t.action(api.payments.giveUpCharge, { auth: 'boss', checkoutId: b })).toEqual({ status: 'failed' })
     expect(await status(b)).toMatchObject({ status: 'failed', lastError: expect.stringMatching(/^Given up by Bo/) })
     expect((await calls('onFailed'))[0].args).toMatchObject({ checkoutId: b, declined: false })
     const open = await t.query(api.payments.issues, { auth: 'boss', paginationOpts: { numItems: 10, cursor: null } })
     expect(open.page).toEqual([])
+  })
+
+  test('a charge handed to a person is left to them: the sweep doesn’t try it again', async () => {
+    const { t, status, saved, charge } = setup()
+    const pm = await saved()
+    stripe.refuse((c) => (c.method === 'POST' && c.path === '/v1/payment_intents' ? Response.json({ error: { type: 'invalid_request_error', message: 'Odd' } }, { status: 400 }) : undefined))
+    const id = await charge(pm)
+    const tries = intentCalls().length
+    vi.setSystemTime(Date.now() + 60 * 60_000)
+    await t.action(internal.paymentsWorker.sweep, {})
+    expect(intentCalls()).toHaveLength(tries)
+    expect((await status(id)).status).toBe('pending')
+  })
+
+  test('giving up asks Stripe first: a charge that went through after all is settled, not failed', async () => {
+    const { t, status, saved, charge } = setup()
+    await t.mutation(api.host.addAdmin, { token: 'boss', name: 'Bo' })
+    const pm = await saved()
+    // The charge is made at Stripe, but its answer never comes back.
+    let lost = true
+    const real = stripe.fetch
+    vi.stubGlobal('fetch', async (input: string, init?: RequestInit) => {
+      const res = await real(input, init)
+      if (lost && init?.method === 'POST' && new URL(input).pathname === '/v1/payment_intents') {
+        lost = false
+        return Response.json({ error: { type: 'invalid_request_error', message: 'Lost' } }, { status: 400 })
+      }
+      return res
+    })
+    const id = await charge(pm)
+    expect((await status(id)).status).toBe('pending')
+    expect(await t.action(api.payments.giveUpCharge, { auth: 'boss', checkoutId: id })).toEqual({ status: 'paid' })
+  })
+
+  test('a payment for something already paid (a retry of a paid charge) is owed back, not recorded twice', async () => {
+    const { t, saved, charge } = setup()
+    const id = await charge(await saved())
+    const res = await t.run(async (ctx) => {
+      const c = app.components.payments.checkouts
+      const retry = await ctx.runMutation(c.create, {
+        app: 'test',
+        ref: { type: 'bid', id: 'b1' },
+        purpose: 'bid',
+        description: 'x',
+        amountCents: 5000,
+        processor: 'stripe',
+        method: 'card',
+        kind: 'onSession',
+        payer: { email: 'a@example.org' },
+        returnUrl: 'https://x',
+        cancelUrl: 'https://x',
+        expiresAt: Date.now() + 60_000,
+        context: { bidId: 'b1' },
+        callbacks: {},
+        retryOf: id,
+        now: Date.now(),
+      })
+      return await ctx.runMutation(c.settlePaid, { id: retry, paymentRef: 'pi_second', paidCents: 5000, now: Date.now() })
+    })
+    expect(res).toMatchObject({ outcome: 'refund_needed', reason: 'This was already paid by another payment.' })
   })
 
   test('a bank account: processing (the processing callback), then paid; or it bounces (failed, wasProcessing)', async () => {

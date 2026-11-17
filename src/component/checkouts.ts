@@ -46,9 +46,26 @@ export const create = mutation({
   returns: v.string(),
   handler: async (ctx, { limits, now, retryOf, ...a }) => {
     if (!Number.isInteger(a.amountCents) || a.amountCents < 1) throw new ConvexError('A checkout needs an amount of at least one cent.')
+    // The same charge key is the same charge: two calls at once make one row.
+    if (a.chargeKey) {
+      const same = await ctx.db
+        .query('checkouts')
+        .withIndex('by_chargeKey', (q) => q.eq('chargeKey', a.chargeKey))
+        .first()
+      if (same) return same._id
+    }
     if (limits) await takeAll(ctx, limits, now)
     const original = retryOf ? ctx.db.normalizeId('checkouts', retryOf) : null
     if (retryOf && !original) throw new ConvexError(`No checkout ${retryOf}.`)
+    // One open retry at a time, decided in this transaction, so two tabs can't each start one.
+    if (original) {
+      const open = await ctx.db
+        .query('checkouts')
+        .withIndex('by_retryOf', (q) => q.eq('retryOf', original))
+        .filter((q) => q.or(q.eq(q.field('status'), 'created'), q.eq(q.field('status'), 'pending'), q.eq(q.field('status'), 'processing')))
+        .first()
+      if (open) throw new ConvexError('A payment for this is already open. Reload the page to continue it.')
+    }
     return await ctx.db.insert('checkouts', { ...a, ...(original ? { retryOf: original } : {}), status: 'created', refundedCents: 0, createdAt: now })
   },
 })
@@ -120,6 +137,8 @@ export const settlePaid = mutation({
     await ctx.db.patch(c._id, { paymentRef, paidCents, processorFeeCents, settledAt: now, lastError: undefined, method: c.method, processorCheckoutId: c.processorCheckoutId ?? processorCheckoutId })
     await resolveIssue(ctx, c._id, 'charge_unknown', now)
     let refusal: string | null = paidCents === c.amountCents ? null : `The processor took ${dollarsOf(paidCents)}, not the ${dollarsOf(c.amountCents)} asked.`
+    // A charge and its on-session retries pay for one thing: the second to arrive is owed back.
+    if (!refusal && (await paidElsewhere(ctx, c))) refusal = 'This was already paid by another payment.'
     if (!refusal && c.callbacks.onPaid) {
       const paid = { ...callbackBase(c), amountCents: c.amountCents, paidCents, paymentRef }
       const res = await callHost<{ refuse?: string } | null>(ctx, c.callbacks.onPaid, paid)
@@ -163,11 +182,14 @@ export const settleFailed = mutation({
  * stays waiting; the attempt is counted, and with `giveUp` an issue asks a person to decide.
  */
 export const noteChargeAttempt = mutation({
-  args: { id: v.string(), error: v.string(), processorCheckoutId: v.optional(v.string()), giveUp: v.boolean(), now: v.number() },
+  args: { id: v.string(), error: v.string(), processorCheckoutId: v.optional(v.string()), giveUp: v.boolean(), max: v.number(), now: v.number() },
   returns: v.number(),
-  handler: async (ctx, { id, error, processorCheckoutId, giveUp, now }) => {
+  handler: async (ctx, { id, error, processorCheckoutId, giveUp, max, now }) => {
     const c = await load(ctx, id)
-    const attempts = (c.chargeAttempts ?? 0) + 1
+    // Settled meanwhile (the webhook won the race): nothing is unknown any more.
+    if (c.status !== 'created' && c.status !== 'pending') return c.chargeAttempts ?? 0
+    // Handed to a person: counted as the last try, so the sweep leaves it to them.
+    const attempts = giveUp ? Math.max((c.chargeAttempts ?? 0) + 1, max) : (c.chargeAttempts ?? 0) + 1
     const ref = c.processorCheckoutId ?? processorCheckoutId
     await ctx.db.patch(c._id, { chargeAttempts: attempts, lastTriedAt: now, lastError: error, processorCheckoutId: ref, status: c.status === 'created' ? 'pending' : c.status })
     if (giveUp) {
@@ -245,6 +267,18 @@ export const noteIssue = mutation({
     return null
   },
 })
+
+/** Whether the thing this checkout pays for was already paid: by the charge it retries, or by another retry of it. */
+async function paidElsewhere(ctx: MutationCtx, c: Doc<'checkouts'>): Promise<boolean> {
+  const rootId = c.retryOf ?? c._id
+  const isPaid = (x: Doc<'checkouts'> | null) => !!x && x._id !== c._id && (x.status === 'paid' || x.status === 'processing')
+  if (c.retryOf && isPaid(await ctx.db.get(c.retryOf))) return true
+  const siblings = await ctx.db
+    .query('checkouts')
+    .withIndex('by_retryOf', (q) => q.eq('retryOf', rootId))
+    .take(50)
+  return siblings.some(isPaid)
+}
 
 async function markDeclined(ctx: MutationCtx, stripePaymentMethodId: string, reason: string, now: number) {
   const row = await ctx.db

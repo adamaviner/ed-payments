@@ -4,7 +4,9 @@
 //   publicApi(): the buyer-facing return page, rate-limited
 import { actionGeneric, internalActionGeneric, internalMutationGeneric, mutationGeneric, paginationOptsValidator, queryGeneric } from 'convex/server'
 import { ConvexError, v, type GenericValidator } from 'convex/values'
+import { stripe } from '../core/stripe.js'
 import type { Payments, RunQueryCtx, Who } from './index.js'
+import { findIntent, settleIntent } from './saved.js'
 
 const processor = v.union(v.literal('stripe'), v.literal('paypal'))
 const ref = v.object({ type: v.string(), id: v.string() })
@@ -201,19 +203,23 @@ export function adminApi<C extends GenericValidator>(p: Payments<C>, o: AdminApi
 
     /**
      * Gives up on an off-session charge with an unknown outcome: it fails, and the app's on.failed
-     * decides what next (e.g. ask the buyer to pay). Only when Stripe shows no charge; a bank payment
-     * on its way can't be given up.
+     * decides what next (e.g. ask the buyer to pay). Stripe is asked first: a charge it shows paid or
+     * on its way is settled instead, and one still open there is canceled, so giving up can never
+     * leave a charge behind that pays later.
      */
-    giveUpCharge: mutationGeneric({
+    giveUpCharge: actionGeneric({
       args: { auth, checkoutId: v.string() },
-      handler: async (ctx, a): Promise<null> => {
+      handler: async (ctx, a): Promise<{ status: string }> => {
         const who = await admin(p, ctx, a.auth)
         const x = await ctx.runQuery(c.checkouts.get, { id: a.checkoutId })
         if (!x || x.app !== p.app || x.kind !== 'offSession') throw new ConvexError('There is no such charge.')
         if (x.status !== 'created' && x.status !== 'pending')
           throw new ConvexError(x.status === 'processing' ? 'A bank payment for this is on its way; wait for it.' : `This charge is already ${x.status}.`)
-        await ctx.runMutation(c.checkouts.settleFailed, { id: x.id, reason: `Given up by ${who.name}: ${x.lastError ?? 'the charge didn’t complete'}`, now: Date.now() })
-        return null
+        const pi = await findIntent(p, x)
+        if (pi && (await settleIntent(p, ctx, x, pi))) return { status: (await ctx.runQuery(c.checkouts.get, { id: x.id }))?.status ?? x.status }
+        if (pi && pi.status !== 'canceled') await stripe.cancelPaymentIntent(p.stripeKeys(), pi.id, { fetch: p.fetch })
+        await ctx.runMutation(c.checkouts.settleFailed, { id: x.id, reason: `Given up by ${who.name}: ${x.lastError ?? 'the charge didn’t complete'}`, processorCheckoutId: pi?.id, now: Date.now() })
+        return { status: 'failed' }
       },
     }),
   }

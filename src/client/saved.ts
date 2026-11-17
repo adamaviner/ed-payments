@@ -129,19 +129,23 @@ export async function settleIntent(p: Payments, ctx: RunActionCtx, c: Checkout, 
 
 const declineText = (err: ProcessorError) => (err.code === 'authentication_required' ? 'The card needs the buyer to confirm the payment, which can’t happen without them.' : err.message)
 
-/** This checkout's PaymentIntent, found by listing the customer's recent ones (after a try whose answer never came back). */
-async function findIntent(p: Payments, c: Checkout): Promise<StripePaymentIntent | null> {
+/**
+ * This checkout's PaymentIntent, found among the customer's own since it started (after a try whose
+ * answer never came back). Null only when Stripe has certainly none; when the list is too long to
+ * be sure, it throws, so nobody charges again on a guess.
+ */
+export async function findIntent(p: Payments, c: Checkout): Promise<StripePaymentIntent | null> {
   if (c.processorCheckoutId) return await stripe.paymentIntent(p.stripeKeys(), c.processorCheckoutId, { fetch: p.fetch })
   const since = Math.floor(c.createdAt / 1000) - 60
   let after: string | undefined
-  for (let page = 0; page < 5; page++) {
-    const list = await stripe.listPaymentIntents(p.stripeKeys(), since, after, { fetch: p.fetch })
+  for (let page = 0; page < 10; page++) {
+    const list = await stripe.listPaymentIntents(p.stripeKeys(), since, after, { fetch: p.fetch }, c.stripeCustomerId ?? undefined)
     const hit = list.data.find((pi) => pi.metadata?.app === p.app && pi.metadata.checkoutId === c.id)
     if (hit) return hit
     if (!list.has_more || !list.data.length) return null
     after = list.data[list.data.length - 1].id
   }
-  return null
+  throw new Error('Too many of this customer’s payments to be sure whether this charge was made; look in Stripe.')
 }
 
 /**
@@ -158,7 +162,14 @@ export async function chargeNow(p: Payments, ctx: RunActionCtx & { scheduler: Sc
   const attempts = c.chargeAttempts
   if (!manual && attempts >= MAX_CHARGE_ATTEMPTS) return
   const note = async (error: string, retry: boolean, piId?: string) => {
-    const n = await ctx.runMutation(p.component.checkouts.noteChargeAttempt, { id: c.id, error, processorCheckoutId: piId, giveUp: !retry || attempts + 1 >= MAX_CHARGE_ATTEMPTS, now: Date.now() })
+    const n = await ctx.runMutation(p.component.checkouts.noteChargeAttempt, {
+      id: c.id,
+      error,
+      processorCheckoutId: piId,
+      giveUp: !retry || attempts + 1 >= MAX_CHARGE_ATTEMPTS,
+      max: MAX_CHARGE_ATTEMPTS,
+      now: Date.now(),
+    })
     if (retry && n < MAX_CHARGE_ATTEMPTS) await ctx.scheduler.runAfter(RETRY_STEP_MS * n, p.wiring.worker.charge, { checkoutId: c.id })
   }
   const failed = (reason: string, piId?: string) => ctx.runMutation(p.component.checkouts.settleFailed, { id: c.id, reason, declined: true, processorCheckoutId: piId, now: Date.now() })

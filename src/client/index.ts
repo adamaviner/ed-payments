@@ -802,12 +802,15 @@ export class Payments<C extends GenericValidator = GenericValidator> {
 
   /** Nightly: hands the issues nobody was told about yet to the app's on.issues, then marks them told. Returns how many. */
   async issuesDigest(ctx: RunMutationCtx): Promise<number> {
-    const issues = await ctx.runQuery(this.component.issues.unreported, {})
-    if (!issues.length) return 0
-    await ctx.runMutation(this.wiring.on.issues, {
-      issues: issues.map((i) => ({ id: i.id, kind: i.kind, detail: i.detail, checkoutId: i.checkoutId, processor: i.processor, openedAt: i.openedAt })),
-    })
-    await ctx.runMutation(this.component.issues.markReported, { ids: issues.map((i) => i.id), now: Date.now() })
+    const unreported = await ctx.runQuery(this.component.issues.unreported, {})
+    // One that already went away (a late webhook) isn't news; it is marked told with the rest.
+    const issues = unreported.filter((i) => i.resolvedAt === null)
+    if (issues.length) {
+      await ctx.runMutation(this.wiring.on.issues, {
+        issues: issues.map((i) => ({ id: i.id, kind: i.kind, detail: i.detail, checkoutId: i.checkoutId, processor: i.processor, openedAt: i.openedAt })),
+      })
+    }
+    if (unreported.length) await ctx.runMutation(this.component.issues.markReported, { ids: unreported.map((i) => i.id), now: Date.now() })
     return issues.length
   }
 

@@ -139,7 +139,7 @@ Then register the webhooks: `npx ed-payments webhooks --stripe https://<deployme
   3, 4 minutes; before each new try the customer's PaymentIntents are searched for this checkout,
   because Stripe replays a key's first answer (even a 500), so a new key is used only once nothing was
   found. After five tries, or at once for anything odd, a `charge_unknown` issue asks a person, who
-  retries it or gives it up (`failed`, the app decides what next). A charge whose queued try died is
+  retries it or gives it up (Stripe is asked first: a charge it shows paid is settled, an open one canceled; otherwise `failed`, and the app decides what next). The sweep leaves charges handed to a person alone. A charge and its on-session retries pay for one thing: a second payment for it is owed back (`refund_needed`), and only one retry can be open at a time. A charge whose queued try died is
   picked up by the sweep after 10 quiet minutes.
 - **On-session retries.** `retryOnSession` makes a PaymentIntent for the same amount (card or bank,
   the buyer's choice), or hands back the one still waiting, so two tabs can't each pay; one already on
@@ -297,7 +297,7 @@ Per deployment (dev, prod), on the Convex deployment (`npx convex env set`):
   `npx ed-payments webhooks --paypal https://<deployment>.convex.site/paypal/webhook --env-file <file>`
   (prints the `PAYPAL_WEBHOOK_ID`). Run again after upgrading the library; `--extra-events` for events
   the app's own handler needs; `--dry-run` shows what would change; `--remove` deletes it; live keys
-  need `--live`. By hand instead: the lists are `STRIPE_EVENTS` and `PAYPAL_EVENTS`.
+  need `--live`. By hand instead: the lists are `STRIPE_EVENTS` and `PAYPAL_EVENTS`. The CLI prints the new Stripe signing secret: run it in your own terminal, not where CI logs are kept.
 - Pass PayPal's real rates in `fees.paypal` once known.
 
 ## Live-mode run (before relying on it)

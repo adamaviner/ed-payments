@@ -43,7 +43,7 @@ describe('adminApi', () => {
     ['dismissRefund', (t, auth) => t.mutation(api.payments.dismissRefund, { auth, refundId: 'x' })],
     ['resolveIssue', (t, auth) => t.mutation(api.payments.resolveIssue, { auth, issueId: 'x' })],
     ['retryCharge', (t, auth) => t.mutation(api.payments.retryCharge, { auth, checkoutId: 'x' })],
-    ['giveUpCharge', (t, auth) => t.mutation(api.payments.giveUpCharge, { auth, checkoutId: 'x' })],
+    ['giveUpCharge', (t, auth) => t.action(api.payments.giveUpCharge, { auth, checkoutId: 'x' })],
   ]
 
   test('every generated admin function is listed here', () => {
