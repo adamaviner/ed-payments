@@ -13,6 +13,9 @@ the v0.2 plan ("own all payment paths, bids included").
 - `core` imports nothing from Convex. `component` has no network access, no secrets, no routes, no crons.
   The client runs in the host's actions and does the network calls with the secrets the host passes.
   Nothing here may assume an app's login, router or framework: ed-market and ed-schedule both use it.
+- `src/react` is browser code: it imports pure `core` modules and only types from `client`. No UI
+  library: its own primitives in `ui.tsx`, with shadcn token classes. Its tests run in happy-dom
+  (`// @vitest-environment happy-dom`); `example/src` shows and typechecks every piece.
 - Never `v.id()` of an app table: app rows are `ref: { type, id }` strings. Amounts are integer cents, USD only.
 - No processor SDKs: Stripe and PayPal through `fetch`, so everything runs in Convex's default runtime.
   Look up the processors' current docs for every request shape; a new object the library reads gets a

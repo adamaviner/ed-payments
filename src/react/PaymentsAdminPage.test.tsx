@@ -1,0 +1,156 @@
+// @vitest-environment happy-dom
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { afterEach, beforeEach, expect, test, vi } from 'vitest'
+import { PaymentsAdminPage } from './PaymentsAdminPage.js'
+import type { CheckoutSummary, OpenRefund, PaymentIssue, PaymentsAdminApi } from './types.js'
+
+const checkout: CheckoutSummary = {
+  id: 'c1',
+  ref: { type: 'order', id: 'o1' },
+  purpose: 'order',
+  kind: 'hosted',
+  description: 'Weekend retreat',
+  processor: 'stripe',
+  method: 'card',
+  payer: { name: 'Ana', email: 'ana@example.org' },
+  status: 'paid',
+  paymentRef: 'pi_1',
+  amountCents: 10000,
+  paidCents: 10000,
+  refundedCents: 1000,
+  createdAt: Date.UTC(2026, 10, 14, 15),
+}
+
+const openRefund: OpenRefund = {
+  id: 'r1',
+  checkoutId: 'c1',
+  amountCents: 2000,
+  reason: 'Left early',
+  origin: 'requested',
+  status: 'requested',
+  requestedBy: 'Sam',
+  approvedBy: null,
+  processorRefundId: null,
+  note: null,
+  error: null,
+  createdAt: Date.UTC(2026, 10, 15),
+  updatedAt: Date.UTC(2026, 10, 15),
+  sentAt: null,
+  attempts: 0,
+  checkout,
+}
+
+const issue: PaymentIssue = {
+  id: 'i1',
+  kind: 'charge_unknown',
+  key: 'pi_2',
+  checkoutId: 'c2',
+  processor: 'stripe',
+  paymentRef: null,
+  detail: 'Stripe didn’t answer three times.',
+  openedAt: Date.UTC(2026, 10, 16),
+  resolvedAt: null,
+  reportedAt: null,
+}
+
+type Fn<R> = (args: unknown) => Promise<R>
+const calls = {
+  requestRefund: vi.fn<Fn<string>>(async () => 'r2'),
+  sendRefund: vi.fn<Fn<{ status: string; error: string | null } | null>>(async () => ({ status: 'sent', error: null })),
+  approveRefund: vi.fn<Fn<null>>(async () => null),
+  markRefundedManually: vi.fn<Fn<null>>(async () => null),
+  dismissRefund: vi.fn<Fn<null>>(async () => null),
+  resolveIssue: vi.fn<Fn<null>>(async () => null),
+  retryCharge: vi.fn<Fn<null>>(async () => null),
+  giveUpCharge: vi.fn<Fn<{ status: string }>>(async () => ({ status: 'failed' })),
+}
+type Name = keyof typeof calls
+
+vi.mock('convex/react', () => ({
+  useQuery: (fn: string) => (fn === 'openRefunds' ? [openRefund] : undefined),
+  usePaginatedQuery: (fn: string) => ({ results: fn === 'refundable' ? [checkout] : [issue], status: 'Exhausted', loadMore: () => {} }),
+  useMutation: (fn: Name) => calls[fn],
+  useAction: (fn: Name) => calls[fn],
+}))
+
+const api = Object.fromEntries(['openRefunds', 'refundable', 'issues', ...Object.keys(calls)].map((k) => [k, k])) as unknown as PaymentsAdminApi
+
+beforeEach(() => {
+  for (const fn of Object.values(calls)) fn.mockClear()
+})
+afterEach(cleanup)
+
+/** The list row an element is in. */
+function rowOf(el: HTMLElement): HTMLElement {
+  const row = el.closest('li')
+  if (!row) throw new Error('Not in a row.')
+  return row
+}
+
+/** The row of the "Refund a payment" list. */
+const refundRow = () => rowOf(screen.getByLabelText('Amount ($)'))
+
+test('what is left counts the open refund; more than that is refused in place', () => {
+  render(<PaymentsAdminPage api={api} auth={{ token: 't' }} skipApproval />)
+  const row = refundRow()
+  // $100 paid, $10 refunded, $20 asked for and not sent: $70 left.
+  expect(within(row).getByText('$70.00 left')).toBeTruthy()
+  fireEvent.change(within(row).getByLabelText('Amount ($)'), { target: { value: '70.01' } })
+  expect(within(row).getByRole('alert').textContent).toBe('Only $70.00 is left to refund on this payment.')
+  expect(within(row).getByRole<HTMLButtonElement>('button', { name: 'Refund' }).disabled).toBe(true)
+  fireEvent.change(within(row).getByLabelText('Amount ($)'), { target: { value: 'ten' } })
+  expect(within(row).getByRole('alert').textContent).toBe('Enter an amount in dollars, like 12.50.')
+})
+
+test('a refund asks twice, then requests the typed amount in cents and sends it', async () => {
+  render(<PaymentsAdminPage api={api} auth={{ token: 't' }} skipApproval />)
+  const row = refundRow()
+  fireEvent.change(within(row).getByLabelText('Amount ($)'), { target: { value: '12.5' } })
+  fireEvent.click(within(row).getByRole('button', { name: 'Refund $12.50' }))
+  expect(calls.requestRefund).not.toHaveBeenCalled()
+  fireEvent.click(within(row).getByRole('button', { name: 'Send $12.50 back via Stripe?' }))
+  await waitFor(() => expect(calls.sendRefund).toHaveBeenCalledWith({ auth: { token: 't' }, refundId: 'r2' }))
+  expect(calls.requestRefund).toHaveBeenCalledWith({ auth: { token: 't' }, checkoutId: 'c1', amountCents: 1250, reason: 'Refunded by an admin' })
+})
+
+test('blank refunds everything left', async () => {
+  render(<PaymentsAdminPage api={api} skipApproval />)
+  const row = refundRow()
+  fireEvent.click(within(row).getByRole('button', { name: 'Refund $70.00' }))
+  fireEvent.click(within(row).getByRole('button', { name: 'Send $70.00 back via Stripe?' }))
+  // No auth given: none is sent.
+  await waitFor(() => expect(calls.requestRefund).toHaveBeenCalledWith({ checkoutId: 'c1', amountCents: 7000, reason: 'Refunded by an admin' }))
+})
+
+test('the processor refusing a refund shows its reason by the row', async () => {
+  calls.sendRefund.mockResolvedValueOnce({ status: 'failed', error: 'Charge already refunded.' })
+  render(<PaymentsAdminPage api={api} skipApproval />)
+  const row = refundRow()
+  fireEvent.click(within(row).getByRole('button', { name: 'Refund $70.00' }))
+  fireEvent.click(within(row).getByRole('button', { name: 'Send $70.00 back via Stripe?' }))
+  await waitFor(() => expect(within(row).getByRole('alert').textContent).toBe('Charge already refunded.'))
+})
+
+test('without skipApproval a requested refund is approved, not sent, and a new one waits', async () => {
+  render(<PaymentsAdminPage api={api} />)
+  fireEvent.click(screen.getByRole('button', { name: 'Approve' }))
+  await waitFor(() => expect(calls.approveRefund).toHaveBeenCalledWith({ refundId: 'r1' }))
+  const row = refundRow()
+  fireEvent.click(within(row).getByRole('button', { name: 'Refund $70.00' }))
+  fireEvent.click(within(row).getByRole('button', { name: 'Ask to refund $70.00?' }))
+  await waitFor(() => expect(within(row).getByRole('status').textContent).toContain('waiting for approval'))
+  expect(calls.sendRefund).not.toHaveBeenCalled()
+})
+
+test('a charge with an unknown outcome can be retried or given up; errors stay by the issue', async () => {
+  calls.retryCharge.mockRejectedValueOnce(new Error('This charge is paid; there is nothing to retry.'))
+  render(<PaymentsAdminPage api={api} />)
+  const row = rowOf(screen.getByText('Stripe didn’t answer three times.'))
+  fireEvent.click(within(row).getByRole('button', { name: 'Try the charge again' }))
+  fireEvent.click(within(row).getByRole('button', { name: 'Charge again?' }))
+  await waitFor(() => expect(within(row).getByRole('alert').textContent).toBe('This charge is paid; there is nothing to retry.'))
+  fireEvent.click(within(row).getByRole('button', { name: 'Give up' }))
+  fireEvent.click(within(row).getByRole('button', { name: 'Give up on this charge?' }))
+  await waitFor(() => expect(calls.giveUpCharge).toHaveBeenCalledWith({ checkoutId: 'c2' }))
+  expect(within(row).queryByRole('alert')).toBeNull()
+})

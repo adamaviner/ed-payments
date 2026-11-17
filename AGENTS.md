@@ -30,3 +30,9 @@ The README has the API and the "Adopt in 5 steps" set-up.
    again after upgrading the library.
 8. **Test through the fakes.** `registerPayments(t)` from `@earthdance/payments/test`; don't mock
    `fetch` or a processor SDK yourself. Use test keys and `PAYMENTS_MODE` unset everywhere but production.
+9. **Use the React package for the return page and the admin page** (`@earthdance/payments/react`)
+   rather than writing your own: `useCheckoutReturn(api.payments.completeReturn, { processor, token })`
+   asks once and gives a state for you to word; `<PaymentsAdminPage api={api.paymentsAdmin} />` does
+   refunds (partial ones checked against what is left), approvals and issues. Add
+   `@source '../node_modules/@earthdance/payments/dist';` to your CSS. Never show a refund or payment
+   as done before the server says so.

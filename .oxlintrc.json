@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["typescript", "oxc"],
+  "plugins": ["react", "typescript", "oxc"],
   "options": { "reportUnusedDisableDirectives": "error" },
   "categories": { "suspicious": "error" },
   "ignorePatterns": ["dist", "**/_generated"],
@@ -18,6 +18,9 @@
     // Processor JSON is narrowed with `as` after a shape check, as in ed-schedule.
     "typescript/no-unsafe-type-assertion": "off",
     // Short callback names (q, r) reused in nested callbacks.
-    "no-shadow": "off"
+    "no-shadow": "off",
+    "react/rules-of-hooks": "error",
+    // The React package uses the automatic JSX runtime (jsx: react-jsx), which needs no React in scope.
+    "react/react-in-jsx-scope": "off"
   }
 }
