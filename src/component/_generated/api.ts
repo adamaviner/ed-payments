@@ -8,7 +8,14 @@
  * @module
  */
 
-import type * as probe from "../probe.js";
+import type * as checkouts from "../checkouts.js";
+import type * as disputes from "../disputes.js";
+import type * as events from "../events.js";
+import type * as issues from "../issues.js";
+import type * as lib from "../lib.js";
+import type * as maintenance from "../maintenance.js";
+import type * as refunds from "../refunds.js";
+import type * as settings from "../settings.js";
 
 import type {
   ApiFromModules,
@@ -18,7 +25,14 @@ import type {
 import { anyApi, componentsGeneric } from "convex/server";
 
 const fullApi: ApiFromModules<{
-  probe: typeof probe;
+  checkouts: typeof checkouts;
+  disputes: typeof disputes;
+  events: typeof events;
+  issues: typeof issues;
+  lib: typeof lib;
+  maintenance: typeof maintenance;
+  refunds: typeof refunds;
+  settings: typeof settings;
 }> = anyApi as any;
 
 /**
