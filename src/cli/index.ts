@@ -76,8 +76,8 @@ async function main(argv: string[]): Promise<number> {
     if (apiBase !== PAYPAL_LIVE_API && apiBase !== PAYPAL_SANDBOX_API) throw new Error(`PAYPAL_API_BASE must be ${PAYPAL_LIVE_API} or ${PAYPAL_SANDBOX_API}.`)
     result = await paypalWebhook({ clientId, clientSecret, apiBase }, run)
   }
-  console.log(`${stripeUrl ? 'Stripe' : 'PayPal'} webhook ${url}: ${result.action}${result.id ? ` (${result.id})` : ''}`)
-  for (const n of result.notes) console.log(`  ${n}`)
+  console.info(`${stripeUrl ? 'Stripe' : 'PayPal'} webhook ${url}: ${result.action}${result.id ? ` (${result.id})` : ''}`)
+  for (const n of result.notes) console.info(`  ${n}`)
   return 0
 }
 

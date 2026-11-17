@@ -2,10 +2,7 @@
   "_source": "Stripe test mode, API 2026-10-28.endive, off_session charge of pm_usBankAccount_success, captured 2026-11-17 by scripts/capture (scrubbed)",
   "id": "pi_3UcsRcL4sVH3OBLn1Vr64M5e",
   "object": "payment_intent",
-  "allowed_payment_method_types": [
-    "card",
-    "us_bank_account"
-  ],
+  "allowed_payment_method_types": ["card", "us_bank_account"],
   "amount": 2500,
   "amount_capturable": 0,
   "amount_details": {
@@ -53,10 +50,7 @@
       "verification_method": "automatic"
     }
   },
-  "payment_method_types": [
-    "card",
-    "us_bank_account"
-  ],
+  "payment_method_types": ["card", "us_bank_account"],
   "payment_record": null,
   "processing": null,
   "receipt_email": null,

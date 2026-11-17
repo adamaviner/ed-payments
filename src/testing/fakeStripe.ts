@@ -98,7 +98,9 @@ export function fakeStripe({ webhookSecret = FAKE_STRIPE_WEBHOOK_SECRET, fallbac
     return {
       ...out,
       payment_method: m ? structuredClone(m.pm) : null,
-      latest_charge: paid ? ({ ...base.latest_charge, id: `ch_${pi.id}`, payment_intent: pi.id, balance_transaction: { id: `txn_${pi.id}`, fee } } as unknown as StripePaymentIntent['latest_charge']) : null,
+      latest_charge: paid
+        ? ({ ...base.latest_charge, id: `ch_${pi.id}`, payment_intent: pi.id, balance_transaction: { id: `txn_${pi.id}`, fee } } as unknown as StripePaymentIntent['latest_charge'])
+        : null,
     }
   }
 
@@ -116,7 +118,8 @@ export function fakeStripe({ webhookSecret = FAKE_STRIPE_WEBHOOK_SECRET, fallbac
   }
 
   function newIntent(params: URLSearchParams): StripePaymentIntent {
-    const base = fixture(stripeObjectFixtures.paymentIntentOnSession) as unknown as StripePaymentIntent
+    // Shaped from the real answer for the same request: confirmed off-session, or left for the browser.
+    const base = fixture(params.get('confirm') === 'true' ? stripeObjectFixtures.paymentIntentOffSession : stripeObjectFixtures.paymentIntentOnSession) as unknown as StripePaymentIntent
     const id = `pi_fake${++n}`
     return {
       ...base,
@@ -277,7 +280,12 @@ export function fakeStripe({ webhookSecret = FAKE_STRIPE_WEBHOOK_SECRET, fallbac
     }
     if (method === 'GET' && url.pathname === '/v1/payment_intents') {
       const customer = params.get('customer')
-      return ok(list([...paymentIntents.values()].filter((pi) => !customer || pi.customer === customer), params))
+      return ok(
+        list(
+          [...paymentIntents.values()].filter((pi) => !customer || pi.customer === customer),
+          params,
+        ),
+      )
     }
 
     // Refunds
@@ -415,6 +423,17 @@ export function fakeStripe({ webhookSecret = FAKE_STRIPE_WEBHOOK_SECRET, fallbac
       sessions.set(id, { s, method: 'card', fee: 0 })
       intents.set(pi, { amount, fee: 0, metadata: { app } })
       return s
+    },
+    /** A charge paid at Stripe, tagged for `app`, that no checkout knows (for the comparison's "missing here"). */
+    intentElsewhere(app: string, amount: number): StripePaymentIntent {
+      const pi = newIntent(new URLSearchParams({ amount: String(amount), customer: 'cus_elsewhere', 'metadata[app]': app, 'metadata[checkoutId]': 'lost-row' }))
+      paid(pi)
+      paymentIntents.set(pi.id, pi)
+      return structuredClone(pi)
+    },
+    /** Stripe loses a PaymentIntent (for the comparison's "missing there"). */
+    forgetIntent(id: string) {
+      paymentIntents.delete(id)
     },
     /** How refunds made after this come back. */
     refundsCome(status: StripeRefund['status']) {

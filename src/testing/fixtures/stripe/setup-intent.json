@@ -2,10 +2,7 @@
   "_source": "Stripe test mode, API 2026-10-28.endive, POST /v1/setup_intents, captured 2026-11-17 by scripts/capture (scrubbed)",
   "id": "seti_1UcsRaL4sVH3OBLnwGPqUELm",
   "object": "setup_intent",
-  "allowed_payment_method_types": [
-    "card",
-    "us_bank_account"
-  ],
+  "allowed_payment_method_types": ["card", "us_bank_account"],
   "application": null,
   "automatic_payment_methods": null,
   "cancellation_reason": null,
@@ -39,19 +36,14 @@
     },
     "us_bank_account": {
       "financial_connections": {
-        "permissions": [
-          "payment_method"
-        ],
+        "permissions": ["payment_method"],
         "prefetch": []
       },
       "mandate_options": {},
       "verification_method": "instant"
     }
   },
-  "payment_method_types": [
-    "card",
-    "us_bank_account"
-  ],
+  "payment_method_types": ["card", "us_bank_account"],
   "single_use_mandate": null,
   "status": "requires_payment_method",
   "usage": "off_session"

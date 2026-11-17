@@ -8,10 +8,7 @@
     "object": {
       "id": "pi_3UcsRbL4sVH3OBLn1KyYSlfV",
       "object": "payment_intent",
-      "allowed_payment_method_types": [
-        "card",
-        "us_bank_account"
-      ],
+      "allowed_payment_method_types": ["card", "us_bank_account"],
       "amount": 2500,
       "amount_capturable": 0,
       "amount_details": {
@@ -74,9 +71,7 @@
             "generated_from": null,
             "last4": "0341",
             "networks": {
-              "available": [
-                "visa"
-              ],
+              "available": ["visa"],
               "preferred": null
             },
             "regulated_status": "unregulated",
@@ -122,10 +117,7 @@
           "verification_method": "automatic"
         }
       },
-      "payment_method_types": [
-        "card",
-        "us_bank_account"
-      ],
+      "payment_method_types": ["card", "us_bank_account"],
       "payment_record": null,
       "processing": null,
       "receipt_email": null,

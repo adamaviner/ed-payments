@@ -33,9 +33,7 @@
     "last4": "6789",
     "networks": {
       "preferred": "ach",
-      "supported": [
-        "ach"
-      ]
+      "supported": ["ach"]
     },
     "routing_number": "110000000",
     "status_details": {}

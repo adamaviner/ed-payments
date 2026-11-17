@@ -100,11 +100,9 @@ export const fromEnv = {
   /** PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET, PAYPAL_WEBHOOK_ID, PAYPAL_API_BASE (unset: live in live mode, else the sandbox); PAYPAL_REQUIRED=true as for Stripe. */
   paypal: (): KeySource<PaypalKeys> => source(paypalKeys, paypalProblems, 'PayPal'),
   /** SITE_URL, else the fallback. */
-  siteUrl:
-    (fallback?: string) =>
-    (): string => {
-      const url = env().SITE_URL?.trim() || fallback
-      if (!url) throw new Error('SITE_URL isn’t set on this deployment.')
-      return url
-    },
+  siteUrl: (fallback?: string) => (): string => {
+    const url = env().SITE_URL?.trim() || fallback
+    if (!url) throw new Error('SITE_URL isn’t set on this deployment.')
+    return url
+  },
 }

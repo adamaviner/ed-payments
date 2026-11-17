@@ -44,8 +44,9 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
   const refundedOf = (captureId: string) =>
     [...refunds.values()].filter((r) => r.captureId === captureId && r.status !== 'FAILED' && r.status !== 'CANCELLED').reduce((s, r) => s + (decimalToCents(r.amount?.value) ?? 0), 0)
 
-  function orderJson(o: Order): PaypalOrder {
-    const base = fixture(paypalObjectFixtures.orderUnapproved) as unknown as PaypalOrder & { purchase_units: Record<string, unknown>[] }
+  /** The order as PayPal shows it; `created` is the answer to creating it, which (as in the sandbox) has no create_time yet. */
+  function orderJson(o: Order, created = false): PaypalOrder {
+    const base = fixture(created ? paypalObjectFixtures.orderCreated : paypalObjectFixtures.orderUnapproved) as unknown as PaypalOrder & { purchase_units: Record<string, unknown>[] }
     const unit = {
       ...base.purchase_units[0],
       custom_id: o.customId,
@@ -117,7 +118,7 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
         createdAt: Date.now(),
       }
       orders.set(o.id, o)
-      return remember(orderJson(o), 200)
+      return remember(orderJson(o, true), 200)
     }
     if (path[1] === 'checkout' && path[2] === 'orders' && path[3]) {
       const o = orders.get(path[3])
@@ -214,7 +215,7 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
     calls,
     webhook,
     order: (id: string) => orderJson(order(id)),
-    orders: () => [...orders.values()].map(orderJson),
+    orders: () => [...orders.values()].map((o) => orderJson(o)),
     refunds: () => [...refunds.values()],
     get tokens() {
       return tokens

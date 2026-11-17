@@ -6,10 +6,7 @@
   "application": null,
   "created": 1680122196,
   "description": "ed-payments",
-  "enabled_events": [
-    "charge.succeeded",
-    "charge.failed"
-  ],
+  "enabled_events": ["charge.succeeded", "charge.failed"],
   "livemode": false,
   "metadata": {},
   "status": "enabled",

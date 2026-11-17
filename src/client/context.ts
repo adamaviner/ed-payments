@@ -54,6 +54,10 @@ export function mismatch(validator: GenericValidator, value: unknown, path = 'co
       const members: GenericValidator[] = validator.members
       return members.some((m) => mismatch(m, value, path) === null) ? null : `${path} matches none of the allowed shapes`
     }
+    // Kinds that can't be stored in a checkout's context; Convex checks them anyway when the callback runs.
+    case 'commitTs':
+    case 'function':
+      return null
   }
   // A kind of validator newer than this check: Convex still validates it when the callback is called.
   return null

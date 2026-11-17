@@ -366,7 +366,8 @@ export const stripe = {
     stripeCall<StripeWebhookEndpoint>(keys, 'POST', '/v1/webhook_endpoints', { url: w.url, enabled_events: [...w.events], api_version: STRIPE_API_VERSION, description: w.description }, o),
   updateWebhookEndpoint: (keys: Keys, id: string, events: readonly string[], o: StripeCallOptions) =>
     stripeCall<StripeWebhookEndpoint>(keys, 'POST', `/v1/webhook_endpoints/${encodeURIComponent(id)}`, { enabled_events: [...events], disabled: false }, o),
-  deleteWebhookEndpoint: (keys: Keys, id: string, o: StripeCallOptions) => stripeCall<{ id: string; deleted: boolean }>(keys, 'DELETE', `/v1/webhook_endpoints/${encodeURIComponent(id)}`, undefined, o),
+  deleteWebhookEndpoint: (keys: Keys, id: string, o: StripeCallOptions) =>
+    stripeCall<{ id: string; deleted: boolean }>(keys, 'DELETE', `/v1/webhook_endpoints/${encodeURIComponent(id)}`, undefined, o),
 }
 
 /**

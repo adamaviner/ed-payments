@@ -36,9 +36,7 @@
         "last4": "6789",
         "networks": {
           "preferred": "ach",
-          "supported": [
-            "ach"
-          ]
+          "supported": ["ach"]
         },
         "routing_number": "110000000",
         "status_details": {}
@@ -78,9 +76,7 @@
         "generated_from": null,
         "last4": "3184",
         "networks": {
-          "available": [
-            "visa"
-          ],
+          "available": ["visa"],
           "preferred": null
         },
         "regulated_status": "unregulated",
@@ -131,9 +127,7 @@
         "generated_from": null,
         "last4": "0341",
         "networks": {
-          "available": [
-            "visa"
-          ],
+          "available": ["visa"],
           "preferred": null
         },
         "regulated_status": "unregulated",
@@ -184,9 +178,7 @@
         "generated_from": null,
         "last4": "4242",
         "networks": {
-          "available": [
-            "visa"
-          ],
+          "available": ["visa"],
           "preferred": null
         },
         "regulated_status": "unregulated",

@@ -64,7 +64,8 @@ payments.registerRoutes(http, {
 })
 
 /** Records a callback the component made. */
-const record = async (ctx: { db: { insert: (table: 'calls', doc: { name: string; args: unknown }) => Promise<unknown> } }, name: string, args: unknown) => void (await ctx.db.insert('calls', { name, args }))
+const record = async (ctx: { db: { insert: (table: 'calls', doc: { name: string; args: unknown }) => Promise<unknown> } }, name: string, args: unknown) =>
+  void (await ctx.db.insert('calls', { name, args }))
 
 const startArgs = {
   processor: v.union(v.literal('stripe'), v.literal('paypal')),
@@ -106,7 +107,10 @@ export const defined = app.defineModules({
     isAdmin: app.internalQuery({
       args: { auth: v.optional(v.any()) },
       handler: async (ctx, { auth }) => {
-        const row = typeof auth === 'string' ? (await ctx.db.query('admins').collect()).find((x) => x.token === auth) : undefined
+        // An app on Convex auth: the caller's identity carries into this query.
+        const me = await ctx.auth.getUserIdentity()
+        const token = typeof auth === 'string' ? auth : me ? `user:${me.subject}` : null
+        const row = token ? (await ctx.db.query('admins').collect()).find((x) => x.token === token) : undefined
         return row ? { name: row.name } : null
       },
     }),
@@ -191,7 +195,8 @@ export const defined = app.defineModules({
   bids: {
     setup: app.action({
       args: { user: v.string(), email: v.string() },
-      handler: async (ctx, a): Promise<{ clientSecret: string; stripeCustomerId: string }> => await payments.setupPaymentMethod(ctx, { owner: { type: 'user', id: a.user }, payer: { email: a.email } }),
+      handler: async (ctx, a): Promise<{ clientSecret: string; stripeCustomerId: string }> =>
+        await payments.setupPaymentMethod(ctx, { owner: { type: 'user', id: a.user }, payer: { email: a.email } }),
     }),
     methods: app.action({
       args: { user: v.string(), stripeCustomerId: v.optional(v.string()) },

@@ -43,7 +43,15 @@ export const refundStatus = v.union(v.literal('requested'), v.literal('approved'
 
 export const eventOutcome = v.union(v.literal('received'), v.literal('handled'), v.literal('ignored'), v.literal('foreign'))
 
-export const issueKind = v.union(v.literal('missing_here'), v.literal('missing_there'), v.literal('amount_differs'), v.literal('status_differs'), v.literal('dispute'), v.literal('callback_failed'), v.literal('charge_unknown'))
+export const issueKind = v.union(
+  v.literal('missing_here'),
+  v.literal('missing_there'),
+  v.literal('amount_differs'),
+  v.literal('status_differs'),
+  v.literal('dispute'),
+  v.literal('callback_failed'),
+  v.literal('charge_unknown'),
+)
 
 export default defineSchema({
   checkouts: defineTable({

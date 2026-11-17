@@ -5,10 +5,7 @@
     {
       "id": "pi_3UcsRdL4sVH3OBLn0qbaqxHO",
       "object": "payment_intent",
-      "allowed_payment_method_types": [
-        "card",
-        "us_bank_account"
-      ],
+      "allowed_payment_method_types": ["card", "us_bank_account"],
       "amount": 2500,
       "amount_capturable": 0,
       "amount_details": {
@@ -52,9 +49,7 @@
         },
         "us_bank_account": {
           "financial_connections": {
-            "permissions": [
-              "payment_method"
-            ],
+            "permissions": ["payment_method"],
             "prefetch": []
           },
           "mandate_options": {},
@@ -62,10 +57,7 @@
           "verification_method": "instant"
         }
       },
-      "payment_method_types": [
-        "card",
-        "us_bank_account"
-      ],
+      "payment_method_types": ["card", "us_bank_account"],
       "payment_record": null,
       "processing": null,
       "receipt_email": null,
@@ -83,10 +75,7 @@
     {
       "id": "pi_3UcsRcL4sVH3OBLn1Vr64M5e",
       "object": "payment_intent",
-      "allowed_payment_method_types": [
-        "card",
-        "us_bank_account"
-      ],
+      "allowed_payment_method_types": ["card", "us_bank_account"],
       "amount": 2500,
       "amount_capturable": 0,
       "amount_details": {
@@ -134,10 +123,7 @@
           "verification_method": "automatic"
         }
       },
-      "payment_method_types": [
-        "card",
-        "us_bank_account"
-      ],
+      "payment_method_types": ["card", "us_bank_account"],
       "payment_record": null,
       "processing": null,
       "receipt_email": null,
@@ -155,10 +141,7 @@
     {
       "id": "pi_3UcsRcL4sVH3OBLn1L6zw85V",
       "object": "payment_intent",
-      "allowed_payment_method_types": [
-        "card",
-        "us_bank_account"
-      ],
+      "allowed_payment_method_types": ["card", "us_bank_account"],
       "amount": 2500,
       "amount_capturable": 0,
       "amount_details": {
@@ -218,9 +201,7 @@
             "generated_from": null,
             "last4": "3184",
             "networks": {
-              "available": [
-                "visa"
-              ],
+              "available": ["visa"],
               "preferred": null
             },
             "regulated_status": "unregulated",
@@ -266,10 +247,7 @@
           "verification_method": "automatic"
         }
       },
-      "payment_method_types": [
-        "card",
-        "us_bank_account"
-      ],
+      "payment_method_types": ["card", "us_bank_account"],
       "payment_record": null,
       "processing": null,
       "receipt_email": null,

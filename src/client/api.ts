@@ -210,7 +210,8 @@ export function adminApi<C extends GenericValidator>(p: Payments<C>, o: AdminApi
         const who = await admin(p, ctx, a.auth)
         const x = await ctx.runQuery(c.checkouts.get, { id: a.checkoutId })
         if (!x || x.app !== p.app || x.kind !== 'offSession') throw new ConvexError('There is no such charge.')
-        if (x.status !== 'created' && x.status !== 'pending') throw new ConvexError(x.status === 'processing' ? 'A bank payment for this is on its way; wait for it.' : `This charge is already ${x.status}.`)
+        if (x.status !== 'created' && x.status !== 'pending')
+          throw new ConvexError(x.status === 'processing' ? 'A bank payment for this is on its way; wait for it.' : `This charge is already ${x.status}.`)
         await ctx.runMutation(c.checkouts.settleFailed, { id: x.id, reason: `Given up by ${who.name}: ${x.lastError ?? 'the charge didn’t complete'}`, now: Date.now() })
         return null
       },

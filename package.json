@@ -21,11 +21,13 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "check": "npm run typecheck && npm run lint && npm run format:check && npm test",
-    "release": "sh scripts/release.sh"
+    "release": "sh scripts/release.sh",
+    "test:sandbox": "vitest run --config vitest.sandbox.config.ts"
   },
   "files": [
     "dist",
-    "src"
+    "src",
+    "AGENTS.md"
   ],
   "exports": {
     "./package.json": "./package.json",
@@ -69,5 +71,8 @@
     "vitest": "^4.1.11"
   },
   "types": "./dist/client/index.d.ts",
-  "module": "./dist/client/index.js"
+  "module": "./dist/client/index.js",
+  "bin": {
+    "ed-payments": "dist/cli/index.js"
+  }
 }

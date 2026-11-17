@@ -47,7 +47,12 @@ export async function stripeWebhook(secretKey: string, r: Run): Promise<WebhookR
     return { action: 'removed', id: found.id, notes: [] }
   }
   if (found) {
-    const notes = found.api_version && found.api_version !== STRIPE_API_VERSION ? [`It sends events in API version ${found.api_version}; the library reads ${STRIPE_API_VERSION}. Stripe can’t change that: remove it and run this again (then set the new STRIPE_WEBHOOK_SECRET).`] : []
+    const notes =
+      found.api_version && found.api_version !== STRIPE_API_VERSION
+        ? [
+            `It sends events in API version ${found.api_version}; the library reads ${STRIPE_API_VERSION}. Stripe can’t change that: remove it and run this again (then set the new STRIPE_WEBHOOK_SECRET).`,
+          ]
+        : []
     if (same(found.enabled_events, events) && found.status !== 'disabled') return { action: 'unchanged', id: found.id, notes }
     if (r.dryRun) return { action: 'would update', id: found.id, notes }
     await stripe.updateWebhookEndpoint(keys, found.id, events, o)

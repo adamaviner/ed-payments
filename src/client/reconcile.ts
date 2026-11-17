@@ -143,7 +143,8 @@ async function stripeIntents(p: Payments, ctx: RunActionCtx, sinceSec: number, o
     if (!c) found.push({ kind: 'missing_here', detail: `Stripe has a ${state} payment of ${dollars(pi.amount)} (PaymentIntent ${pi.id}) that isn’t recorded here.` })
     else if (state === 'paid' && !isPaidHere(c)) found.push({ kind: 'status_differs', detail: `Stripe says ${c.description} was paid; here it is ${c.status}.` })
     else if (isPaidHere(c) && state !== 'paid') found.push({ kind: 'status_differs', detail: `${c.description} is ${c.status} here, but Stripe’s PaymentIntent is ${pi.status}.` })
-    else if (isPaidHere(c) && c.paidCents !== pi.amount_received) found.push({ kind: 'amount_differs', detail: `${c.description}: Stripe took ${dollars(pi.amount_received)}, here ${dollars(c.paidCents)}.` })
+    else if (isPaidHere(c) && c.paidCents !== pi.amount_received)
+      found.push({ kind: 'amount_differs', detail: `${c.description}: Stripe took ${dollars(pi.amount_received)}, here ${dollars(c.paidCents)}.` })
     await sync('stripe', c?.paymentRef ?? pi.id, c, found)
   }
 }
