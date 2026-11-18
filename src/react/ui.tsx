@@ -1,6 +1,6 @@
 // The package's own few primitives, plain elements so it needs no UI library and never imports an
 // app's components. They use the shadcn theme token names (bg-primary, bg-muted, ...) the apps define.
-import { type ComponentProps, type ReactNode, useState } from 'react'
+import { type ComponentProps, type ReactNode, useEffect, useState } from 'react'
 
 /** Joins class names, leaving out the falsy ones. No tailwind-merge: a class passed in is added, not swapped for a conflicting one. */
 export function cn(...parts: (string | false | null | undefined)[]): string {
@@ -59,7 +59,12 @@ export function ErrorNote({ error, className }: { error: string | null | undefin
   )
 }
 
-/** A short status under an action, e.g. what giving up on a charge found. */
+/** Quiet text: loading, empty lists, what an action does. Not a live region, so many rows stay silent. */
+export function Hint({ children, className }: { children: ReactNode; className?: string }) {
+  return <p className={cn('text-sm text-muted-foreground', className)}>{children}</p>
+}
+
+/** The outcome of an action, e.g. what giving up on a charge found; read out when it appears. */
 export function Note({ children, className }: { children: ReactNode; className?: string }) {
   return (
     <p role="status" className={cn('text-sm text-muted-foreground', className)}>
@@ -73,36 +78,28 @@ export function Note({ children, className }: { children: ReactNode; className?:
  * red with `confirmLabel`, the second runs `onConfirm`. Leaving the button disarms it. `onConfirm`
  * shows its own errors (the page's actions go through useSaver, which never rejects).
  */
-export function ConfirmButton({
-  children,
-  confirmLabel,
-  onConfirm,
-  disabled,
-  title,
-}: {
-  children: ReactNode
-  confirmLabel: ReactNode
-  onConfirm: () => Promise<unknown>
-  disabled?: boolean
-  title?: string
-}) {
+export function ConfirmButton({ children, confirmLabel, onConfirm, disabled }: { children: ReactNode; confirmLabel: ReactNode; onConfirm: () => Promise<unknown>; disabled?: boolean }) {
   const [armed, setArmed] = useState(false)
-  return armed ? (
+  // Safari and Firefox on macOS don't focus a clicked button, so it may never blur; disarm after a while too.
+  useEffect(() => {
+    if (!armed) return undefined
+    const timer = setTimeout(() => setArmed(false), 8000)
+    return () => clearTimeout(timer)
+  }, [armed])
+  // One button whose label changes, announced politely so a screen reader hears the question.
+  return (
     <Button
-      variant="destructive"
-      title={title}
+      variant={armed ? 'destructive' : 'outline'}
+      aria-live="polite"
       disabled={disabled}
       onClick={() => {
+        if (!armed) return setArmed(true)
         setArmed(false)
         void onConfirm()
       }}
       onBlur={() => setArmed(false)}
     >
-      {confirmLabel}
-    </Button>
-  ) : (
-    <Button disabled={disabled} title={title} onClick={() => setArmed(true)}>
-      {children}
+      {armed ? confirmLabel : children}
     </Button>
   )
 }

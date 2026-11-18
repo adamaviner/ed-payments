@@ -4,15 +4,19 @@
 import { useAction } from 'convex/react'
 import type { FunctionReturnType } from 'convex/server'
 import { useCallback, useEffect, useRef, useState } from 'react'
+import type { CheckoutStatus } from '../client/index.js'
 import type { Processor } from '../core/types.js'
 import type { CompleteReturnRef, PaymentRef } from './types.js'
 
 /**
  * checking: asking the library. paid: the app recorded the sale. processing: a bank payment on its way
  * (days). refund_needed: the money arrived but the app couldn't make the sale, so it will be refunded.
- * failed: the processor said no. cancelled: nothing was paid (the buyer turned back, or it expired).
+ * failed: the processor said no. cancelled: nothing has been paid, at least not yet: the buyer turned
+ * back (PayPal sends its token to the cancel page too), it expired, or (rarely, a card on the app's own
+ * page) the processor is still finishing it; the callbacks tell the app if it pays later.
  * error: no token in the address, a token that isn't one of this app's payments, or the call failed
- * (`retry` asks again).
+ * (`retry` asks again; the library allows a few calls per token, so a retry after a refusal for too
+ * many tries is refused again for a while).
  */
 export type CheckoutReturn =
   | { state: 'checking' }
@@ -24,20 +28,21 @@ export type CheckoutReturnState = CheckoutReturn['state']
 type Answer = FunctionReturnType<CompleteReturnRef>
 type Settled = Exclude<CheckoutReturn, { state: 'checking' }>
 
-const STATES: Record<string, Exclude<CheckoutReturnState, 'checking' | 'error'> | undefined> = {
+// Keyed by every checkout status, so a new one fails the typecheck here rather than showing an error to a buyer.
+const STATES: Record<CheckoutStatus, Exclude<CheckoutReturnState, 'checking' | 'error'>> = {
   paid: 'paid',
   processing: 'processing',
   refund_needed: 'refund_needed',
   failed: 'failed',
   abandoned: 'cancelled',
-  // Back at the app without having finished at the processor (PayPal sends its token to the cancel page too).
+  // Back at the app without having finished at the processor.
   pending: 'cancelled',
   created: 'cancelled',
 }
 
 function settledFrom(answer: Answer): Settled {
   if (!answer) return { state: 'error', reason: 'not_found' }
-  const state = STATES[answer.status]
+  const state = (STATES as Partial<Record<string, (typeof STATES)[CheckoutStatus]>>)[answer.status]
   return state ? { state, purpose: answer.purpose, ref: answer.ref } : { state: 'error', reason: 'request_failed', error: new Error(`Unknown checkout status ${answer.status}.`) }
 }
 

@@ -21,7 +21,7 @@ test('refuses more than is left, nothing, and anything that is not plain dollars
   expect(parseRefundAmount('', 0)).toEqual({ ok: false, error: 'Nothing is left to refund on this payment.' })
 })
 
-test('what is left takes off refunds done and refunds on their way, not failed ones or other payments', () => {
+test('what is left takes off refunds done and open ones (failed too, as they can be sent again), not other payments', () => {
   const checkout = { id: 'c1', paidCents: 10000, refundedCents: 1000 }
   const refunds = [
     { checkoutId: 'c1', status: 'requested' as const, amountCents: 2000 },
@@ -29,7 +29,7 @@ test('what is left takes off refunds done and refunds on their way, not failed o
     { checkoutId: 'c1', status: 'failed' as const, amountCents: 3000 },
     { checkoutId: 'c2', status: 'approved' as const, amountCents: 4000 },
   ]
-  expect(refundableCents(checkout, refunds)).toBe(6500)
+  expect(refundableCents(checkout, refunds)).toBe(3500)
   expect(refundableCents({ id: 'c1', paidCents: null, refundedCents: 0 })).toBe(0)
   expect(refundableCents({ id: 'c1', paidCents: 1000, refundedCents: 500 }, [{ checkoutId: 'c1', status: 'approved', amountCents: 900 }])).toBe(0)
 })

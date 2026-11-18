@@ -87,6 +87,12 @@ function rowOf(el: HTMLElement): HTMLElement {
   return row
 }
 
+/** What the amount box says is wrong with it: the text its aria-describedby points at. */
+function amountError(row: HTMLElement): string {
+  const id = within(row).getByLabelText('Amount ($)').getAttribute('aria-describedby')
+  return (id && document.getElementById(id)?.textContent) || ''
+}
+
 /** The row of the "Refund a payment" list. */
 const refundRow = () => rowOf(screen.getByLabelText('Amount ($)'))
 
@@ -96,10 +102,12 @@ test('what is left counts the open refund; more than that is refused in place', 
   // $100 paid, $10 refunded, $20 asked for and not sent: $70 left.
   expect(within(row).getByText('$70.00 left')).toBeTruthy()
   fireEvent.change(within(row).getByLabelText('Amount ($)'), { target: { value: '70.01' } })
-  expect(within(row).getByRole('alert').textContent).toBe('Only $70.00 is left to refund on this payment.')
+  expect(amountError(row)).toBe('Only $70.00 is left to refund on this payment.')
   expect(within(row).getByRole<HTMLButtonElement>('button', { name: 'Refund' }).disabled).toBe(true)
   fireEvent.change(within(row).getByLabelText('Amount ($)'), { target: { value: 'ten' } })
-  expect(within(row).getByRole('alert').textContent).toBe('Enter an amount in dollars, like 12.50.')
+  expect(amountError(row)).toBe('Enter an amount in dollars, like 12.50.')
+  // Not an alert: a screen reader would read it out on every keystroke.
+  expect(within(row).queryByRole('alert')).toBeNull()
 })
 
 test('a refund asks twice, then requests the typed amount in cents and sends it', async () => {
@@ -129,6 +137,19 @@ test('the processor refusing a refund shows its reason by the row', async () => 
   fireEvent.click(within(row).getByRole('button', { name: 'Refund $70.00' }))
   fireEvent.click(within(row).getByRole('button', { name: 'Send $70.00 back via Stripe?' }))
   await waitFor(() => expect(within(row).getByRole('alert').textContent).toBe('Charge already refunded.'))
+})
+
+test('a refund recorded but not sent clears the form, so it is finished in Refunds to do and not asked again', async () => {
+  calls.sendRefund.mockRejectedValueOnce(new Error('Network down'))
+  render(<PaymentsAdminPage api={api} skipApproval />)
+  const row = refundRow()
+  fireEvent.change(within(row).getByLabelText('Amount ($)'), { target: { value: '5' } })
+  fireEvent.click(within(row).getByRole('button', { name: 'Refund $5.00' }))
+  fireEvent.click(within(row).getByRole('button', { name: 'Send $5.00 back via Stripe?' }))
+  await waitFor(() => expect(within(row).getByRole('alert').textContent).toBe('Network down'))
+  expect(within(row).getByRole('status').textContent).toContain('Finish it in Refunds to do')
+  expect(within(row).getByLabelText<HTMLInputElement>('Amount ($)').value).toBe('')
+  expect(calls.requestRefund).toHaveBeenCalledTimes(1)
 })
 
 test('without skipApproval a requested refund is approved, not sent, and a new one waits', async () => {

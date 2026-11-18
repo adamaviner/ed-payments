@@ -4,10 +4,10 @@
 // and the lists follow from the queries, so no amount on the page is ever a guess.
 import { useAction, useMutation, usePaginatedQuery, useQuery } from 'convex/react'
 import { type ReactNode, useId, useState } from 'react'
-import { dollars } from '../core/money.js'
+import { centsToDecimal, dollars } from '../core/money.js'
 import { parseRefundAmount, refundableCents } from './refundAmount.js'
 import type { CheckoutSummary, OpenRefund, PaymentIssue, PaymentRef, PaymentsAdminApi, PaymentsAuth } from './types.js'
-import { Button, ConfirmButton, ErrorNote, Field, Input, Note, Rows, Section } from './ui.js'
+import { Button, ConfirmButton, ErrorNote, Field, Hint, Input, Note, Rows, Section } from './ui.js'
 import { useSaver } from './useSaver.js'
 
 export interface PaymentsAdminPageProps {
@@ -109,9 +109,9 @@ function OpenRefunds({ shared, refunds }: { shared: Shared; refunds: OpenRefund[
   return (
     <Section title="Refunds to do" hint="Money owed back: payments that arrived for something that couldn’t be sold, and refunds asked for below.">
       {refunds === undefined ? (
-        <Note>Loading…</Note>
+        <Hint>Loading…</Hint>
       ) : refunds.length === 0 ? (
-        <Note>Nothing to refund right now.</Note>
+        <Hint>Nothing to refund right now.</Hint>
       ) : (
         <Rows>
           {refunds.map((r) => (
@@ -163,9 +163,10 @@ function RefundRow({ shared, refund }: { shared: Shared; refund: OpenRefund }) {
         </div>
       </div>
       {refund.status === 'sending' ? (
-        <Note>Waiting for {processor}’s answer. It is asked again automatically.</Note>
+        <Hint>Waiting for {processor}’s answer. It is asked again automatically.</Hint>
       ) : closing ? (
         <div className="flex flex-wrap items-end gap-2">
+          {closing === 'manual' && <Hint className="basis-full">Only when it was already refunded outside this page, e.g. in {processor}’s dashboard. Nothing is sent.</Hint>}
           <Field label={closing === 'manual' ? 'How it was refunded (optional)' : 'Why not (optional)'} htmlFor={noteId} className="min-w-64 flex-1">
             <Input id={noteId} value={note} onChange={(e) => setNote(e.target.value)} disabled={busy} />
           </Field>
@@ -190,7 +191,6 @@ function RefundRow({ shared, refund }: { shared: Shared; refund: OpenRefund }) {
           <Button
             variant="ghost"
             disabled={busy}
-            title={`Only when it was already refunded outside this page, e.g. in ${processor}’s dashboard. Nothing is sent.`}
             onClick={() => {
               setNote('')
               setClosing('manual')
@@ -222,9 +222,9 @@ function Refundable({ shared, refunds, pageSize }: { shared: Shared; refunds: Op
   return (
     <Section title="Refund a payment" hint="Paid payments with something left to refund, newest first. Leave the amount blank to refund everything left.">
       {status === 'LoadingFirstPage' ? (
-        <Note>Loading…</Note>
+        <Hint>Loading…</Hint>
       ) : results.length === 0 ? (
-        <Note>No paid payments to refund.</Note>
+        <Hint>No paid payments to refund.</Hint>
       ) : (
         <Rows>
           {results.map((c) => (
@@ -248,24 +248,30 @@ function CheckoutRow({ shared, checkout, refunds }: { shared: Shared; checkout: 
   const { error, run, busy } = useSaver()
   const [amount, setAmount] = useState('')
   const [reason, setReason] = useState('')
-  const [asked, setAsked] = useState(false)
+  const [asked, setAsked] = useState<string | null>(null)
   const amountId = useId()
   const reasonId = useId()
+  const amountErrorId = useId()
   // Until the open refunds load, what they hold is unknown, so nothing can be refunded yet.
   const left = refunds ? refundableCents(checkout, refunds) : 0
   const parsed = parseRefundAmount(amount, left)
   const processor = processorName(checkout.processor)
 
+  // Two steps, and the form clears as soon as the refund is recorded: if sending then fails, the refund
+  // is already in Refunds to do, and a form still filled in would invite a second refund of the same money.
   const refund = async (cents: number) => {
-    setAsked(false)
-    const ok = await run(async () => {
-      const refundId = await requestRefund({ ...args, checkoutId: checkout.id, amountCents: cents, reason: reason.trim() || 'Refunded by an admin' })
-      if (skipApproval) await send(sendRefund, args, refundId)
+    setAsked(null)
+    let refundId: string | null = null
+    const recorded = await run(async () => {
+      refundId = await requestRefund({ ...args, checkoutId: checkout.id, amountCents: cents, reason: reason.trim() || 'Refunded by an admin' })
     })
-    if (!ok) return
+    if (!recorded || refundId === null) return
     setAmount('')
     setReason('')
-    setAsked(!skipApproval)
+    if (!skipApproval) return setAsked('Asked for. It is in Refunds to do, waiting for approval.')
+    const id: string = refundId
+    const sent = await run(() => send(sendRefund, args, id))
+    if (!sent) setAsked('The refund is recorded but wasn’t sent. Finish it in Refunds to do.')
   }
 
   return (
@@ -282,10 +288,11 @@ function CheckoutRow({ shared, checkout, refunds }: { shared: Shared; checkout: 
             id={amountId}
             className="w-28"
             inputMode="decimal"
-            placeholder={left > 0 ? (left / 100).toFixed(2) : ''}
+            placeholder={left > 0 ? centsToDecimal(left) : ''}
             value={amount}
             disabled={busy || left < 1}
             aria-invalid={amount.trim() !== '' && !parsed.ok}
+            aria-describedby={amountErrorId}
             onChange={(e) => setAmount(e.target.value)}
           />
         </Field>
@@ -304,9 +311,12 @@ function CheckoutRow({ shared, checkout, refunds }: { shared: Shared; checkout: 
           <Button disabled>Refund</Button>
         )}
       </div>
-      {/* Only once something is typed: an untouched row with nothing left says so in its "left" column. */}
-      {!parsed.ok && amount.trim() !== '' && <ErrorNote error={parsed.error} />}
-      {asked && <Note>Asked for. It is in Refunds to do, waiting for approval.</Note>}
+      {/* Only once something is typed: an untouched row with nothing left says so in its "left" column. Not an
+          alert, which a screen reader would read out on every keystroke; the input points at it instead. */}
+      <p id={amountErrorId} className="text-sm text-destructive empty:hidden">
+        {!parsed.ok && amount.trim() !== '' ? parsed.error : ''}
+      </p>
+      {asked && <Note>{asked}</Note>}
       <ErrorNote error={error} />
     </li>
   )
@@ -322,9 +332,9 @@ function Issues({ shared, pageSize }: { shared: Shared; pageSize: number }) {
       hint="Disputes, charges whose outcome is unknown, and differences the nightly check with Stripe and PayPal found. Most resolve themselves once the difference goes away."
     >
       {status === 'LoadingFirstPage' ? (
-        <Note>Loading…</Note>
+        <Hint>Loading…</Hint>
       ) : results.length === 0 ? (
-        <Note>No open issues.</Note>
+        <Hint>No open issues.</Hint>
       ) : (
         <Rows>
           {results.map((i) => (
@@ -366,7 +376,6 @@ function IssueRow({ shared, issue }: { shared: Shared; issue: PaymentIssue }) {
             <ConfirmButton
               disabled={busy}
               confirmLabel="Charge again?"
-              title="Safe if the first try went through: the library looks for it at Stripe before charging again."
               onConfirm={() =>
                 run(async () => {
                   setOutcome(null)
@@ -380,7 +389,6 @@ function IssueRow({ shared, issue }: { shared: Shared; issue: PaymentIssue }) {
             <ConfirmButton
               disabled={busy}
               confirmLabel="Give up on this charge?"
-              title="Stripe is asked first: a charge it has as paid is recorded as paid instead."
               onConfirm={() =>
                 run(async () => {
                   setOutcome(null)
@@ -397,6 +405,7 @@ function IssueRow({ shared, issue }: { shared: Shared; issue: PaymentIssue }) {
           Mark resolved
         </Button>
       </div>
+      {checkoutId && <Hint>Both are safe if the first try went through: Stripe is asked first, and a charge it has as paid is recorded as paid.</Hint>}
       {outcome && <Note>{outcome}</Note>}
       <ErrorNote error={error} />
     </li>

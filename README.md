@@ -132,17 +132,18 @@ token from its own URL (Stripe adds `session_id`, PayPal adds `token`) and words
 The hook asks `completeReturn` once: StrictMode's double effects and two mounts at once share one
 call; a reload asks again, which the library answers the same. It returns one of
 
-| `state`                                                          | Means                                                                                                  |
-| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `checking`                                                       | Asking.                                                                                                |
-| `paid`                                                           | The app recorded the sale.                                                                             |
-| `processing`                                                     | A bank payment on its way (days).                                                                      |
-| `refund_needed`                                                  | The money arrived but the app refused the sale (sold out); it is owed back.                            |
-| `failed`                                                         | The processor said no.                                                                                 |
-| `cancelled`                                                      | Nothing was paid: the buyer turned back (PayPal sends its token to the cancel page too) or it expired. |
-| `error` with `reason`: `no_token`, `not_found`, `request_failed` | No token in the address, not one of this app's payments, or the call failed (`error`).                 |
+| `state`                                                          | Means                                                                                                                                                                                                   |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `checking`                                                       | Asking.                                                                                                                                                                                                 |
+| `paid`                                                           | The app recorded the sale.                                                                                                                                                                              |
+| `processing`                                                     | A bank payment on its way (days).                                                                                                                                                                       |
+| `refund_needed`                                                  | The money arrived but the app refused the sale (sold out); it is owed back.                                                                                                                             |
+| `failed`                                                         | The processor said no.                                                                                                                                                                                  |
+| `cancelled`                                                      | Nothing paid, at least not yet: the buyer turned back (PayPal sends its token to the cancel page too), it expired, or (rarely) the processor is still finishing it; the callbacks say if it pays later. |
+| `error` with `reason`: `no_token`, `not_found`, `request_failed` | No token in the address, not one of this app's payments, or the call failed (`error`).                                                                                                                  |
 
-with `purpose` and `ref` on the settled states, and `retry()` to ask again after `request_failed`.
+with `purpose` and `ref` on the settled states, and `retry()` to ask again after `request_failed`
+(each call counts against the few the library allows per token).
 
 ```tsx
 const params = new URLSearchParams(location.search) // or the router's
@@ -154,7 +155,9 @@ if (result.state === 'checking') return <p>Confirming your payment…</p>
 **The admin page: `<PaymentsAdminPage>`.** Three parts: refunds to do (approve, send, mark refunded
 elsewhere, don't refund), paid payments to refund in full or in part, and open issues (mark resolved;
 for a charge with an unknown outcome, try again or give up). Amounts are typed in dollars and checked
-against what is left (paid, less refunded, less refunds on their way) before the server checks again;
+against what is left (paid, less refunded, less open refunds, failed ones included until sent again or
+dismissed) before the server checks again; a refund recorded but not sent clears its form and waits in
+refunds to do;
 anything that moves money asks twice; every action shows its error by its row; nothing changes on the
 page until the server says so.
 

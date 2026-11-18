@@ -3,10 +3,14 @@
 import { decimalToCents, dollars } from '../core/money.js'
 import type { OpenRefund } from './types.js'
 
-/** Refunds that already hold part of a payment: the server counts these against what is left, so the page does too. */
-const HOLDING: ReadonlySet<OpenRefund['status']> = new Set(['requested', 'approved', 'sending'])
+/**
+ * Refunds that hold part of a payment on this page. The server counts requested, approved and sending
+ * against what is left; the page also counts failed ones, which can still be sent again from Refunds
+ * to do, so a failed refund isn't asked for a second time here and then both sent.
+ */
+const HOLDING: ReadonlySet<OpenRefund['status']> = new Set(['requested', 'approved', 'sending', 'failed'])
 
-/** What can still be refunded on a payment: paid, less refunded, less refunds on their way. Never below zero. */
+/** What can still be refunded on a payment: paid, less refunded, less open refunds. Never below zero. */
 export function refundableCents(
   checkout: { id: string; paidCents?: number | null; refundedCents: number },
   openRefunds: readonly Pick<OpenRefund, 'checkoutId' | 'status' | 'amountCents'>[] = [],
