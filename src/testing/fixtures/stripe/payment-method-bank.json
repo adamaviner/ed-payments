@@ -1,0 +1,41 @@
+{
+  "_source": "Stripe test mode, API 2026-10-28.endive, POST /v1/payment_methods/pm_usBankAccount_success/attach, captured 2026-11-17 by scripts/capture (scrubbed)",
+  "id": "pm_1UcsRZL4sVH3OBLn8lKDcNMI",
+  "object": "payment_method",
+  "allow_redisplay": "unspecified",
+  "billing_details": {
+    "address": {
+      "city": "city",
+      "country": "US",
+      "line1": "Test line1",
+      "line2": null,
+      "postal_code": "12345",
+      "state": "CA"
+    },
+    "email": "payer@example.org",
+    "name": "Created from pm_usBankAccount_success",
+    "phone": null,
+    "tax_id": null
+  },
+  "created": 1794945209,
+  "customer": "cus_VeAnCyTUNRwJxu",
+  "customer_account": null,
+  "livemode": false,
+  "metadata": {},
+  "shared_payment_granted_token": null,
+  "type": "us_bank_account",
+  "us_bank_account": {
+    "account_holder_type": "individual",
+    "account_type": "checking",
+    "bank_name": "STRIPE TEST BANK",
+    "financial_connections_account": null,
+    "fingerprint": "scrubbed",
+    "last4": "6789",
+    "networks": {
+      "preferred": "ach",
+      "supported": ["ach"]
+    },
+    "routing_number": "110000000",
+    "status_details": {}
+  }
+}

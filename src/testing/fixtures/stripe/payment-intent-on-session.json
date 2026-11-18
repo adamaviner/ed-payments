@@ -1,0 +1,71 @@
+{
+  "_source": "Stripe test mode, API 2026-10-28.endive, POST /v1/payment_intents for the Payment Element, captured 2026-11-17 by scripts/capture (scrubbed)",
+  "id": "pi_3UcsRdL4sVH3OBLn0qbaqxHO",
+  "object": "payment_intent",
+  "allowed_payment_method_types": ["card", "us_bank_account"],
+  "amount": 2500,
+  "amount_capturable": 0,
+  "amount_details": {
+    "tip": {}
+  },
+  "amount_received": 0,
+  "application": null,
+  "application_fee_amount": null,
+  "automatic_payment_methods": null,
+  "canceled_at": null,
+  "cancellation_reason": null,
+  "capture_method": "automatic_async",
+  "client_secret": "<scrubbed>",
+  "confirmation_method": "automatic",
+  "created": 1794945213,
+  "currency": "usd",
+  "customer": "cus_VeAnCyTUNRwJxu",
+  "customer_account": null,
+  "description": "Fixture retry",
+  "excluded_payment_method_types": null,
+  "last_payment_error": null,
+  "latest_charge": null,
+  "livemode": false,
+  "managed_payments": {
+    "enabled": false
+  },
+  "metadata": {
+    "app": "test",
+    "checkoutId": "fx-on"
+  },
+  "next_action": null,
+  "on_behalf_of": null,
+  "payment_method": null,
+  "payment_method_configuration_details": null,
+  "payment_method_options": {
+    "card": {
+      "installments": null,
+      "mandate_options": null,
+      "network": null,
+      "request_three_d_secure": "automatic"
+    },
+    "us_bank_account": {
+      "financial_connections": {
+        "permissions": ["payment_method"],
+        "prefetch": []
+      },
+      "mandate_options": {},
+      "transaction_purpose": "unspecified",
+      "verification_method": "instant"
+    }
+  },
+  "payment_method_types": ["card", "us_bank_account"],
+  "payment_record": null,
+  "processing": null,
+  "receipt_email": null,
+  "review": null,
+  "setup_future_usage": null,
+  "shared_payment_granted_token": null,
+  "shipping": null,
+  "source": null,
+  "statement_descriptor": null,
+  "statement_descriptor_suffix": null,
+  "status": "requires_payment_method",
+  "transfer_data": null,
+  "transfer_group": null
+}

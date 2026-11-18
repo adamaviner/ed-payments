@@ -1,0 +1,17 @@
+{
+  /* The example app's browser code: only typechecked (npm run typecheck), through dist like an installed package. */
+  "compilerOptions": {
+    "strict": true,
+    "target": "ESNext",
+    "lib": ["ES2023", "dom", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    /* For the convex/ files the generated api pulls in. */
+    "types": ["node"]
+  },
+  "include": ["./**/*"]
+}

@@ -1,0 +1,31 @@
+{
+  "_source": "Built from the Disputes v1 dispute schema in the documented webhook envelope",
+  "id": "WH-FIXTURE-DISPUTE-RESOLVED",
+  "event_version": "1.0",
+  "create_time": "2026-11-17T13:12:00.000Z",
+  "resource_type": "dispute",
+  "event_type": "CUSTOMER.DISPUTE.RESOLVED",
+  "summary": "A dispute was resolved",
+  "resource": {
+    "dispute_id": "PP-D-FIXTURE",
+    "create_time": "2026-11-17T12:12:00.000Z",
+    "update_time": "2026-11-17T12:12:00.000Z",
+    "disputed_transactions": [
+      {
+        "seller_transaction_id": "27C890397M291943E",
+        "custom": "fixture:fixtureorder1"
+      }
+    ],
+    "reason": "MERCHANDISE_OR_SERVICE_NOT_RECEIVED",
+    "status": "RESOLVED",
+    "dispute_amount": {
+      "currency_code": "USD",
+      "value": "10.00"
+    },
+    "dispute_life_cycle_stage": "INQUIRY",
+    "dispute_channel": "INTERNAL",
+    "dispute_outcome": {
+      "outcome_code": "RESOLVED_SELLER_FAVOUR"
+    }
+  }
+}

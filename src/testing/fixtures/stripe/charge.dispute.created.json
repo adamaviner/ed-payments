@@ -1,0 +1,30 @@
+{
+  "_source": "Built from the Dispute object fields in docs.stripe.com/api/disputes",
+  "id": "evt_1FixtureDisputeCreated",
+  "object": "event",
+  "api_version": "2026-10-28.endive",
+  "created": 1794917500,
+  "data": {
+    "object": {
+      "id": "dp_1FixtureDispute",
+      "object": "dispute",
+      "amount": 2500,
+      "charge": "ch_3UclDAL4sVH3OBLn1rlCLR54",
+      "currency": "usd",
+      "created": 1794917600,
+      "is_charge_refundable": false,
+      "livemode": false,
+      "metadata": {},
+      "payment_intent": "pi_3UclDAL4sVH3OBLn1lmyuwx6",
+      "reason": "fraudulent",
+      "status": "needs_response"
+    }
+  },
+  "livemode": false,
+  "pending_webhooks": 1,
+  "request": {
+    "id": null,
+    "idempotency_key": null
+  },
+  "type": "charge.dispute.created"
+}

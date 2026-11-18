@@ -1,0 +1,42 @@
+{
+  "_source": "PayPal sandbox, captured 2026-11-17; status changed to APPROVED as after the buyer approves",
+  "id": "4RL70785FP7758548",
+  "intent": "CAPTURE",
+  "status": "APPROVED",
+  "payment_source": {
+    "paypal": {}
+  },
+  "purchase_units": [
+    {
+      "reference_id": "default",
+      "amount": {
+        "currency_code": "USD",
+        "value": "25.00",
+        "breakdown": {}
+      },
+      "payee": {
+        "email_address": "merchant@example.org",
+        "merchant_id": "TESTMERCHANT",
+        "display_data": {
+          "brand_name": "Fixture"
+        }
+      },
+      "description": "Fixture item",
+      "custom_id": "fixture:fixtureorder1",
+      "invoice_id": "fixture-1794917422931"
+    }
+  ],
+  "create_time": "2026-11-17T12:10:23Z",
+  "links": [
+    {
+      "href": "https://api.sandbox.paypal.com/v2/checkout/orders/4RL70785FP7758548",
+      "rel": "self",
+      "method": "GET"
+    },
+    {
+      "href": "https://api.sandbox.paypal.com/v2/checkout/orders/4RL70785FP7758548/capture",
+      "rel": "capture",
+      "method": "POST"
+    }
+  ]
+}

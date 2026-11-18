@@ -1,7 +1,416 @@
 # @earthdance/payments
 
-Payments for Earthdance's Convex apps: Stripe and PayPal checkouts, webhooks, a refund ledger and a
-nightly comparison with the processors. One npm package holding a Convex component and the client
-code apps call from their `convex/` folder. Shaped like `@earthdance/mail`.
+Payments for Earthdance's Convex apps: Stripe and PayPal checkouts, saved cards and bank accounts
+charged with nobody present, the buyer paying on the app's page after a decline, both processors'
+webhooks, a refund ledger, disputes, a sweep for payments nobody finished, and a nightly comparison
+with the processors. One npm package holding a Convex component (the tables) and the client code
+apps call from their `convex/` folder (the network calls). Shaped like `@earthdance/mail`.
 
-Work in progress; see `CLAUDE.md`.
+**The library owns every payment path:** API calls, retries, idempotency, webhooks, refunds,
+disputes and reconciliation. An app prices things, keeps its own records and decides what a payment
+means for them, in callbacks. It never calls Stripe or PayPal itself. The rules an app (and a
+coding agent working in it) follows are in [`AGENTS.md`](AGENTS.md), shipped in the package.
+
+**Status:** v0.2 (v0.2.1: the React package). One-off payments in USD: hosted checkouts (Stripe Checkout, PayPal), saved
+methods charged off-session, on-session retries. Not here: subscriptions, order models, emails.
+The plans it was built from are ed-schedule's `payments_library_plan.md` (v0.1) and the v0.2 plan
+("own all payment paths, bids included").
+
+## Adopt in 5 steps
+
+The example app (`example/convex`) is a complete host; these are its files.
+
+**1. Install and mount.** `npm install github:adamaviner/ed-payments#v0.2.1` (pnpm: `pnpm add ...`).
+
+```ts
+// convex/convex.config.ts
+import payments from '@earthdance/payments/convex.config.js'
+app.use(payments)
+```
+
+**2. Define it** in `convex/payments.ts`, with every callback (all are required) and your admin check:
+
+```ts
+import { definePayments, fromEnv } from '@earthdance/payments'
+
+export const paymentContext = v.union(v.object({ itemId: v.string() }), v.object({ bidId: v.id('bids') }))
+
+export const payments = definePayments(components.payments, {
+  app: 'shop', // tags everything at the processors; apps can share an account
+  context: paymentContext, // what every payment carries for the callbacks; checked at start
+  stripe: fromEnv.stripe(), // STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, checked against PAYMENTS_MODE
+  paypal: fromEnv.paypal(), // PAYPAL_CLIENT_ID, _SECRET, _WEBHOOK_ID, PAYPAL_API_BASE
+}).withCallbacks({
+  on: { paid: internal.shop.onPaid, failed: ..., refunded: ..., refundNeeded: ..., dispute: ..., processing: ..., issues: ... },
+  authorize: { admin: internal.shop.isAdmin }, // internal query: { name } or null
+  worker: internal.payments, // where the worker functions below are exported
+})
+
+export const { sweep, reconcile, cleanup, issuesDigest, charge } = payments.worker()
+export const { completeReturn } = payments.publicApi()
+```
+
+Two calls, not one: the references in `withCallbacks` name the app's own modules, this one included,
+so a single generic call would infer its type from itself (TypeScript's TS7022). The first call fixes
+the types; the second has nothing to infer. No type annotations are needed anywhere.
+
+**3. Write the callbacks** as internal mutations with the library's argument validators, typed with
+your context. Each runs inside the transaction that records the payment: `onPaid` writing the order
+and the library marking it paid happen together or not at all.
+
+```ts
+export const onPaid = internalMutation({
+  args: payments.args.paid,
+  returns: paidReturns,
+  handler: async (ctx, a): Promise<PaidResult> => {
+    // a.context is typed; return { refuse: 'why' } (or throw) and the money is owed back as a refund
+    await ctx.db.insert('orders', { ... })
+    return null
+  },
+})
+// payments.args.failed, .refunded, .refundNeeded, .dispute, .processing, .issues likewise
+```
+
+**4. Routes, crons and the admin page's functions:**
+
+```ts
+// convex/http.ts
+payments.registerRoutes(http) // /stripe/webhook, /paypal/webhook; refuses a live deployment set up wrongly
+// convex/crons.ts
+payments.registerCrons(crons) // sweep every 10 minutes; reconcile, issues digest, cleanup nightly
+// convex/paymentsAdmin.ts (Convex registers only top-level exports, so they are named)
+export const { openRefunds, refundable, issues, openCount, checkout, requestRefund, approveRefund, sendRefund, markRefundedManually, dismissRefund, resolveIssue, retryCharge, giveUpCharge } =
+  payments.adminApi({ skipApproval: true })
+```
+
+**5. Take payments** from your own actions, priced on the server:
+
+```ts
+// a hosted checkout
+const { redirectUrl } = await payments.start(ctx, {
+  ref: { type: 'item', id },
+  purpose: 'order',
+  description,
+  amountCents,
+  processor: 'stripe',
+  method: 'ach',
+  payer: { email },
+  returnPath: `/items/${id}/thanks`,
+  cancelPath: `/items/${id}`,
+  context: { itemId: id },
+})
+// a saved card: setupPaymentMethod (client secret for Stripe's Payment Element), verifyMethodOwner, then later from a mutation
+await payments.chargeSaved(ctx, { ref, purpose: 'bid', description, amountCents, payer, owner: { type: 'user', id }, paymentMethodId, idempotencyKey: `bid-${bidId}`, context: { bidId } })
+// after a decline, the buyer pays on your page
+const { clientSecret } = await payments.retryOnSession(ctx, { checkoutId })
+```
+
+Then register the webhooks: `npx ed-payments webhooks --stripe https://<deployment>.convex.site/stripe/webhook --env-file .env.local`
+(and `--paypal .../paypal/webhook`). In tests: `const { stripe, paypal } = registerPayments(t)` from
+`@earthdance/payments/test`.
+
+**Then, in the browser** (optional), the return page and the admin page from
+`@earthdance/payments/react`; see "The React package" below.
+
+## The React package (`@earthdance/payments/react`)
+
+Two pieces for an app's React code, over the functions it exported in steps 2 and 4. Its `react` peer
+dependency is optional, so an app with no React (or its own pages) needs nothing more. It brings its
+own few primitives (plain `button` and `input`, no UI library), styled with Tailwind classes on the
+shadcn theme tokens (`bg-muted`, `text-destructive`, ...), so colours come from the app's theme. Add to
+the app's main CSS, or Tailwind 4 skips the package's classes:
+
+```css
+@source '../node_modules/@earthdance/payments/dist';
+```
+
+It knows nothing about the app's login (`auth` goes through to `authorize.admin` as it is), router
+or bundler. `example/src` is the reference, typechecked in `npm run check` against the example's api.
+
+**The return page: `useCheckoutReturn(completeReturn, { processor, token })`.** The app reads the
+token from its own URL (Stripe adds `session_id`, PayPal adds `token`) and words every state itself.
+The hook asks `completeReturn` once: StrictMode's double effects and two mounts at once share one
+call; a reload asks again, which the library answers the same. It returns one of
+
+| `state`                                                          | Means                                                                                                                                                                                                   |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `checking`                                                       | Asking.                                                                                                                                                                                                 |
+| `paid`                                                           | The app recorded the sale.                                                                                                                                                                              |
+| `processing`                                                     | A bank payment on its way (days).                                                                                                                                                                       |
+| `refund_needed`                                                  | The money arrived but the app refused the sale (sold out); it is owed back.                                                                                                                             |
+| `failed`                                                         | The processor said no.                                                                                                                                                                                  |
+| `cancelled`                                                      | Nothing paid, at least not yet: the buyer turned back (PayPal sends its token to the cancel page too), it expired, or (rarely) the processor is still finishing it; the callbacks say if it pays later. |
+| `error` with `reason`: `no_token`, `not_found`, `request_failed` | No token in the address, not one of this app's payments, or the call failed (`error`).                                                                                                                  |
+
+with `purpose` and `ref` on the settled states, and `retry()` to ask again after `request_failed`
+(each call counts against the few the library allows per token).
+
+```tsx
+const params = new URLSearchParams(location.search) // or the router's
+const sessionId = params.get('session_id')
+const result = useCheckoutReturn(api.payments.completeReturn, sessionId ? { processor: 'stripe', token: sessionId } : { processor: 'paypal', token: params.get('token') })
+if (result.state === 'checking') return <p>Confirming your payment…</p>
+```
+
+**The admin page: `<PaymentsAdminPage>`.** Three parts: refunds to do (approve, send, mark refunded
+elsewhere, don't refund), paid payments to refund in full or in part, and open issues (mark resolved;
+for a charge with an unknown outcome, try again or give up). Amounts are typed in dollars and checked
+against what is left (paid, less refunded, less open refunds, failed ones included until sent again or
+dismissed) before the server checks again; a refund recorded but not sent clears its form and waits in
+refunds to do;
+anything that moves money asks twice; every action shows its error by its row; nothing changes on the
+page until the server says so.
+
+```tsx
+<PaymentsAdminPage
+  api={api.paymentsAdmin} // the module from step 4, checked against the library's adminApi
+  auth={{ token }} // only for apps with their own session tokens; leave out on Convex auth
+  skipApproval // the same as adminApi({ skipApproval }) on the server
+  refLink={(ref) => (ref.type === 'item' ? <Link to={`/items/${ref.id}`}>The item</Link> : null)}
+/>
+```
+
+Also exported: `parseRefundAmount(text, leftCents)`, `refundableCents(checkout, openRefunds)`,
+`errorMessage(err)`, and the types (`PaymentsAdminApi`, `CompleteReturnRef`, `OpenRefund`,
+`CheckoutSummary`, `PaymentIssue`, `CheckoutReturn`). For a badge, query `api.paymentsAdmin.openCount`.
+
+## How it works
+
+- **Checkout kinds.** `hosted` (Stripe Checkout or PayPal), `offSession` (a saved method charged with
+  nobody present), `onSession` (the buyer pays with Stripe's Payment Element on the app's page, e.g.
+  after a decline). All three are rows in the same table, carry the same tags, and go through the same
+  callbacks, refunds, disputes, sweep and comparison.
+- **States.** `created` → `pending` (at the processor) → `paid`. A bank payment goes `processing` first
+  (days), then `paid` or `failed`. Unpaid past `expiresAt` → `abandoned` (never for off-session
+  charges, which end paid, failed or by a person's decision). Paid but refused by the app (or not the
+  amount asked) → `refund_needed`, with a refund for the whole amount waiting. Every transition answers
+  `already_handled` when the row has moved on, so webhooks, return pages, retries and the sweep can race.
+- **Callbacks** are internal mutations, stored as function handles on each checkout and called by the
+  component inside the transaction that records the change. `paid` returns `null` or `{ refuse }`;
+  refusing or throwing (its writes roll back) makes the checkout `refund_needed` and calls
+  `refundNeeded`. A throw in any other callback opens a `callback_failed` issue and the change stands.
+  Every callback gets `kind`, `purpose`, `ref`, `payer` and the typed `context`. The `context` is
+  checked against the app's validator at `start` / `chargeSaved`, and by Convex when each callback runs.
+- **Saved methods.** One Stripe Customer per owner (made with an idempotency key, so two first saves
+  make one), a SetupIntent with `usage: off_session`, `allowed_payment_method_types` card and
+  `us_bank_account` (Stripe refuses `payment_method_types` since 2026-09-30.endive) and instant bank
+  verification. `savedMethods` lists them with a `declined` flag; `verifyMethodOwner` refuses a method
+  that isn't the owner's (an id from the browser can't be trusted).
+- **Off-session charges.** `chargeSaved` records the checkout and queues `worker.charge`: a
+  PaymentIntent with `off_session`, `confirm` and `error_on_requires_action`, under the app's
+  idempotency key. Paid → `paid`; a bank account → `processing`, then the webhook settles it; a decline
+  (402 `card_error`, or `authentication_required`) → `failed` with `declined: true`, and the method is
+  marked so it isn't offered again. A transient error (no answer, 429, 5xx) is tried again after 1, 2,
+  3, 4 minutes; before each new try the customer's PaymentIntents are searched for this checkout,
+  because Stripe replays a key's first answer (even a 500), so a new key is used only once nothing was
+  found. After five tries, or at once for anything odd, a `charge_unknown` issue asks a person, who
+  retries it or gives it up (Stripe is asked first: a charge it shows paid is settled, an open one canceled; otherwise `failed`, and the app decides what next). The sweep leaves charges handed to a person alone. A charge and its on-session retries pay for one thing: a second payment for it is owed back (`refund_needed`), and only one retry can be open at a time. A charge whose queued try died is
+  picked up by the sweep after 10 quiet minutes.
+- **On-session retries.** `retryOnSession` makes a PaymentIntent for the same amount (card or bank,
+  the buyer's choice), or hands back the one still waiting, so two tabs can't each pay; one already on
+  its way is refused. A decline there only notes the error (the buyer tries again on the page); paid,
+  processing and a bounced bank payment settle as above. The sweep cancels expired ones at Stripe.
+- **Tags.** Stripe `metadata.app` + `metadata.checkoutId` (sessions, their PaymentIntents, direct
+  PaymentIntents, refunds), PayPal `custom_id` = `<app>:<checkoutId>`. A webhook for anything without
+  this app's tag, or that the component doesn't know, is answered 200 as `foreign`, never retried, and
+  handed to `onUnhandledStripeEvent` if the app gave one; so are event kinds the library doesn't know.
+- **Webhooks.** Each route checks the signature (400 if bad), records the event id (a repeat of a
+  handled one gets 200 at once), then acts; a failure after the check answers 500 so the processor
+  retries. The events are `STRIPE_EVENTS` and `PAYPAL_EVENTS` in `@earthdance/payments/core`; the CLI
+  registers exactly those.
+- **Return page.** `completeReturn` (rate-limited in `publicApi`) settles from the processor when the
+  webhook hasn't come: a session, a PaymentIntent (`?payment_intent=` after a bank login or 3-D Secure),
+  or a PayPal order (captured only when `APPROVED`; `ORDER_ALREADY_CAPTURED` means fetch and settle).
+- **Refunds** are a ledger (many per checkout): requested → approved → sending → sent, or failed (send
+  again), recorded as done by hand, or dismissed. Amounts are checked against paid − refunded − in
+  progress. Keyed by the refund id, so a double click or a retry refunds once. Refunds made in a
+  dashboard arrive by webhook (or the nightly comparison) as `external`.
+- **Sweep** (every 10 minutes): PayPal approvals whose webhook never came are captured; expired
+  checkouts are settled if paid after all, else ended at the processor and abandoned; quiet off-session
+  charges are tried again; refunds left sending are checked.
+- **Reconcile** (nightly, last 3 days): Stripe sessions, direct PaymentIntents and refunds tagged for the
+  app against the component, both ways; PayPal orders of the window; PayPal Transaction Search for
+  captures the component lacks (skipped, logged once a day, when PayPal refuses it). Differences are
+  issues; one that goes away is resolved. The digest (`issuesDigest`) hands new issues to `on.issues`.
+- **Rate limits** on every public entry: `start`, `setupPaymentMethod`, `retryOnSession` and the return
+  page. Per signed-in user (else per payer email, or the token on the return page), per window, and for
+  everyone together per minute. Defaults 5 per 10 minutes and 30 a minute (the return page four times
+  that); `limits` in `definePayments`.
+- **Keys** come from `fromEnv`. `PAYMENTS_MODE=live` marks the production deployment: there every set-up
+  problem (a test key, the sandbox, a missing webhook secret or id) stops the push with the reason;
+  elsewhere live keys or PayPal's live API are refused and the rest is only logged. Keys in the wrong
+  mode are refused at every call, not only at start-up. `PAYPAL_API_BASE` unset means the sandbox in
+  test mode and live in live mode; any other value is refused.
+- **Secrets** are never stored, logged or put in an error: the PayPal token is cached encrypted with the
+  client secret; client secrets for the browser are fetched from Stripe each time and handed straight
+  back. A test scans every stored row and every log line for them.
+- **Fees** are configuration per processor and method; the defaults are Stripe's published US rates
+  (card 2.9% + 30¢, ACH 0.8% capped at $5) for all of them, PayPal included.
+
+## What was checked against the processors
+
+- **Stage 0 (v0.1):** a component mutation calls a host `internalMutation` through a function handle in
+  the same transaction; when it throws, only its writes roll back (convex-test and a local backend).
+- **Stripe test mode** (API `2026-10-28.endive`, `npm run test:sandbox`, 2026-11-17): card and ACH
+  Checkout Sessions made, read, expired; a Customer made twice under one idempotency key (one Customer);
+  a SetupIntent for off-session use with `allowed_payment_method_types` and instant bank verification;
+  `payment_method_types` refused (400); test methods attached and listed; off-session charges paid
+  (and the same key replaying the same PaymentIntent), declined (402 `card_error`/`card_declined`, the
+  PaymentIntent in the error), needing authentication (402 `authentication_required`), a bank account
+  `processing` (no mandate needed for an attached test account); an on-session PaymentIntent made and
+  canceled; PaymentIntents listed. **Not possible with ed-market's test key:** refunds and webhook
+  endpoints (403 `more_permissions_required`; the suite says so), and reading events.
+- **PayPal sandbox** (same day): token, an order made twice under one request id (one order), read,
+  capture before approval refused (422 `ORDER_NOT_APPROVED`), `verify-webhook-signature` answering
+  `FAILURE` for a made-up signature, Transaction Search refused (403: not enabled on the app), and the
+  webhook CLI creating a webhook with exactly `PAYPAL_EVENTS`, leaving it, and removing it.
+- **Local Convex backend:** the example app pushes and its generated functions run; a deployment with
+  `PAYMENTS_MODE=live` and a test Stripe key is refused at push with the reason.
+- **Only against the fakes** (no browser in the loop, or no permission): a completed Stripe Checkout
+  payment and its webhook, a Payment Element confirm, Stripe refunds and disputes, a PayPal approval,
+  capture and refund, a genuine webhook delivery being verified, the Stripe webhook CLI. These are for
+  the live-mode run below.
+
+## Layout
+
+```
+src/core       pure TypeScript, no Convex: fees, money, types, the processors' wire code, event lists   @earthdance/payments/core
+src/component  the Convex component: tables, queries, mutations; no network, no secrets, no routes, no crons
+src/client     what the app's convex/ code imports: definePayments, fromEnv, validators                 @earthdance/payments
+src/react      the return page hook and the admin page                                                @earthdance/payments/react
+src/cli        npx ed-payments webhooks
+src/test.ts    register / registerPayments for convex-test, fake Stripe and PayPal, fixtures            @earthdance/payments/test
+sandbox/       the real test-mode / sandbox calls (npm run test:sandbox)
+example/convex a complete host app (typechecked in check)
+example/src    its return page and Admin → Payments (typechecked in check)
+AGENTS.md      the rules for apps that use it (shipped in the package)
+```
+
+## API
+
+### `@earthdance/payments`
+
+`definePayments(components.payments, options).withCallbacks(wiring)` → `payments`. Options: `app`,
+`context` (a validator), `stripe`, `paypal` (`fromEnv.stripe()` / `.paypal()`), `siteUrl` (default
+`SITE_URL`), `fees`, `limits`, `brandName`, `fetch` (tests). Wiring: `on` (all seven callbacks),
+`authorize.admin`, `worker`.
+
+| Method                                                                                  | From            | Does                                                                                                  |
+| --------------------------------------------------------------------------------------- | --------------- | ----------------------------------------------------------------------------------------------------- |
+| `start(ctx, args)`                                                                      | action          | A hosted checkout; `{ checkoutId, redirectUrl }`. Rate-limited.                                       |
+| `setupPaymentMethod(ctx, { owner, payer })`                                             | action          | `{ clientSecret, stripeCustomerId }` for the Payment Element. Rate-limited.                           |
+| `savedMethods(ctx, { owner })`                                                          | action          | `[{ paymentMethodId, kind, label, declined }]`, newest first.                                         |
+| `verifyMethodOwner(ctx, { owner, paymentMethodId })`                                    | action          | The method, or throws if it isn't the owner's.                                                        |
+| `chargeSaved(ctx, args)`                                                                | mutation/action | Queues an off-session charge; the checkout id. Same `idempotencyKey`, same checkout.                  |
+| `retryOnSession(ctx, { checkoutId })`                                                   | action          | `{ checkoutId, clientSecret }` for the buyer to pay after a decline. Rate-limited.                    |
+| `completeReturn(ctx, { processor, token })`                                             | action          | Settles if the processor says so; `{ checkoutId, ref, purpose, status }` or null.                     |
+| `status` / `get`, `forRef`, `byPaymentRef`, `list`, `refundable`                        | query           | Checkouts (`refundable` is paged and indexed).                                                        |
+| `requestRefund`, `approveRefund`, `markRefundedManually`, `dismissRefund`, `sendRefund` | mutation/action | The ledger; `by` is recorded.                                                                         |
+| `openRefunds`, `refundsFor`, `refund`, `issues`, `openIssueCount`, `resolveIssue`       | query/mutation  | Refunds and issues.                                                                                   |
+| `registerRoutes(http, { onUnhandledStripeEvent })`, `registerCrons(crons)`              | –               | Routes (when keys exist; start-up checks) and crons.                                                  |
+| `worker()`, `adminApi({ skipApproval })`, `publicApi()`                                 | –               | Functions for the app to export (see step 4).                                                         |
+| `sweep`, `reconcile`, `cleanup`, `issuesDigest`                                         | action/mutation | The upkeep the crons run.                                                                             |
+| `args.paid` … `args.issues`, `paidReturns`                                              | –               | Callback validators with the app's context (also `callbackArgs(validator)`, and untyped `paidArgs`…). |
+
+`adminApi` functions take an optional `auth` argument, passed to `authorize.admin` as it came (for apps
+with their own session tokens); apps on Convex auth leave it out, as the caller's identity carries
+through. Each refuses with "Only an admin may do this." when the check says no.
+
+### `@earthdance/payments/core`
+
+Fees and money (`feeRates`, `feeSchedule`, `estimateProcessingFee`, `grossUpForProcessingFee`,
+`processingFeeFor`, `compareProcessingFees`, `isLargeTransaction`, `LARGE_TRANSACTION_THRESHOLD_CENTS`,
+`centsToDecimal`, `decimalToCents`, `dollars`), tags, `ProcessorError` (with `declined`, `retryable`),
+the wire code (`stripe.*`, `paypal.*`, signatures, parsers) and `STRIPE_EVENTS` / `PAYPAL_EVENTS`.
+
+### `@earthdance/payments/react`
+
+`useCheckoutReturn`, `PaymentsAdminPage` and helpers; see "The React package" above.
+
+### `@earthdance/payments/test`
+
+`registerPayments(t)` (the component plus fake Stripe and PayPal behind `fetch`), `register(t)`,
+`fakeStripe()` (sessions, customers, saved methods with `saveMethod(customer, 'ok' | 'decline' | 'auth' | 'bank')`,
+PaymentIntents with `confirm`, `settleBank`, `intentEvent`, refunds, disputes, webhook endpoints),
+`fakePaypal()`, the fixtures and event builders. `src/testing/contract.test.ts` checks every fake
+answer against a saved real object.
+
+## Fixtures
+
+`src/testing/fixtures/{stripe,paypal}/*.json`; each says where it came from in `_source`.
+
+- **Captured** from Stripe test mode (API `2026-10-28.endive`): sessions, a customer, card and bank
+  payment methods and their list, a SetupIntent, off-session PaymentIntents (paid, bank processing),
+  an on-session one and its cancel, an expanded one, a list, the 402 decline and authentication errors,
+  the 400 for `payment_method_types`, a 403 for a missing permission. From the PayPal sandbox: a created
+  order, an unapproved order, `ORDER_NOT_APPROVED`, Transaction Search's 403, verification's `FAILURE`.
+- **Built** from those real objects as the processor documents: the Stripe `checkout.session.*`,
+  `payment_intent.*`, `charge.refunded`, `refund.*` and `charge.dispute.*` events; PayPal's approved
+  order, `CHECKOUT.ORDER.APPROVED`, `ORDER_ALREADY_CAPTURED` and the dispute events.
+- **Documented samples:** PayPal's captured order and `PAYMENT.CAPTURE.*` events; Stripe's refund and
+  webhook endpoint objects.
+- Scrubbed of account ids, key ids, emails, client secrets, merchant and payer ids.
+
+## Setting up an app's processors
+
+Per deployment (dev, prod), on the Convex deployment (`npx convex env set`):
+
+- `PAYMENTS_MODE=live` on production only. `SITE_URL` (the return pages).
+- Stripe: `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`. A restricted key needs **write** on Checkout
+  Sessions, PaymentIntents, SetupIntents, Customers and Refunds, **read** on PaymentMethods, Charges,
+  Disputes and Events, and **write** on Webhook Endpoints for the CLI. ACH: switch on "ACH Direct Debit"
+  under Payment methods.
+- PayPal: `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_WEBHOOK_ID`, `PAYPAL_API_BASE`. Tick
+  "Transaction search" under the REST app's features (it can take hours to reach tokens).
+- Webhooks, with exactly the library's events:
+  `npx ed-payments webhooks --stripe https://<deployment>.convex.site/stripe/webhook --env-file <file>`
+  (prints the new `STRIPE_WEBHOOK_SECRET` once) and
+  `npx ed-payments webhooks --paypal https://<deployment>.convex.site/paypal/webhook --env-file <file>`
+  (prints the `PAYPAL_WEBHOOK_ID`). Run again after upgrading the library; `--extra-events` for events
+  the app's own handler needs; `--dry-run` shows what would change; `--remove` deletes it; live keys
+  need `--live`. By hand instead: the lists are `STRIPE_EVENTS` and `PAYPAL_EVENTS`. The CLI prints the new Stripe signing secret: run it in your own terminal, not where CI logs are kept.
+- Pass PayPal's real rates in `fees.paypal` once known.
+
+## Live-mode run (before relying on it)
+
+Per processor and method (Stripe card, Stripe ACH, PayPal), with live keys, `PAYMENTS_MODE=live`, and
+the webhooks registered on the live deployment:
+
+1. Pay a small real amount (e.g. $1.00). The return page shows it paid; the app's record exists.
+2. In the processor's dashboard, the webhook was delivered once with 200 (a redelivery answers "Already handled").
+3. Refund part of it from the admin page. The processor shows the refund; the ledger agrees; the refund webhook didn't add a second row.
+4. Refund the rest. The app's `refunded` callback sees it all back.
+5. Next morning, after the comparison: no open issues for these payments.
+6. PayPal: approve and close the tab before returning; within 10 minutes the sale is recorded. Reload the return page: no error.
+7. Stripe ACH: the payment waits as processing until Stripe settles it (days).
+8. **Saved methods:** save a real card through the app's form (a SetupIntent); charge it off-session
+   (e.g. a $1 winning bid); the charge settles as paid and the app's record follows. Then save a card
+   that will decline (or remove funds), charge it: `failed` with `declined`, the card shown as declined,
+   and the buyer's retry page takes a payment on-session. Refund one of them from the admin page.
+9. Check the fees recorded (`processorFeeCents`) against the processor's.
+
+## Developing
+
+```sh
+npm install
+npm run build:codegen   # after changing component functions: regenerates src/component/_generated, then builds
+npm run check           # typecheck (with the example, through dist), lint, format check, tests
+ED_PAYMENTS_SANDBOX_ENV=../ed-market/.env.local npm run test:sandbox   # real test-mode / sandbox calls; test keys only
+```
+
+`build:codegen` and `npx convex codegen` (for `example/convex/_generated`) need a deployment. This
+repo uses an anonymous local one (no Convex account, no quota): the first time,
+`CONVEX_AGENT_MODE=anonymous npx convex dev --once` creates it and writes `.env.local`; it runs on
+ports 3410/3411 so it doesn't collide with ed-mail's (3400) or ed-schedule's (3210 and up).
+`test:sandbox` runs no files (and says so) without a Stripe test key or PayPal sandbox keys, and
+refuses live ones.
+
+## Releasing
+
+```sh
+npm run release -- 0.2.0
+```
+
+From a clean branch: builds, runs every check, commits the version bump, puts the tag on a commit
+just past it that adds `dist`, and pushes both. Branches never hold `dist`. Apps install the tag:
+`npm install github:adamaviner/ed-payments#v0.2.0` (pnpm: `pnpm add github:adamaviner/ed-payments#v0.2.0`).

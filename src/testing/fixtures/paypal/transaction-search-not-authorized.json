@@ -1,0 +1,12 @@
+{
+  "_source": "PayPal sandbox, captured 2026-11-17 (403: Transaction Search not enabled on the app)",
+  "name": "NOT_AUTHORIZED",
+  "debug_id": "0000000000000",
+  "message": "Authorization failed due to insufficient permissions.",
+  "details": [
+    {
+      "issue": "NOT_AUTHORIZED",
+      "description": "Authorization failed due to insufficient permissions."
+    }
+  ]
+}

@@ -1,0 +1,121 @@
+{
+  "_source": "Stripe test mode, API 2026-10-28.endive, captured 2026-11-17",
+  "id": "cs_test_a0AHZDolrUrD47HTNSQjGh64hmYMc7lUD4ZCPZnY6GnH68kh9wY1OrVW7j",
+  "object": "checkout.session",
+  "adaptive_pricing": {
+    "enabled": true
+  },
+  "after_expiration": null,
+  "allow_promotion_codes": null,
+  "allowed_payment_method_types": ["us_bank_account"],
+  "amount_subtotal": 2500,
+  "amount_total": 2500,
+  "automatic_tax": {
+    "address_collection_precision": null,
+    "enabled": false,
+    "liability": null,
+    "provider": null,
+    "status": null
+  },
+  "billing_address_collection": null,
+  "branding_settings": {
+    "background_color": "#ffffff",
+    "border_style": "rounded",
+    "button_color": "#0074d4",
+    "display_name": "Earthdance",
+    "font_family": "default",
+    "icon": null,
+    "logo": null
+  },
+  "cancel_url": "https://example.org/cancel",
+  "client_reference_id": "fixtureach1",
+  "client_secret": null,
+  "collected_information": {
+    "business_name": null,
+    "individual_name": null,
+    "shipping_details": null
+  },
+  "consent": null,
+  "consent_collection": null,
+  "created": 1794917407,
+  "currency": "usd",
+  "currency_conversion": null,
+  "custom_fields": [],
+  "custom_text": {
+    "after_submit": null,
+    "shipping_address": null,
+    "submit": null,
+    "terms_of_service_acceptance": null
+  },
+  "customer": null,
+  "customer_account": null,
+  "customer_creation": "if_required",
+  "customer_details": {
+    "address": null,
+    "business_name": null,
+    "email": "buyer@example.org",
+    "individual_name": null,
+    "name": null,
+    "phone": null,
+    "tax_exempt": "none",
+    "tax_ids": null
+  },
+  "customer_email": "buyer@example.org",
+  "discounts": [],
+  "expires_at": 1794919266,
+  "integration_identifier": null,
+  "invoice": null,
+  "invoice_creation": {
+    "enabled": false,
+    "invoice_data": {
+      "account_tax_ids": null,
+      "custom_fields": null,
+      "description": null,
+      "footer": null,
+      "issuer": null,
+      "metadata": {},
+      "rendering_options": null
+    }
+  },
+  "livemode": false,
+  "locale": null,
+  "managed_payments": {
+    "enabled": false
+  },
+  "marketing_attributions": null,
+  "metadata": {
+    "app": "fixture",
+    "checkoutId": "fixtureach1"
+  },
+  "mode": "payment",
+  "origin_context": null,
+  "payment_intent": null,
+  "payment_link": null,
+  "payment_method_collection": "if_required",
+  "payment_method_configuration_details": null,
+  "payment_method_options": {},
+  "payment_method_types": ["us_bank_account"],
+  "payment_status": "unpaid",
+  "permissions": null,
+  "phone_number_collection": {
+    "enabled": false
+  },
+  "recovered_from": null,
+  "saved_payment_method_options": null,
+  "setup_intent": null,
+  "shipping_address_collection": null,
+  "shipping_cost": null,
+  "shipping_options": [],
+  "status": "open",
+  "submit_type": null,
+  "subscription": null,
+  "success_url": "https://example.org/thanks?session_id={CHECKOUT_SESSION_ID}",
+  "total_details": {
+    "amount_discount": 0,
+    "amount_shipping": 0,
+    "amount_tax": 0
+  },
+  "ui_mode": "hosted_page",
+  "url": "https://checkout.stripe.com/g/pay/cs_test_a0AHZDolrUrD47HTNSQjGh64hmYMc7lUD4ZCPZnY6GnH68kh9wY1OrVW7j#fidnandhYHdWcXxpYCc%2FJ2FgY2RwaXEnKSdicyc%2FNiknZHVsTmB8Jz8ndW5acWB2cVowNEpOb052STF2U002SkdJa3Jyb1BtVEZMX2p8UjZLdlYyX1FoN0NMcEh0PWA8bDM8c1VvfVNORmdAM1NIa2JVYERoXW5NMUZTV29WbTQyRj1tPWtoNEl0UzU1VEtTUW1LcFYnKSdjd2poVmB3c2B3Jz9xd3BgKSdnZGZuYndqcGthRmppancnPycmY2NjY2NjJyknaWR8anBxUXx1YCc%2FJ3Zsa2JpYFpscWBoJ3gl",
+  "wallet_options": null
+}
