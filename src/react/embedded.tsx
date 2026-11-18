@@ -25,9 +25,10 @@ export function paypalSdkUrl(clientId: string): string {
 
 const loading = new Map<string, Promise<void>>()
 
-/** @internal For tests: forget every script loaded so far. */
+/** @internal For tests: forget every script loaded so far, and the embedded Checkout. */
 export function forgetScripts() {
   loading.clear()
+  lastStripePage = Promise.resolve(null)
 }
 
 /**
@@ -76,6 +77,21 @@ interface StripeJs {
 }
 type Globals = { paypal?: PaypalSdk; Stripe?: (publishableKey: string) => StripeJs }
 const globals = () => window as unknown as Globals
+
+/** The page's embedded Checkout, made or being made (null: none). */
+let lastStripePage: Promise<StripeEmbeddedPage | null> = Promise.resolve(null)
+const destroyed = new WeakSet<StripeEmbeddedPage>()
+
+/** Destroys an embedded Checkout once; Stripe may throw for a second destroy. */
+function destroyPage(page: StripeEmbeddedPage | null) {
+  if (!page || destroyed.has(page)) return
+  destroyed.add(page)
+  try {
+    page.destroy?.()
+  } catch {
+    // Already gone.
+  }
+}
 
 type Load = 'loading' | 'slow' | 'ready' | 'failed'
 
@@ -207,22 +223,32 @@ export function StripeEmbeddedCheckout({ payment, publishableKey, onFallback, cl
   useEffect(() => {
     if (mismatch) return undefined
     let live = true
-    let page: StripeEmbeddedPage | null = null
-    loadScript(STRIPE_JS)
-      .then(async () => {
-        const make = globals().Stripe
-        if (!make) throw new Error('Stripe.js loaded without Stripe.')
-        // Stripe allows one embedded Checkout per page: one made after this unmounted is destroyed at once.
-        const made = await make(publishableKey).createEmbeddedCheckoutPage({ fetchClientSecret: () => Promise.resolve(clientSecret) })
-        if (!live || !box.current) return made.destroy?.()
-        page = made
-        made.mount(box.current)
+    // Stripe allows one embedded Checkout per page and refuses a second while one exists, so each
+    // waits for the one before it to be made and destroys it first (StrictMode mounts twice at once).
+    const made = lastStripePage.then(async (before) => {
+      destroyPage(before)
+      await loadScript(STRIPE_JS)
+      const make = globals().Stripe
+      if (!make) throw new Error('Stripe.js loaded without Stripe.')
+      if (!live) return null
+      return await make(publishableKey).createEmbeddedCheckoutPage({ fetchClientSecret: () => Promise.resolve(clientSecret) })
+    })
+    lastStripePage = made.catch(() => null)
+    made.then(
+      (page) => {
+        if (!page) return
+        if (!live || !box.current) return destroyPage(page)
+        page.mount(box.current)
         setLoad('ready')
-      })
-      .catch(() => live && setLoad('failed'))
+      },
+      (err: unknown) => {
+        console.error('payments: Stripe’s embedded Checkout didn’t load:', err)
+        if (live) setLoad('failed')
+      },
+    )
     return () => {
       live = false
-      page?.destroy?.()
+      void made.then(destroyPage, () => {})
     }
   }, [clientSecret, publishableKey, mismatch])
 

@@ -17,14 +17,18 @@ type Win = Window & { paypal?: unknown; Stripe?: unknown }
 
 let buttons: ButtonsOptions[]
 let closed: number
-let stripeMounts: { key: string; secret: string; destroyed: boolean }[]
+let stripeMounts: { key: string; secret: string; destroyed: boolean; mounted: boolean }[]
+let making = false
 /** The script tags the components added, kept out of the document so happy-dom doesn't try to load them. */
 let scripts: HTMLScriptElement[]
 
-/** The script tag the component added for `src`, told it loaded (or failed). */
-function finishScript(src: string, outcome: 'load' | 'error' = 'load') {
-  const el = scripts.find((s) => s.src === src)
-  if (!el) throw new Error(`no script ${src} (have ${scripts.map((x) => x.src).join(', ')})`)
+/** The script tag the component added for `src` (once it has), told it loaded (or failed). */
+async function finishScript(src: string, outcome: 'load' | 'error' = 'load') {
+  const el = await waitFor(() => {
+    const found = scripts.find((s) => s.src === src)
+    if (!found) throw new Error(`no script ${src} (have ${scripts.map((x) => x.src).join(', ')})`)
+    return found
+  })
   act(() => {
     el.dispatchEvent(new Event(outcome))
   })
@@ -40,6 +44,7 @@ beforeEach(() => {
   buttons = []
   closed = 0
   stripeMounts = []
+  making = false
   const w = window as Win
   w.paypal = {
     Buttons: (o: ButtonsOptions) => {
@@ -49,9 +54,16 @@ beforeEach(() => {
   }
   w.Stripe = (key: string) => ({
     createEmbeddedCheckoutPage: async (o: { fetchClientSecret: () => Promise<string> }) => {
-      const m = { key, secret: await o.fetchClientSecret(), destroyed: false }
+      // As Stripe.js does: a second embedded Checkout while one exists (made or being made) is refused.
+      if (stripeMounts.some((x) => !x.destroyed) || making) throw new Error('You cannot have multiple embedded checkout items.')
+      making = true
+      const m = { key, secret: await o.fetchClientSecret(), destroyed: false, mounted: false }
+      making = false
+      stripeMounts.push(m)
       return {
-        mount: () => stripeMounts.push(m),
+        mount: () => {
+          m.mounted = true
+        },
         destroy: () => {
           m.destroyed = true
         },
@@ -76,7 +88,7 @@ test('PayPal: loads the SDK for the app’s client id with card and PayPal only,
   completeReturn.mockResolvedValue(paid)
   render(<PaypalButtons payment={paypalPayment} completeReturn={ref} navigate={navigate} />)
   expect(paypalSdkUrl('client-1')).toBe('https://www.paypal.com/sdk/js?client-id=client-1&currency=USD&intent=capture&components=buttons&disable-funding=venmo,paylater')
-  finishScript(paypalSdkUrl('client-1'))
+  await finishScript(paypalSdkUrl('client-1'))
   await waitFor(() => expect(buttons).toHaveLength(1))
   expect(await buttons[0].createOrder()).toBe('ORDER1')
   await act(() => buttons[0].onApprove({ orderID: 'ORDER1' }, {}))
@@ -89,7 +101,7 @@ test('PayPal: a declined card is said and the buttons restarted, without leaving
   const restart = vi.fn(() => Promise.resolve())
   completeReturn.mockResolvedValue({ status: 'pending', purpose: 'order', ref: { type: 'offering', id: 'o1' }, declined: true })
   render(<PaypalButtons payment={paypalPayment} completeReturn={ref} navigate={navigate} />)
-  finishScript(paypalSdkUrl('client-1'))
+  await finishScript(paypalSdkUrl('client-1'))
   await waitFor(() => expect(buttons).toHaveLength(1))
   await act(() => buttons[0].onApprove({ orderID: 'ORDER1' }, { restart }))
   expect(restart).toHaveBeenCalled()
@@ -101,7 +113,7 @@ test('PayPal: if capturing fails, the buyer still goes to the return page, which
   const navigate = vi.fn()
   completeReturn.mockRejectedValue(new Error('network'))
   render(<PaypalButtons payment={paypalPayment} completeReturn={ref} navigate={navigate} />)
-  finishScript(paypalSdkUrl('client-1'))
+  await finishScript(paypalSdkUrl('client-1'))
   await waitFor(() => expect(buttons).toHaveLength(1))
   await act(() => buttons[0].onApprove({ orderID: 'ORDER1' }, {}))
   expect(navigate).toHaveBeenCalledWith(paypalPayment.returnUrl)
@@ -110,7 +122,7 @@ test('PayPal: if capturing fails, the buyer still goes to the return page, which
 test('PayPal: a script that doesn’t load offers the redirect', async () => {
   const onFallback = vi.fn()
   render(<PaypalButtons payment={{ ...paypalPayment, clientId: 'client-blocked' }} completeReturn={ref} onFallback={onFallback} />)
-  finishScript(paypalSdkUrl('client-blocked'), 'error')
+  await finishScript(paypalSdkUrl('client-blocked'), 'error')
   fireEvent.click(await screen.findByRole('button', { name: 'Pay on PayPal’s site instead' }))
   expect(onFallback).toHaveBeenCalled()
 })
@@ -124,7 +136,7 @@ test('PayPal: a slow script offers the redirect after a few seconds; the buttons
   })
   expect(screen.getByRole('button', { name: 'Pay on PayPal’s site instead' })).toBeTruthy()
   vi.useRealTimers()
-  finishScript(paypalSdkUrl('client-slow'))
+  await finishScript(paypalSdkUrl('client-slow'))
   await waitFor(() => expect(buttons).toHaveLength(1))
   unmount()
   expect(closed).toBe(1)
@@ -136,9 +148,10 @@ test('Stripe: Stripe.js for the library’s API version mounts one embedded Chec
       <StripeEmbeddedCheckout payment={{ processor: 'stripe', clientSecret: 'cs_test_1_secret' }} publishableKey="pk_test_1" />
     </StrictMode>,
   )
-  finishScript(STRIPE_JS)
-  await waitFor(() => expect(stripeMounts.filter((m) => !m.destroyed)).toHaveLength(1))
-  expect(stripeMounts.find((m) => !m.destroyed)).toMatchObject({ key: 'pk_test_1', secret: 'cs_test_1_secret' })
+  await finishScript(STRIPE_JS)
+  await waitFor(() => expect(stripeMounts.filter((m) => m.mounted && !m.destroyed)).toHaveLength(1))
+  expect(stripeMounts.find((m) => !m.destroyed)).toMatchObject({ key: 'pk_test_1', secret: 'cs_test_1_secret', mounted: true })
+  expect(screen.queryByRole('button', { name: /instead/ })).toBeNull()
   expect(STRIPE_JS).toBe('https://js.stripe.com/endive/stripe.js')
 })
 
@@ -148,7 +161,7 @@ test('Stripe: keys from different modes are said, not shown as a blank box; a fa
   unmount()
   const onFallback = vi.fn()
   render(<StripeEmbeddedCheckout payment={{ processor: 'stripe', clientSecret: 'cs_test_2_secret' }} publishableKey="pk_test_1" onFallback={onFallback} />)
-  finishScript(STRIPE_JS, 'error')
+  await finishScript(STRIPE_JS, 'error')
   fireEvent.click(await screen.findByRole('button', { name: 'Pay on Stripe’s site instead' }))
   expect(onFallback).toHaveBeenCalled()
 })

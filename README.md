@@ -316,9 +316,12 @@ Also exported: `parseRefundAmount(text, leftCents)`, `refundableCents(checkout, 
   `url`; `embedded` refused with 400) and a buttons order (no `payment_source`, `application_context`)
   made in the sandbox. Refunds, webhook endpoints and Transaction Search now pass with ed-market's
   updated test keys, and a hosted Stripe bank payment and a PayPal card payment were each paid,
-  settled by webhook and refunded in part and in full on ed-market's dev deployment. **Not yet checked in
-  a browser:** PayPal's buttons and Stripe's embedded page themselves (only against fakes of their
-  browser objects in `src/react/embedded.test.tsx`).
+  settled by webhook and refunded in part and in full on ed-market's dev deployment. In a browser on
+  ed-market's checkout (dev deployment): Stripe's embedded page mounted (once, under React's
+  development double mount: Stripe refuses a second embedded Checkout while one exists) and a bank
+  payment made in it with Stripe's test bank, returning to the thank-you page and recorded as an
+  order; PayPal's buttons rendered (PayPal and "Debit or Credit Card" only). **Not yet:** a payment
+  through PayPal's buttons (PayPal blocks automated browsers; needs a person with a sandbox buyer).
 - **Local Convex backend:** the example app pushes and its generated functions run; a deployment with
   `PAYMENTS_MODE=live` and a test Stripe key is refused at push with the reason.
 - **Only against the fakes** (no browser in the loop, or no permission): a completed Stripe Checkout
