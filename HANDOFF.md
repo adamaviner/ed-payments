@@ -126,7 +126,7 @@ ed-schedule's `payments_library_plan.md` (v0.1). The original brief had four del
   Webhook Endpoints; read PaymentMethods, Charges, Disputes, Events.
 - Webhooks: `npx ed-payments webhooks --stripe https://<deployment>.convex.site/stripe/webhook --env-file <file>` and
   `--paypal .../paypal/webhook` per deployment; set the printed `STRIPE_WEBHOOK_SECRET` / `PAYPAL_WEBHOOK_ID`.
-- PayPal Transaction Search permission; PayPal's nonprofit fee rate into `PAYPAL_CARD_FEE_RATE`.
+- PayPal Transaction Search permission. (PayPal's nonprofit rate, 1.99% + 49¢, is in ed-market's `PAYPAL_CARD_FEE_RATE`.)
 - Before deploying the schema drop: delete prod `refundRequests` rows (after resolving any open ones) and unset bids'
   `retryPaymentIntentId`, `chargeErrorMessage`, `chargeErrorAt`; bids paid/charged before the switch have no
   `chargeCheckoutId`, so their retry page can't use the library (none should be mid-retry at switch time).
