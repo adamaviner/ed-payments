@@ -1,0 +1,1 @@
+{"version":3,"file":"index.js","sourceRoot":"","sources":["../../src/react/index.ts"],"names":[],"mappings":"AAAA,0FAA0F;AAC1F,EAAE;AACF,6FAA6F;AAC7F,uGAAuG;AACvG,kGAAkG;AAClG,8EAA8E;AAC9E,OAAO,EAAE,iBAAiB,EAA+B,MAAM,wBAAwB,CAAA;AACvF,OAAO,EAAE,iBAAiB,EAAiD,MAAM,wBAAwB,CAAA;AACzG,OAAO,EAAE,iBAAiB,EAAE,eAAe,EAAqB,MAAM,mBAAmB,CAAA;AACzF,OAAO,EAAE,YAAY,EAAE,MAAM,aAAa,CAAA"}
