@@ -130,9 +130,9 @@ export function adminApi<C extends GenericValidator>(p: Payments<C>, o: AdminApi
       },
     }),
 
-    /** Asks for a refund, the whole remaining amount unless given. Returns the refund's id. */
+    /** Asks for a refund, the whole remaining amount unless given; `hostData` goes to on.refunded. Returns the refund's id. */
     requestRefund: mutationGeneric({
-      args: { auth, checkoutId: v.string(), amountCents: v.optional(v.number()), reason: v.string() },
+      args: { auth, checkoutId: v.string(), amountCents: v.optional(v.number()), reason: v.string(), hostData: v.optional(v.record(v.string(), v.string())) },
       handler: async (ctx, { auth: token, ...a }): Promise<string> => {
         const who = await admin(p, ctx, token)
         return await p.requestRefund(ctx, { ...a, by: who.name })

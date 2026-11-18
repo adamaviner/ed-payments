@@ -204,6 +204,41 @@ describe('refunds', () => {
     expect(await calls('onRefunded')).toHaveLength(1)
   })
 
+  test('the host’s notes on a refund are kept, passed to onRefunded, and only a few short strings', async () => {
+    const { mutate, read, paid, calls } = setup()
+    const id = await paid()
+    const plain = await mutate(pay.refunds.request, { checkoutId: id, amountCents: 500, reason: 'x', now: NOW })
+    const noted = await mutate(pay.refunds.request, { checkoutId: id, reason: 'The rest', hostData: { relist: 'no' }, now: NOW })
+    expect(await read(pay.refunds.get, { refundId: plain })).toMatchObject({ hostData: null })
+    expect(await read(pay.refunds.get, { refundId: noted })).toMatchObject({ hostData: { relist: 'no' } })
+    await mutate(pay.refunds.markManual, { refundId: plain, now: NOW })
+    await mutate(pay.refunds.markManual, { refundId: noted, now: NOW })
+    const args = (await calls('onRefunded')).map((c) => c.args)
+    expect(args[0]).not.toHaveProperty('hostData')
+    expect(args[1]).toMatchObject({ refundedCents: 2500, hostData: { relist: 'no' } })
+    const many = Object.fromEntries(Array.from({ length: 11 }, (_, i) => [`k${i}`, 'v']))
+    await expect(mutate(pay.refunds.request, { checkoutId: id, reason: 'x', hostData: many, now: NOW })).rejects.toThrow(/at most 10 notes/)
+    await expect(mutate(pay.refunds.request, { checkoutId: id, reason: 'x', hostData: { k: 'v'.repeat(201) }, now: NOW })).rejects.toThrow(/at most 200 characters/)
+  })
+
+  test('the notes reach onRefunded however the refund ends: a tagged webhook, or the same amount refunded in the dashboard', async () => {
+    const { mutate, paid, calls } = setup()
+    const tagged = await paid()
+    const r = await mutate(pay.refunds.request, { checkoutId: tagged, reason: 'x', hostData: { relist: 'yes' }, now: NOW })
+    await mutate(pay.refunds.begin, { refundId: r, skipApproval: true, now: NOW })
+    await mutate(pay.refunds.finish, { refundId: r, ok: true, done: false, processorRefundId: 're_p', now: NOW })
+    expect(await mutate(pay.refunds.recordExternal, { processor: 'stripe', paymentRef: `pi_${tagged}`, processorRefundId: 're_p', refundId: r, amountCents: 2500, state: 'done', now: NOW })).toBe(
+      'updated',
+    )
+    const dash = await paid()
+    const d = await mutate(pay.refunds.request, { checkoutId: dash, reason: 'x', hostData: { relist: 'no' }, now: NOW })
+    expect(await mutate(pay.refunds.recordExternal, { processor: 'stripe', paymentRef: `pi_${dash}`, processorRefundId: 're_dash', amountCents: 2500, state: 'done', now: NOW })).toBe('updated')
+    expect((await calls('onRefunded')).map((c) => c.args)).toMatchObject([
+      { refundId: r, hostData: { relist: 'yes' } },
+      { refundId: d, origin: 'requested', hostData: { relist: 'no' } },
+    ])
+  })
+
   test('marking a refund done by hand never counts past what was paid', async () => {
     const { mutate, paid, checkout } = setup()
     const id = await paid()

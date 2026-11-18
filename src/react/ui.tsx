@@ -60,8 +60,12 @@ export function ErrorNote({ error, className }: { error: string | null | undefin
 }
 
 /** Quiet text: loading, empty lists, what an action does. Not a live region, so many rows stay silent. */
-export function Hint({ children, className }: { children: ReactNode; className?: string }) {
-  return <p className={cn('text-sm text-muted-foreground', className)}>{children}</p>
+export function Hint({ children, className, id }: { children: ReactNode; className?: string; id?: string }) {
+  return (
+    <p id={id} className={cn('text-sm text-muted-foreground', className)}>
+      {children}
+    </p>
+  )
 }
 
 /** The outcome of an action, e.g. what giving up on a charge found; read out when it appears. */

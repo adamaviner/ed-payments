@@ -610,8 +610,13 @@ export class Payments<C extends GenericValidator = GenericValidator> {
 
   // ── Refunds ───────────────────────────────────────────────────────────────────────────────────
 
-  /** Asks for a refund (the whole remaining amount unless given). Who may is the app's check; `by` is recorded. Returns the refund id. */
-  async requestRefund(ctx: RunMutationCtx, a: { checkoutId: string; amountCents?: number; reason: string; by?: string }): Promise<string> {
+  /**
+   * Asks for a refund (the whole remaining amount unless given). Who may is the app's check; `by` is
+   * recorded. `hostData` (at most 10 strings of at most 200 characters, e.g. { relist: 'yes' }; keys
+   * non-empty printable ASCII not starting with `$`) is kept on the refund and passed to on.refunded
+   * when it is done. Returns the refund id.
+   */
+  async requestRefund(ctx: RunMutationCtx, a: { checkoutId: string; amountCents?: number; reason: string; by?: string; hostData?: Record<string, string> }): Promise<string> {
     return await ctx.runMutation(this.component.refunds.request, { ...a, now: Date.now() })
   }
 

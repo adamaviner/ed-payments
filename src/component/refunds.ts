@@ -6,7 +6,7 @@ import { ConvexError, v } from 'convex/values'
 import type { Doc, Id } from './_generated/dataModel.js'
 import { mutation, query, type MutationCtx } from './_generated/server.js'
 import { COMMITTED_REFUND, notifyHost, openIssue, refundViewOf, refundView, refundsOf } from './lib.js'
-import { processor } from './schema.js'
+import { hostData as hostDataValidator, processor } from './schema.js'
 
 const dollarsOf = (cents: number) => `$${(cents / 100).toFixed(2)}`
 
@@ -35,14 +35,32 @@ async function counted(ctx: MutationCtx, r: Doc<'refunds'>, now: number) {
   const c = await loadCheckout(ctx, r.checkoutId)
   const refundedCents = c.refundedCents + r.amountCents
   await ctx.db.patch(c._id, { refundedCents })
-  await notifyHost(ctx, { ...c, refundedCents }, 'onRefunded', { refundId: r._id, amountCents: r.amountCents, refundedCents, paidCents: c.paidCents ?? 0, origin: r.origin }, now)
+  await notifyHost(
+    ctx,
+    { ...c, refundedCents },
+    'onRefunded',
+    { refundId: r._id, amountCents: r.amountCents, refundedCents, paidCents: c.paidCents ?? 0, origin: r.origin, ...(r.hostData ? { hostData: r.hostData } : {}) },
+    now,
+  )
 }
 
-/** Asks for a refund of a paid checkout; the whole remaining amount unless given. */
+const HOST_DATA_ENTRIES = 10
+const HOST_DATA_CHARS = 200
+
+/** The host's notes are a few short strings, not a place to store records. */
+function checkHostData(data: Record<string, string> | undefined) {
+  if (!data) return
+  const entries = Object.entries(data)
+  if (entries.length > HOST_DATA_ENTRIES) throw new ConvexError(`A refund keeps at most ${HOST_DATA_ENTRIES} notes from the app.`)
+  if (entries.some(([k, val]) => k.length > HOST_DATA_CHARS || val.length > HOST_DATA_CHARS)) throw new ConvexError(`A refund's notes from the app are at most ${HOST_DATA_CHARS} characters each.`)
+}
+
+/** Asks for a refund of a paid checkout; the whole remaining amount unless given. `hostData` is kept on it and passed to on.refunded. */
 export const request = mutation({
-  args: { checkoutId: v.string(), amountCents: v.optional(v.number()), reason: v.string(), by: v.optional(v.string()), now: v.number() },
+  args: { checkoutId: v.string(), amountCents: v.optional(v.number()), reason: v.string(), by: v.optional(v.string()), hostData: v.optional(hostDataValidator), now: v.number() },
   returns: v.string(),
-  handler: async (ctx, { checkoutId, amountCents, reason, by, now }) => {
+  handler: async (ctx, { checkoutId, amountCents, reason, by, hostData, now }) => {
+    checkHostData(hostData)
     const c = await loadCheckout(ctx, checkoutId)
     if (c.status !== 'paid' && c.status !== 'refund_needed') throw new ConvexError('Only a paid checkout can be refunded.')
     const left = await remaining(ctx, c)
@@ -56,6 +74,7 @@ export const request = mutation({
       origin: 'requested',
       status: 'requested',
       requestedBy: by,
+      hostData,
       createdAt: now,
       updatedAt: now,
     })
@@ -162,7 +181,8 @@ export const markManual = mutation({
     // as an external row: this request is that refund, so it is closed against it, not counted again.
     const external = (await refundsOf(ctx, c._id)).find((x) => x.origin === 'external' && x.status === 'sent' && x.amountCents === r.amountCents && !x.requestedBy)
     if (external) {
-      await ctx.db.patch(external._id, { reason: r.reason, requestedBy: r.requestedBy ?? by ?? 'unknown', note: note?.trim() || external.note })
+      // The host was already told without this request's notes; they are copied for the ledger.
+      await ctx.db.patch(external._id, { reason: r.reason, requestedBy: r.requestedBy ?? by ?? 'unknown', note: note?.trim() || external.note, hostData: r.hostData ?? external.hostData })
       await ctx.db.patch(r._id, {
         status: 'dismissed',
         approvedBy: r.approvedBy ?? by,
@@ -220,7 +240,10 @@ export const recordExternal = mutation({
     const match =
       rows.find((r) => r.processorRefundId === a.processorRefundId) ??
       rows.find((r) => r._id === tagged) ??
-      rows.find((r) => r.status === 'manual' && !r.processorRefundId && r.amountCents === a.amountCents)
+      rows.find((r) => r.status === 'manual' && !r.processorRefundId && r.amountCents === a.amountCents) ??
+      // A request carrying the app's notes, made in the dashboard instead of sent from here: it is that
+      // refund, so the notes reach on.refunded (an external row would be counted without them).
+      (a.state === 'failed' ? undefined : rows.find((r) => r.hostData && (r.status === 'requested' || r.status === 'approved') && !r.processorRefundId && r.amountCents === a.amountCents))
     if (!match) {
       if (a.state === 'failed') return 'unchanged'
       const done = a.state === 'done'

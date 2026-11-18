@@ -87,6 +87,20 @@ describe('adminApi', () => {
     await expect(t.mutation(api.payments.requestRefund, { auth: 'boss', checkoutId, amountCents: 2000, reason: 'Too much' })).rejects.toThrow(/Only \$15\.00 is left/)
     await expect(t.mutation(api.payments.requestRefund, { auth: 'boss', checkoutId, amountCents: -5, reason: 'Negative' })).rejects.toThrow(/at least one cent/)
   })
+
+  test('the app’s notes on a refund (an answer its page asked for) are kept in the ledger and reach on.refunded', async () => {
+    const t = createTest()
+    await t.mutation(api.host.addAdmin, { token: 'boss', name: 'Bo' })
+    const { checkoutId } = await t.action(api.shop.buy, { processor: 'stripe', method: 'card' })
+    const sessionId = (await t.query(api.shop.status, { id: checkoutId }))!.processorCheckoutId!
+    await t.fetch('/stripe/webhook', await stripe.pay(sessionId))
+    const refundId = await t.mutation(api.payments.requestRefund, { auth: 'boss', checkoutId, reason: 'Never arrived', hostData: { relist: 'yes' } })
+    expect(await t.query(api.payments.openRefunds, { auth: 'boss' })).toMatchObject([{ id: refundId, hostData: { relist: 'yes' } }])
+    await t.action(api.payments.sendRefund, { auth: 'boss', refundId })
+    expect(await t.query(api.payments.checkout, { auth: 'boss', checkoutId })).toMatchObject({ refunds: [{ status: 'sent', hostData: { relist: 'yes' } }] })
+    const refunded = (await t.query(api.host.calls, {})).filter((x) => x.name === 'onRefunded')
+    expect(refunded.map((x) => x.args)).toMatchObject([{ refundId, refundedCents: 2500, paidCents: 2500, origin: 'requested', hostData: { relist: 'yes' } }])
+  })
 })
 
 describe('publicApi', () => {

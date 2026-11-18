@@ -987,6 +987,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           checkoutId: string;
           createdAt: number;
           error: string | null;
+          hostData: Record<string, string> | null;
           id: string;
           note: string | null;
           origin: "requested" | "needed" | "external";
@@ -1039,6 +1040,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           checkoutId: string;
           createdAt: number;
           error: string | null;
+          hostData: Record<string, string> | null;
           id: string;
           note: string | null;
           origin: "requested" | "needed" | "external";
@@ -1069,6 +1071,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           checkoutId: string;
           createdAt: number;
           error: string | null;
+          hostData: Record<string, string> | null;
           id: string;
           note: string | null;
           origin: "requested" | "needed" | "external";
@@ -1099,6 +1102,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           checkoutId: string;
           createdAt: number;
           error: string | null;
+          hostData: Record<string, string> | null;
           id: string;
           note: string | null;
           origin: "requested" | "needed" | "external";
@@ -1148,6 +1152,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           amountCents?: number;
           by?: string;
           checkoutId: string;
+          hostData?: Record<string, string>;
           now: number;
           reason: string;
         },
@@ -1165,6 +1170,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           checkoutId: string;
           createdAt: number;
           error: string | null;
+          hostData: Record<string, string> | null;
           id: string;
           note: string | null;
           origin: "requested" | "needed" | "external";

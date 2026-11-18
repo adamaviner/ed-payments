@@ -33,6 +33,12 @@ export const checkoutKind = v.union(v.literal('hosted'), v.literal('offSession')
 
 export const savedMethodKind = v.union(v.literal('card'), v.literal('ach'))
 
+/**
+ * The host's own notes on a refund, e.g. { relist: 'yes' } from a question its admin page asked: kept on
+ * the refund, shown in the ledger and passed to on.refunded. Opaque to the library.
+ */
+export const hostData = v.record(v.string(), v.string())
+
 export const refundOrigin = v.union(v.literal('requested'), v.literal('needed'), v.literal('external'))
 
 /**
@@ -154,6 +160,7 @@ export default defineSchema({
      * processors replay a key's first answer; a send whose outcome is unknown keeps its key instead.
      */
     attempts: v.optional(v.number()),
+    hostData: v.optional(hostData),
   })
     .index('by_checkout', ['checkoutId'])
     .index('by_status', ['status', 'updatedAt'])
