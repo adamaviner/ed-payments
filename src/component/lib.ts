@@ -4,7 +4,7 @@ import { ConvexError, v, type Infer } from 'convex/values'
 import type { FunctionHandle } from 'convex/server'
 import type { Doc, Id } from './_generated/dataModel.js'
 import type { MutationCtx } from './_generated/server.js'
-import { checkoutKind, checkoutStatus, issueKind, method, payer, processor, ref, refundOrigin, refundStatus } from './schema.js'
+import { checkoutKind, checkoutStatus, hostData, issueKind, method, payer, processor, ref, refundOrigin, refundStatus } from './schema.js'
 
 export const checkoutView = v.object({
   id: v.string(),
@@ -92,6 +92,8 @@ export const refundView = v.object({
   sentAt: v.union(v.number(), v.null()),
   /** Sends the processor refused; the idempotency key of the next send depends on it. */
   attempts: v.number(),
+  /** The host's notes given when it was asked for (e.g. an admin's answer to its question). */
+  hostData: v.union(hostData, v.null()),
 })
 export type RefundView = Infer<typeof refundView>
 
@@ -112,6 +114,7 @@ export function refundViewOf(r: Doc<'refunds'>): RefundView {
     updatedAt: r.updatedAt,
     sentAt: r.sentAt ?? null,
     attempts: r.attempts ?? 0,
+    hostData: r.hostData ?? null,
   }
 }
 

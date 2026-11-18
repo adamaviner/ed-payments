@@ -1,15 +1,31 @@
 // How an app shows Admin → Payments (typechecked against the example's generated api, so a change to
 // the admin api that breaks apps breaks here first). This app signs in with Convex auth, so it passes
 // no `auth`; ed-schedule would pass `auth={{ token }}`. skipApproval matches paymentsAdmin.ts.
-import { type PaymentRef, PaymentsAdminPage } from '@earthdance/payments/react'
+import { type CheckoutSummary, type PaymentRef, PaymentsAdminPage, type RefundQuestion } from '@earthdance/payments/react'
 import { useQuery } from 'convex/react'
 import { api } from '../convex/_generated/api.js'
 
 /** What a payment was for, linked; the page shows the payment's description when this gives null. */
 const itemLink = (ref: PaymentRef) => (ref.type === 'item' ? <a href={`/items/${ref.id}`}>The item</a> : null)
 
+/**
+ * Asked before a refund of everything left on an item's payment; the answer is kept on the refund as
+ * hostData.restock and reaches the app's on.refunded, to act on.
+ */
+const restockQuestion = (checkout: CheckoutSummary, amountCents: number, leftCents: number): RefundQuestion | null =>
+  checkout.ref.type === 'item' && amountCents === leftCents
+    ? {
+        key: 'restock',
+        label: `Put “${checkout.description}” back on sale?`,
+        options: [
+          { value: 'yes', label: 'Yes, put it back on sale' },
+          { value: 'no', label: 'No' },
+        ],
+      }
+    : null
+
 export function PaymentsAdmin() {
-  return <PaymentsAdminPage api={api.paymentsAdmin} skipApproval refLink={itemLink} />
+  return <PaymentsAdminPage api={api.paymentsAdmin} skipApproval refLink={itemLink} refundQuestion={restockQuestion} />
 }
 
 /** The sidebar's badge: refunds to do plus open issues. */

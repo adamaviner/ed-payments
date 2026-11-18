@@ -2,6 +2,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { PaymentsAdminPage } from './PaymentsAdminPage.js'
+import type { RefundQuestion } from './PaymentsAdminPage.js'
 import type { CheckoutSummary, OpenRefund, PaymentIssue, PaymentsAdminApi } from './types.js'
 
 const checkout: CheckoutSummary = {
@@ -37,6 +38,7 @@ const openRefund: OpenRefund = {
   updatedAt: Date.UTC(2026, 10, 15),
   sentAt: null,
   attempts: 0,
+  hostData: null,
   checkout,
 }
 
@@ -174,4 +176,41 @@ test('a charge with an unknown outcome can be retried or given up; errors stay b
   fireEvent.click(within(row).getByRole('button', { name: 'Give up on this charge?' }))
   await waitFor(() => expect(calls.giveUpCharge).toHaveBeenCalledWith({ checkoutId: 'c2' }))
   expect(within(row).queryByRole('alert')).toBeNull()
+})
+
+/** The app's question: asked only when a refund takes everything left. */
+const relistQuestion = (c: CheckoutSummary, cents: number, left: number): RefundQuestion | null =>
+  cents === left
+    ? {
+        key: 'relist',
+        label: `List ${c.description} again?`,
+        options: [
+          { value: 'yes', label: 'Yes, list it again' },
+          { value: 'no', label: 'No' },
+        ],
+      }
+    : null
+
+test('a full refund waits for the app’s question to be answered, with nothing chosen for the admin, and sends the answer', async () => {
+  render(<PaymentsAdminPage api={api} skipApproval refundQuestion={relistQuestion} />)
+  const row = refundRow()
+  const group = within(row).getByRole('group', { name: 'List Weekend retreat again?' })
+  const radios = within(group).getAllByRole<HTMLInputElement>('radio')
+  expect(radios.map((r) => r.checked)).toEqual([false, false])
+  expect(within(row).getByRole<HTMLButtonElement>('button', { name: 'Refund $70.00' }).disabled).toBe(true)
+  fireEvent.click(within(group).getByLabelText('No'))
+  fireEvent.click(within(row).getByRole('button', { name: 'Refund $70.00' }))
+  fireEvent.click(within(row).getByRole('button', { name: 'Send $70.00 back via Stripe?' }))
+  await waitFor(() => expect(calls.sendRefund).toHaveBeenCalled())
+  expect(calls.requestRefund).toHaveBeenCalledWith({ checkoutId: 'c1', amountCents: 7000, reason: 'Refunded by an admin', hostData: { relist: 'no' } })
+})
+
+test('a partial refund asks nothing and sends no notes', async () => {
+  render(<PaymentsAdminPage api={api} skipApproval refundQuestion={relistQuestion} />)
+  const row = refundRow()
+  fireEvent.change(within(row).getByLabelText('Amount ($)'), { target: { value: '20' } })
+  expect(within(row).queryByRole('group')).toBeNull()
+  fireEvent.click(within(row).getByRole('button', { name: 'Refund $20.00' }))
+  fireEvent.click(within(row).getByRole('button', { name: 'Send $20.00 back via Stripe?' }))
+  await waitFor(() => expect(calls.requestRefund).toHaveBeenCalledWith({ checkoutId: 'c1', amountCents: 2000, reason: 'Refunded by an admin' }))
 })

@@ -24,6 +24,22 @@ export interface PaymentsAdminPageProps {
   refLink?: (ref: PaymentRef, checkout: CheckoutSummary) => ReactNode
   /** Payments and issues loaded at a time. Default 20. */
   pageSize?: number
+  /**
+   * A question to ask before refunding `amountCents` of a payment with `leftCents` left (e.g. only when
+   * it refunds everything left), or null to ask nothing. The refund waits for an answer, and the answer
+   * is kept on it as hostData[key]: in the ledger, and in on.refunded.
+   */
+  refundQuestion?: (checkout: CheckoutSummary, amountCents: number, leftCents: number) => RefundQuestion | null
+}
+
+/** A question the app asks before a refund, e.g. whether to put the item back on sale. */
+export interface RefundQuestion {
+  /** The hostData key the answer is kept under, e.g. 'relist'. */
+  key: string
+  /** The question, naming what it is about. */
+  label: ReactNode
+  /** The answers. None is chosen until the admin picks one, so nothing is decided for them. */
+  options: { value: string; label: string }[]
 }
 
 /** The props every row needs. */
@@ -32,12 +48,13 @@ interface Shared {
   args: { auth?: PaymentsAuth }
   skipApproval: boolean
   refLink?: PaymentsAdminPageProps['refLink']
+  refundQuestion?: PaymentsAdminPageProps['refundQuestion']
 }
 
-export function PaymentsAdminPage({ api, auth, skipApproval = false, refLink, pageSize = 20 }: PaymentsAdminPageProps) {
+export function PaymentsAdminPage({ api, auth, skipApproval = false, refLink, refundQuestion, pageSize = 20 }: PaymentsAdminPageProps) {
   // Left out rather than sent as undefined, so an app on Convex auth sends no `auth` at all.
   const args = auth === undefined ? {} : { auth }
-  const shared: Shared = { api, args, skipApproval, refLink }
+  const shared: Shared = { api, args, skipApproval, refLink, refundQuestion }
   const refunds = useQuery(api.openRefunds, args)
   return (
     <div className="flex flex-col gap-8">
@@ -71,6 +88,14 @@ const ISSUES: Record<PaymentIssue['kind'], string> = {
   callback_failed: 'The app couldn’t record it',
   charge_unknown: 'Charge with an unknown outcome',
 }
+
+/** The app's notes on a refund, as "key: value" pairs. */
+const notesText = (hostData: Record<string, string> | null) =>
+  hostData
+    ? Object.entries(hostData)
+        .map(([k, val]) => `${k}: ${val}`)
+        .join(' · ')
+    : ''
 
 const when = (ms: number) => new Date(ms).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
 
@@ -159,6 +184,7 @@ function RefundRow({ shared, refund }: { shared: Shared; refund: OpenRefund }) {
             {refund.requestedBy && ` · asked by ${refund.requestedBy}`}
             {refund.approvedBy && ` · approved by ${refund.approvedBy}`} · {when(refund.createdAt)}
           </Muted>
+          {refund.hostData && <Muted>{notesText(refund.hostData)}</Muted>}
           {refund.error && <span className="block text-xs text-destructive">{refund.error}</span>}
         </div>
       </div>
@@ -242,20 +268,26 @@ function Refundable({ shared, refunds, pageSize }: { shared: Shared; refunds: Op
 }
 
 function CheckoutRow({ shared, checkout, refunds }: { shared: Shared; checkout: CheckoutSummary; refunds: OpenRefund[] | undefined }) {
-  const { api, args, skipApproval, refLink } = shared
+  const { api, args, skipApproval, refLink, refundQuestion } = shared
   const requestRefund = useMutation(api.requestRefund)
   const sendRefund = useAction(api.sendRefund)
   const { error, run, busy } = useSaver()
   const [amount, setAmount] = useState('')
   const [reason, setReason] = useState('')
   const [asked, setAsked] = useState<string | null>(null)
+  const [answer, setAnswer] = useState<{ key: string; value: string } | null>(null)
   const amountId = useId()
+  const questionName = useId()
   const reasonId = useId()
   const amountErrorId = useId()
   // Until the open refunds load, what they hold is unknown, so nothing can be refunded yet.
   const left = refunds ? refundableCents(checkout, refunds) : 0
   const parsed = parseRefundAmount(amount, left)
   const processor = processorName(checkout.processor)
+  const question = parsed.ok ? (refundQuestion?.(checkout, parsed.cents, left) ?? null) : null
+  // An answer only counts for the question it was given to: changing the amount can change the question.
+  const answered = question && answer?.key === question.key && question.options.some((o) => o.value === answer.value) ? answer.value : null
+  const hostData = question && answered !== null ? { [question.key]: answered } : undefined
 
   // Two steps, and the form clears as soon as the refund is recorded: if sending then fails, the refund
   // is already in Refunds to do, and a form still filled in would invite a second refund of the same money.
@@ -263,11 +295,12 @@ function CheckoutRow({ shared, checkout, refunds }: { shared: Shared; checkout: 
     setAsked(null)
     let refundId: string | null = null
     const recorded = await run(async () => {
-      refundId = await requestRefund({ ...args, checkoutId: checkout.id, amountCents: cents, reason: reason.trim() || 'Refunded by an admin' })
+      refundId = await requestRefund({ ...args, checkoutId: checkout.id, amountCents: cents, reason: reason.trim() || 'Refunded by an admin', ...(hostData ? { hostData } : {}) })
     })
     if (!recorded || refundId === null) return
     setAmount('')
     setReason('')
+    setAnswer(null)
     if (!skipApproval) return setAsked('Asked for. It is in Refunds to do, waiting for approval.')
     const id: string = refundId
     const sent = await run(() => send(sendRefund, args, id))
@@ -299,7 +332,7 @@ function CheckoutRow({ shared, checkout, refunds }: { shared: Shared; checkout: 
         <Field label="Reason" htmlFor={reasonId} className="min-w-48 flex-1">
           <Input id={reasonId} value={reason} disabled={busy || left < 1} placeholder="Refunded by an admin" onChange={(e) => setReason(e.target.value)} />
         </Field>
-        {parsed.ok ? (
+        {parsed.ok && (!question || answered !== null) ? (
           <ConfirmButton
             disabled={busy}
             confirmLabel={skipApproval ? `Send ${dollars(parsed.cents)} back via ${processor}?` : `Ask to refund ${dollars(parsed.cents)}?`}
@@ -308,9 +341,20 @@ function CheckoutRow({ shared, checkout, refunds }: { shared: Shared; checkout: 
             Refund {dollars(parsed.cents)}
           </ConfirmButton>
         ) : (
-          <Button disabled>Refund</Button>
+          <Button disabled>{parsed.ok ? `Refund ${dollars(parsed.cents)}` : 'Refund'}</Button>
         )}
       </div>
+      {question && (
+        <fieldset className="flex flex-wrap items-center gap-x-4 gap-y-1" disabled={busy}>
+          <legend className="mb-1 basis-full">{question.label}</legend>
+          {question.options.map((o) => (
+            <label key={o.value} className="flex items-center gap-1.5">
+              <input type="radio" name={questionName} value={o.value} checked={answered === o.value} onChange={() => setAnswer({ key: question.key, value: o.value })} />
+              {o.label}
+            </label>
+          ))}
+        </fieldset>
+      )}
       {/* Only once something is typed: an untouched row with nothing left says so in its "left" column. Not an
           alert, which a screen reader would read out on every keystroke; the input points at it instead. */}
       <p id={amountErrorId} className="text-sm text-destructive empty:hidden">

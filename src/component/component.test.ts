@@ -204,6 +204,23 @@ describe('refunds', () => {
     expect(await calls('onRefunded')).toHaveLength(1)
   })
 
+  test('the host’s notes on a refund are kept, passed to onRefunded, and only a few short strings', async () => {
+    const { mutate, read, paid, calls } = setup()
+    const id = await paid()
+    const plain = await mutate(pay.refunds.request, { checkoutId: id, amountCents: 500, reason: 'x', now: NOW })
+    const noted = await mutate(pay.refunds.request, { checkoutId: id, reason: 'The rest', hostData: { relist: 'no' }, now: NOW })
+    expect(await read(pay.refunds.get, { refundId: plain })).toMatchObject({ hostData: null })
+    expect(await read(pay.refunds.get, { refundId: noted })).toMatchObject({ hostData: { relist: 'no' } })
+    await mutate(pay.refunds.markManual, { refundId: plain, now: NOW })
+    await mutate(pay.refunds.markManual, { refundId: noted, now: NOW })
+    const args = (await calls('onRefunded')).map((c) => c.args)
+    expect(args[0]).not.toHaveProperty('hostData')
+    expect(args[1]).toMatchObject({ refundedCents: 2500, hostData: { relist: 'no' } })
+    const many = Object.fromEntries(Array.from({ length: 11 }, (_, i) => [`k${i}`, 'v']))
+    await expect(mutate(pay.refunds.request, { checkoutId: id, reason: 'x', hostData: many, now: NOW })).rejects.toThrow(/at most 10 notes/)
+    await expect(mutate(pay.refunds.request, { checkoutId: id, reason: 'x', hostData: { k: 'v'.repeat(201) }, now: NOW })).rejects.toThrow(/at most 200 characters/)
+  })
+
   test('marking a refund done by hand never counts past what was paid', async () => {
     const { mutate, paid, checkout } = setup()
     const id = await paid()

@@ -159,7 +159,10 @@ against what is left (paid, less refunded, less open refunds, failed ones includ
 dismissed) before the server checks again; a refund recorded but not sent clears its form and waits in
 refunds to do;
 anything that moves money asks twice; every action shows its error by its row; nothing changes on the
-page until the server says so.
+page until the server says so. `refundQuestion` lets the app ask something before a refund (e.g. "Put
+this item back on sale?" when it refunds everything left): the refund waits until one answer is picked,
+none is picked for the admin, and the answer is kept on the refund as `hostData[key]` (shown in the
+ledger, passed to `on.refunded`).
 
 ```tsx
 <PaymentsAdminPage
@@ -167,12 +170,24 @@ page until the server says so.
   auth={{ token }} // only for apps with their own session tokens; leave out on Convex auth
   skipApproval // the same as adminApi({ skipApproval }) on the server
   refLink={(ref) => (ref.type === 'item' ? <Link to={`/items/${ref.id}`}>The item</Link> : null)}
+  refundQuestion={(checkout, amountCents, leftCents) =>
+    amountCents === leftCents
+      ? {
+          key: 'restock',
+          label: `Put “${checkout.description}” back on sale?`,
+          options: [
+            { value: 'yes', label: 'Yes' },
+            { value: 'no', label: 'No' },
+          ],
+        }
+      : null
+  }
 />
 ```
 
 Also exported: `parseRefundAmount(text, leftCents)`, `refundableCents(checkout, openRefunds)`,
 `errorMessage(err)`, and the types (`PaymentsAdminApi`, `CompleteReturnRef`, `OpenRefund`,
-`CheckoutSummary`, `PaymentIssue`, `CheckoutReturn`). For a badge, query `api.paymentsAdmin.openCount`.
+`CheckoutSummary`, `PaymentIssue`, `CheckoutReturn`, `RefundQuestion`). For a badge, query `api.paymentsAdmin.openCount`.
 
 ## How it works
 
@@ -224,7 +239,9 @@ Also exported: `parseRefundAmount(text, leftCents)`, `refundableCents(checkout, 
 - **Refunds** are a ledger (many per checkout): requested → approved → sending → sent, or failed (send
   again), recorded as done by hand, or dismissed. Amounts are checked against paid − refunded − in
   progress. Keyed by the refund id, so a double click or a retry refunds once. Refunds made in a
-  dashboard arrive by webhook (or the nightly comparison) as `external`.
+  dashboard arrive by webhook (or the nightly comparison) as `external`. A refund can carry the app's
+  `hostData` (`requestRefund({ ..., hostData })`, a few short strings, e.g. an admin's answer), which
+  `on.refunded` receives when it is done; refunds the library or a dashboard made have none.
 - **Sweep** (every 10 minutes): PayPal approvals whose webhook never came are captured; expired
   checkouts are settled if paid after all, else ended at the processor and abandoned; quiet off-session
   charges are tried again; refunds left sending are checked.
