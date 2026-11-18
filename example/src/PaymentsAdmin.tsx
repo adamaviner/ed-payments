@@ -1,0 +1,19 @@
+// How an app shows Admin → Payments (typechecked against the example's generated api, so a change to
+// the admin api that breaks apps breaks here first). This app signs in with Convex auth, so it passes
+// no `auth`; ed-schedule would pass `auth={{ token }}`. skipApproval matches paymentsAdmin.ts.
+import { type PaymentRef, PaymentsAdminPage } from '@earthdance/payments/react'
+import { useQuery } from 'convex/react'
+import { api } from '../convex/_generated/api.js'
+
+/** What a payment was for, linked; the page shows the payment's description when this gives null. */
+const itemLink = (ref: PaymentRef) => (ref.type === 'item' ? <a href={`/items/${ref.id}`}>The item</a> : null)
+
+export function PaymentsAdmin() {
+  return <PaymentsAdminPage api={api.paymentsAdmin} skipApproval refLink={itemLink} />
+}
+
+/** The sidebar's badge: refunds to do plus open issues. */
+export function PaymentsBadge() {
+  const count = useQuery(api.paymentsAdmin.openCount, {})
+  return count ? <span className="rounded-full bg-destructive/10 px-1.5 text-xs text-destructive">{count}</span> : null
+}

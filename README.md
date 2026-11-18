@@ -11,7 +11,7 @@ disputes and reconciliation. An app prices things, keeps its own records and dec
 means for them, in callbacks. It never calls Stripe or PayPal itself. The rules an app (and a
 coding agent working in it) follows are in [`AGENTS.md`](AGENTS.md), shipped in the package.
 
-**Status:** v0.2. One-off payments in USD: hosted checkouts (Stripe Checkout, PayPal), saved
+**Status:** v0.2 (v0.2.1: the React package). One-off payments in USD: hosted checkouts (Stripe Checkout, PayPal), saved
 methods charged off-session, on-session retries. Not here: subscriptions, order models, emails.
 The plans it was built from are ed-schedule's `payments_library_plan.md` (v0.1) and the v0.2 plan
 ("own all payment paths, bids included").
@@ -20,7 +20,7 @@ The plans it was built from are ed-schedule's `payments_library_plan.md` (v0.1) 
 
 The example app (`example/convex`) is a complete host; these are its files.
 
-**1. Install and mount.** `npm install github:adamaviner/ed-payments#v0.2.0` (pnpm: `pnpm add ...`).
+**1. Install and mount.** `npm install github:adamaviner/ed-payments#v0.2.1` (pnpm: `pnpm add ...`).
 
 ```ts
 // convex/convex.config.ts
@@ -108,6 +108,71 @@ const { clientSecret } = await payments.retryOnSession(ctx, { checkoutId })
 Then register the webhooks: `npx ed-payments webhooks --stripe https://<deployment>.convex.site/stripe/webhook --env-file .env.local`
 (and `--paypal .../paypal/webhook`). In tests: `const { stripe, paypal } = registerPayments(t)` from
 `@earthdance/payments/test`.
+
+**Then, in the browser** (optional), the return page and the admin page from
+`@earthdance/payments/react`; see "The React package" below.
+
+## The React package (`@earthdance/payments/react`)
+
+Two pieces for an app's React code, over the functions it exported in steps 2 and 4. Its `react` peer
+dependency is optional, so an app with no React (or its own pages) needs nothing more. It brings its
+own few primitives (plain `button` and `input`, no UI library), styled with Tailwind classes on the
+shadcn theme tokens (`bg-muted`, `text-destructive`, ...), so colours come from the app's theme. Add to
+the app's main CSS, or Tailwind 4 skips the package's classes:
+
+```css
+@source '../node_modules/@earthdance/payments/dist';
+```
+
+It knows nothing about the app's login (`auth` goes through to `authorize.admin` as it is), router
+or bundler. `example/src` is the reference, typechecked in `npm run check` against the example's api.
+
+**The return page: `useCheckoutReturn(completeReturn, { processor, token })`.** The app reads the
+token from its own URL (Stripe adds `session_id`, PayPal adds `token`) and words every state itself.
+The hook asks `completeReturn` once: StrictMode's double effects and two mounts at once share one
+call; a reload asks again, which the library answers the same. It returns one of
+
+| `state`                                                          | Means                                                                                                                                                                                                   |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `checking`                                                       | Asking.                                                                                                                                                                                                 |
+| `paid`                                                           | The app recorded the sale.                                                                                                                                                                              |
+| `processing`                                                     | A bank payment on its way (days).                                                                                                                                                                       |
+| `refund_needed`                                                  | The money arrived but the app refused the sale (sold out); it is owed back.                                                                                                                             |
+| `failed`                                                         | The processor said no.                                                                                                                                                                                  |
+| `cancelled`                                                      | Nothing paid, at least not yet: the buyer turned back (PayPal sends its token to the cancel page too), it expired, or (rarely) the processor is still finishing it; the callbacks say if it pays later. |
+| `error` with `reason`: `no_token`, `not_found`, `request_failed` | No token in the address, not one of this app's payments, or the call failed (`error`).                                                                                                                  |
+
+with `purpose` and `ref` on the settled states, and `retry()` to ask again after `request_failed`
+(each call counts against the few the library allows per token).
+
+```tsx
+const params = new URLSearchParams(location.search) // or the router's
+const sessionId = params.get('session_id')
+const result = useCheckoutReturn(api.payments.completeReturn, sessionId ? { processor: 'stripe', token: sessionId } : { processor: 'paypal', token: params.get('token') })
+if (result.state === 'checking') return <p>Confirming your payment…</p>
+```
+
+**The admin page: `<PaymentsAdminPage>`.** Three parts: refunds to do (approve, send, mark refunded
+elsewhere, don't refund), paid payments to refund in full or in part, and open issues (mark resolved;
+for a charge with an unknown outcome, try again or give up). Amounts are typed in dollars and checked
+against what is left (paid, less refunded, less open refunds, failed ones included until sent again or
+dismissed) before the server checks again; a refund recorded but not sent clears its form and waits in
+refunds to do;
+anything that moves money asks twice; every action shows its error by its row; nothing changes on the
+page until the server says so.
+
+```tsx
+<PaymentsAdminPage
+  api={api.paymentsAdmin} // the module from step 4, checked against the library's adminApi
+  auth={{ token }} // only for apps with their own session tokens; leave out on Convex auth
+  skipApproval // the same as adminApi({ skipApproval }) on the server
+  refLink={(ref) => (ref.type === 'item' ? <Link to={`/items/${ref.id}`}>The item</Link> : null)}
+/>
+```
+
+Also exported: `parseRefundAmount(text, leftCents)`, `refundableCents(checkout, openRefunds)`,
+`errorMessage(err)`, and the types (`PaymentsAdminApi`, `CompleteReturnRef`, `OpenRefund`,
+`CheckoutSummary`, `PaymentIssue`, `CheckoutReturn`). For a badge, query `api.paymentsAdmin.openCount`.
 
 ## How it works
 
@@ -212,10 +277,12 @@ Then register the webhooks: `npx ed-payments webhooks --stripe https://<deployme
 src/core       pure TypeScript, no Convex: fees, money, types, the processors' wire code, event lists   @earthdance/payments/core
 src/component  the Convex component: tables, queries, mutations; no network, no secrets, no routes, no crons
 src/client     what the app's convex/ code imports: definePayments, fromEnv, validators                 @earthdance/payments
+src/react      the return page hook and the admin page                                                @earthdance/payments/react
 src/cli        npx ed-payments webhooks
 src/test.ts    register / registerPayments for convex-test, fake Stripe and PayPal, fixtures            @earthdance/payments/test
 sandbox/       the real test-mode / sandbox calls (npm run test:sandbox)
 example/convex a complete host app (typechecked in check)
+example/src    its return page and Admin → Payments (typechecked in check)
 AGENTS.md      the rules for apps that use it (shipped in the package)
 ```
 
@@ -255,6 +322,10 @@ Fees and money (`feeRates`, `feeSchedule`, `estimateProcessingFee`, `grossUpForP
 `processingFeeFor`, `compareProcessingFees`, `isLargeTransaction`, `LARGE_TRANSACTION_THRESHOLD_CENTS`,
 `centsToDecimal`, `decimalToCents`, `dollars`), tags, `ProcessorError` (with `declined`, `retryable`),
 the wire code (`stripe.*`, `paypal.*`, signatures, parsers) and `STRIPE_EVENTS` / `PAYPAL_EVENTS`.
+
+### `@earthdance/payments/react`
+
+`useCheckoutReturn`, `PaymentsAdminPage` and helpers; see "The React package" above.
 
 ### `@earthdance/payments/test`
 

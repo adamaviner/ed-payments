@@ -3,7 +3,7 @@
   "description": "Payments for Earthdance's Convex apps: Stripe and PayPal checkouts, webhooks, a refund ledger and a nightly comparison with the processors.",
   "repository": "github:adamaviner/ed-payments",
   "homepage": "https://github.com/adamaviner/ed-payments#readme",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "license": "Apache-2.0",
   "private": true,
   "keywords": [
@@ -14,7 +14,7 @@
   "scripts": {
     "build": "rm -rf dist *.tsbuildinfo && tsc --project ./tsconfig.build.json",
     "build:codegen": "convex codegen --component-dir ./src/component && npm run build",
-    "typecheck": "tsc --noEmit -p tsconfig.test.json && tsc -p example/convex",
+    "typecheck": "tsc --noEmit -p tsconfig.test.json && tsc -p example/convex && tsc -p example/src",
     "lint": "oxlint --type-aware",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
@@ -39,6 +39,10 @@
       "types": "./dist/core/index.d.ts",
       "default": "./dist/core/index.js"
     },
+    "./react": {
+      "types": "./dist/react/index.d.ts",
+      "default": "./dist/react/index.js"
+    },
     "./test": "./src/test.ts",
     "./_generated/component.js": {
       "types": "./dist/component/_generated/component.d.ts"
@@ -56,16 +60,29 @@
     }
   },
   "peerDependencies": {
-    "convex": "^1.46.0"
+    "convex": "^1.46.0",
+    "react": "^19.0.0"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@edge-runtime/vm": "^5.0.0",
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/react": "^16.3.3",
     "@types/node": "^24.0.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
     "convex": "^1.50.0",
     "convex-test": "^0.0.71",
+    "happy-dom": "^21.0.4",
     "oxlint": "^1.81.0",
     "oxlint-tsgolint": "^7.0.2007",
     "prettier": "3.9.10",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
     "typescript": "~6.0.2",
     "vite": "^8.0.0",
     "vitest": "^4.1.11"
