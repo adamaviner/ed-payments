@@ -208,6 +208,9 @@ const REFUND_STUCK_MS = 10 * 60_000
 
 const FINAL: ReadonlySet<CheckoutStatus> = new Set(['paid', 'refund_needed', 'failed', 'abandoned'])
 
+/** A PayPal checkout's lastError once PayPal declined what the buyer chose: only the buyer captures it after that (capturePaypal). */
+export const PAYPAL_DECLINED = 'PayPal declined the card or account the buyer chose; waiting for them to choose another.'
+
 /**
  * Step one: the app's tag, keys and context type. Returns { withCallbacks } for step two.
  */
@@ -483,13 +486,19 @@ export class Payments<C extends GenericValidator = GenericValidator> {
    *
    * 'declined': PayPal refused the card or account the buyer chose (INSTRUMENT_DECLINED). The order
    * stays open, so on the app's page PayPal's buttons let the buyer choose another way to pay and
-   * approve again. Each attempt has its own request id: PayPal answers a repeated id with its first
-   * answer, which would repeat the decline; an order can't be captured twice whatever the id.
+   * approve again; the decline is noted on the checkout. From then on only the buyer captures it
+   * (`by: 'buyer'`: completeReturn, which the buttons and the return page call): the webhook and the
+   * sweep leave it alone, and the sweep abandons it when it expires. Otherwise a card that went
+   * through later (funds arrived, a fraud check cleared) would be charged after the buyer gave up or
+   * paid another way. The buyer's captures each have their own request id (PayPal answers a repeated
+   * id with its first answer, which would repeat the decline); the background's keep one per
+   * checkout. An order can't be captured twice whatever the id.
    */
-  async capturePaypal(ctx: RunActionCtx, checkoutId: string, orderId: string): Promise<'declined' | undefined> {
+  async capturePaypal(ctx: RunActionCtx, checkoutId: string, orderId: string, by: 'buyer' | 'background'): Promise<'declined' | undefined> {
     const c = await ctx.runQuery(this.component.checkouts.get, { id: checkoutId })
     if (c?.status !== 'pending' && c?.status !== 'created') return undefined
-    const requestId = `capture-${checkoutId}-${Date.now().toString(36)}`
+    if (by === 'background' && c.lastError === PAYPAL_DECLINED) return 'declined'
+    const requestId = by === 'buyer' ? `capture-${checkoutId}-${Date.now().toString(36)}` : `capture-${checkoutId}`
     const order = await this.withPaypal(ctx, async (call) => {
       try {
         return await paypal.captureOrder(call, orderId, requestId)
@@ -500,7 +509,10 @@ export class Payments<C extends GenericValidator = GenericValidator> {
         throw err
       }
     })
-    if (order === 'declined') return order
+    if (order === 'declined') {
+      await ctx.runMutation(this.component.checkouts.noteError, { id: checkoutId, error: PAYPAL_DECLINED })
+      return order
+    }
     if (order) await this.settlePaypalOrder(ctx, checkoutId, order)
     return undefined
   }
@@ -525,7 +537,7 @@ export class Payments<C extends GenericValidator = GenericValidator> {
       if (found.kind !== 'hosted') await completeIntentReturn(this, ctx, found)
       else if (processor === 'paypal') {
         const order = await this.withPaypal(ctx, (call) => paypal.getOrder(call, token))
-        if (order.status === 'APPROVED') declined = (await this.capturePaypal(ctx, found.id, token)) === 'declined'
+        if (order.status === 'APPROVED') declined = (await this.capturePaypal(ctx, found.id, token, 'buyer')) === 'declined'
         else if (order.status === 'COMPLETED') await this.settlePaypalOrder(ctx, found.id, order)
       } else {
         await this.settleStripeSession(ctx, found.id, await stripe.retrieveSession(this.stripeKeys(), token, { fetch: this.fetch }))
@@ -815,9 +827,19 @@ export class Payments<C extends GenericValidator = GenericValidator> {
         }
       })
       if (order?.status === 'APPROVED') {
-        // Declined and past its time: the buyer left without choosing another way to pay.
-        const declined = (await this.capturePaypal(ctx, c.id, c.processorCheckoutId)) === 'declined'
-        return declined && expired ? await abandon() : null
+        let outcome: 'declined' | 'failed' | undefined
+        try {
+          outcome = await this.capturePaypal(ctx, c.id, id, 'background')
+        } catch (err) {
+          // Before its time, the next sweep tries again; past it, look once more and give up rather than retry for ever.
+          if (!expired) throw err
+          console.warn(`payments: capturing expired PayPal order ${id} failed: ${errorText(err)}`)
+          outcome = 'failed'
+        }
+        if (!expired || !outcome) return null
+        // Declined (the buyer left without choosing another way to pay) or not capturable, and past its time.
+        const now = await this.withPaypal(ctx, (call) => paypal.getOrder(call, id))
+        return now.status === 'COMPLETED' ? await this.settlePaypalOrder(ctx, c.id, now) : await abandon()
       }
       if (order?.status === 'COMPLETED') return await this.settlePaypalOrder(ctx, c.id, order)
       return expired || order?.status === 'VOIDED' ? await abandon() : null

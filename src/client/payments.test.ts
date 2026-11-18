@@ -460,7 +460,6 @@ describe('embedded checkouts (shown on the app’s own page)', () => {
     const approved = pp.approve(orderId)
     pp.declineNextCapture()
     expect(await t.action(api.shop.back, { processor: 'paypal', token: orderId })).toEqual({ checkoutId: started.checkoutId, status: 'pending', declined: true })
-    pp.declineNextCapture()
     expect(await post('/paypal/webhook', approved)).toEqual({ status: 200, text: 'handled' })
     expect((await status(started.checkoutId)).status).toBe('pending')
     expect(await calls('onFailed')).toHaveLength(0)
@@ -480,9 +479,46 @@ describe('embedded checkouts (shown on the app’s own page)', () => {
     await t.action(internal.paymentsWorker.sweep, {})
     expect((await status(started.checkoutId)).status).toBe('pending')
     later(30 * MIN)
-    pp.declineNextCapture()
     await t.action(internal.paymentsWorker.sweep, {})
     expect((await status(started.checkoutId)).status).toBe('abandoned')
+  })
+
+  test('PayPal: after a decline nothing but the buyer captures, so a card that would go through later is never charged behind their back', async () => {
+    const { t, post, status, calls, later } = setup()
+    const started = await t.action(api.shop.buyEmbedded, { processor: 'paypal', method: 'card', expiresAt: Date.now() + 60 * MIN })
+    if (started.embedded.processor !== 'paypal') throw new Error('expected PayPal')
+    const { orderId } = started.embedded
+    const approved = pp.approve(orderId)
+    pp.declineNextCapture()
+    expect(await t.action(api.shop.back, { processor: 'paypal', token: orderId })).toMatchObject({ declined: true })
+    // The buyer gives up (Edit, another way to pay). The card would now go through, but neither the webhook nor the sweep captures it.
+    const captures = () => pp.calls.filter((x) => x.path.endsWith('/capture')).length
+    const before = captures()
+    expect(await post('/paypal/webhook', approved)).toEqual({ status: 200, text: 'handled' })
+    later(10 * MIN)
+    await t.action(internal.paymentsWorker.sweep, {})
+    expect(captures()).toBe(before)
+    expect((await status(started.checkoutId)).status).toBe('pending')
+    later(60 * MIN)
+    await t.action(internal.paymentsWorker.sweep, {})
+    expect((await status(started.checkoutId)).status).toBe('abandoned')
+    expect(captures()).toBe(before)
+    expect(await calls('onPaid')).toHaveLength(0)
+  })
+
+  test('sweep: an expired approved order whose capture keeps failing (not a decline) is abandoned, not retried for ever', async () => {
+    const { t, status, later, paypalCheckout } = setup()
+    const { checkoutId, orderId } = await paypalCheckout()
+    pp.approve(orderId)
+    pp.refuse((call) =>
+      call.path.endsWith('/capture') ? Response.json({ name: 'UNPROCESSABLE_ENTITY', details: [{ issue: 'MAX_NUMBER_OF_PAYMENT_ATTEMPTS_EXCEEDED' }] }, { status: 422 }) : undefined,
+    )
+    later(10 * MIN)
+    await t.action(internal.paymentsWorker.sweep, {})
+    expect((await status(checkoutId)).status).toBe('pending')
+    later(3 * 60 * MIN)
+    await t.action(internal.paymentsWorker.sweep, {})
+    expect((await status(checkoutId)).status).toBe('abandoned')
   })
 })
 
