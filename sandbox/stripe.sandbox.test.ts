@@ -52,6 +52,29 @@ describe('Checkout Sessions', () => {
       expect(sessionState(await stripe.expireSession(keys, s.id, o))).toBe('expired')
     }
   })
+
+  test('an embedded session has a client secret and no page of its own', async () => {
+    const s = await stripe.createSession(
+      keys,
+      {
+        app: 'sandbox',
+        checkoutId: `sb-${run}-embedded`,
+        description: 'Sandbox',
+        amountCents: 2500,
+        method: 'ach',
+        successUrl: 'https://example.org/ok?session_id={CHECKOUT_SESSION_ID}',
+        cancelUrl: 'https://example.org/no',
+        expiresAt: now + 3600_000,
+        now,
+        embedded: true,
+      },
+      o,
+    )
+    expect(s.url).toBeNull()
+    expect(s.client_secret).toMatch(/^cs_test_/)
+    expect(sessionState(s)).toBe('open')
+    expect(sessionState(await stripe.expireSession(keys, s.id, o))).toBe('expired')
+  })
 })
 
 describe('saved methods and PaymentIntents', () => {

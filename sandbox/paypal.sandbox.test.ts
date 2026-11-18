@@ -27,6 +27,22 @@ describe('orders', () => {
     expect((await paypal.getOrder(c, order.id)).purchase_units?.[0]?.custom_id).toBe(`sandbox:${run}`)
     await expect(paypal.captureOrder(c, order.id, `sb-cap-${run}`)).rejects.toMatchObject({ status: 422, code: 'ORDER_NOT_APPROVED' })
   })
+
+  test('an order for the buttons (no payment_source) is made and waits for the buyer', async () => {
+    const c = await call()
+    const input = {
+      customId: `sandbox:${run}-b`,
+      description: 'Sandbox',
+      amountCents: 2500,
+      returnUrl: 'https://example.org/ok',
+      cancelUrl: 'https://example.org/no',
+      brandName: 'Sandbox',
+      embedded: true,
+    }
+    const order = await paypal.createOrder(c, input, `sb-${run}-b`)
+    expect(order.status).toBe('CREATED')
+    expect((await paypal.getOrder(c, order.id)).purchase_units?.[0]?.custom_id).toBe(`sandbox:${run}-b`)
+  })
 })
 
 test('the signature check asks PayPal and gets FAILURE for a made-up signature', async () => {

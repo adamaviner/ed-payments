@@ -425,6 +425,67 @@ describe('PayPal checkouts', () => {
   })
 })
 
+describe('embedded checkouts (shown on the app’s own page)', () => {
+  test('Stripe: an embedded_page session with a return_url; the browser gets its client secret, and it settles like any other', async () => {
+    const { t, post, status, calls } = setup()
+    const started = await t.action(api.shop.buyEmbedded, { processor: 'stripe', method: 'card' })
+    const c = await status(started.checkoutId)
+    expect(started.embedded).toEqual({ processor: 'stripe', clientSecret: `${c.processorCheckoutId}_secret_fake` })
+    expect(started).not.toHaveProperty('redirectUrl')
+    const params = Object.fromEntries(stripe.calls.find((x) => x.path === '/v1/checkout/sessions')!.params)
+    expect(params).toMatchObject({ ui_mode: 'embedded_page', return_url: 'https://app.example.org/checkout/o1/return?session_id={CHECKOUT_SESSION_ID}', client_reference_id: started.checkoutId })
+    expect(params).not.toHaveProperty('success_url')
+    expect(params).not.toHaveProperty('cancel_url')
+    const hook = await stripe.pay(c.processorCheckoutId!)
+    expect(await t.action(api.shop.back, { processor: 'stripe', token: c.processorCheckoutId! })).toEqual({ checkoutId: started.checkoutId, status: 'paid' })
+    expect(await post('/stripe/webhook', hook)).toEqual({ status: 200, text: 'handled' })
+    expect(await calls('onPaid')).toHaveLength(1)
+  })
+
+  test('PayPal: an order with no payment_source; the buttons get its id, the client id and where to go once paid', async () => {
+    const { t, status } = setup()
+    const started = await t.action(api.shop.buyEmbedded, { processor: 'paypal', method: 'card' })
+    const created = pp.calls.find((x) => x.path === '/v2/checkout/orders')!.body as Record<string, unknown>
+    expect(created).not.toHaveProperty('payment_source')
+    expect(created).toMatchObject({ purchase_units: [{ custom_id: `test:${started.checkoutId}` }], application_context: { shipping_preference: 'NO_SHIPPING', brand_name: 'Test shop' } })
+    const orderId = (await status(started.checkoutId)).processorCheckoutId!
+    expect(started.embedded).toEqual({ processor: 'paypal', orderId, clientId: expect.any(String), returnUrl: `https://app.example.org/checkout/o1/return?token=${orderId}` })
+  })
+
+  test('PayPal: the buttons’ approval captures through completeReturn; a declined card leaves it open for another try, the webhook answering 200', async () => {
+    const { t, post, status, calls } = setup()
+    const started = await t.action(api.shop.buyEmbedded, { processor: 'paypal', method: 'card' })
+    if (started.embedded.processor !== 'paypal') throw new Error('expected PayPal')
+    const { orderId } = started.embedded
+    const approved = pp.approve(orderId)
+    pp.declineNextCapture()
+    expect(await t.action(api.shop.back, { processor: 'paypal', token: orderId })).toEqual({ checkoutId: started.checkoutId, status: 'pending', declined: true })
+    pp.declineNextCapture()
+    expect(await post('/paypal/webhook', approved)).toEqual({ status: 200, text: 'handled' })
+    expect((await status(started.checkoutId)).status).toBe('pending')
+    expect(await calls('onFailed')).toHaveLength(0)
+    // The buyer chooses another card on the buttons and approves again.
+    pp.approve(orderId)
+    expect(await t.action(api.shop.back, { processor: 'paypal', token: orderId })).toEqual({ checkoutId: started.checkoutId, status: 'paid' })
+    expect(await calls('onPaid')).toHaveLength(1)
+  })
+
+  test('PayPal: an approved order declined and left past its time is abandoned by sweep', async () => {
+    const { t, status, later } = setup()
+    const started = await t.action(api.shop.buyEmbedded, { processor: 'paypal', method: 'card', expiresAt: Date.now() + 30 * MIN })
+    if (started.embedded.processor !== 'paypal') throw new Error('expected PayPal')
+    pp.approve(started.embedded.orderId)
+    later(10 * MIN)
+    pp.declineNextCapture()
+    await t.action(internal.paymentsWorker.sweep, {})
+    expect((await status(started.checkoutId)).status).toBe('pending')
+    later(30 * MIN)
+    pp.declineNextCapture()
+    await t.action(internal.paymentsWorker.sweep, {})
+    expect((await status(started.checkoutId)).status).toBe('abandoned')
+  })
+})
+
 describe('sweep', () => {
   test('an expired open Stripe session is expired at Stripe and abandoned; an expired unapproved PayPal order is abandoned', async () => {
     const { t, status, later, stripeCheckout, paypalCheckout } = setup()

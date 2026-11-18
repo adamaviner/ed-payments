@@ -3,7 +3,7 @@
 import { createFunctionHandle, cronJobs, defineSchema, defineTable, httpRouter } from 'convex/server'
 import { v } from 'convex/values'
 import { defineTestApp } from 'convex-test'
-import { definePayments, paidReturns, type PaymentsWiring } from '../client/index.js'
+import { definePayments, paidReturns, type PaymentsWiring, type StartedEmbedded } from '../client/index.js'
 import { PAYPAL_SANDBOX_API } from '../core/paypal.js'
 import paymentsTest from '../test.js'
 import { FAKE_STRIPE_WEBHOOK_SECRET } from './fakeStripe.js'
@@ -170,11 +170,30 @@ export const defined = app.defineModules({
           context: a.context ?? {},
         }),
     }),
+    /** The same, shown on the host's own page (PaypalButtons / StripeEmbeddedCheckout). */
+    buyEmbedded: app.action({
+      args: startArgs,
+      handler: async (ctx, a): Promise<StartedEmbedded> =>
+        await payments.start(ctx, {
+          ref: { type: 'offering', id: 'o1' },
+          purpose: 'order',
+          description: 'A bowl',
+          amountCents: a.amountCents ?? 2500,
+          processor: a.processor,
+          method: a.method,
+          payer: { name: 'Ana', email: a.email ?? 'ana@example.org' },
+          returnPath: '/checkout/o1/return',
+          cancelPath: '/checkout/o1',
+          expiresAt: a.expiresAt,
+          context: a.context ?? {},
+          ui: 'embedded',
+        }),
+    }),
     back: app.action({
       args: { processor: v.union(v.literal('stripe'), v.literal('paypal')), token: v.string() },
-      handler: async (ctx, a): Promise<{ checkoutId: string; status: string } | null> => {
+      handler: async (ctx, a): Promise<{ checkoutId: string; status: string; declined?: true } | null> => {
         const res = await payments.completeReturn(ctx, a)
-        return res && { checkoutId: res.checkoutId, status: res.status }
+        return res && { checkoutId: res.checkoutId, status: res.status, ...(res.declined ? { declined: res.declined } : {}) }
       },
     }),
     status: app.query({ args: { id: v.string() }, handler: async (ctx, { id }) => await payments.status(ctx, id) }),
