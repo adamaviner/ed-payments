@@ -34,7 +34,7 @@ export interface PaymentsAdminPageProps {
 
 /** A question the app asks before a refund, e.g. whether to put the item back on sale. */
 export interface RefundQuestion {
-  /** The hostData key the answer is kept under, e.g. 'relist'. */
+  /** The hostData key the answer is kept under, e.g. 'relist': non-empty printable ASCII, not starting with `$`. */
   key: string
   /** The question, naming what it is about. */
   label: ReactNode
@@ -280,6 +280,7 @@ function CheckoutRow({ shared, checkout, refunds }: { shared: Shared; checkout: 
   const questionName = useId()
   const reasonId = useId()
   const amountErrorId = useId()
+  const questionHintId = useId()
   // Until the open refunds load, what they hold is unknown, so nothing can be refunded yet.
   const left = refunds ? refundableCents(checkout, refunds) : 0
   const parsed = parseRefundAmount(amount, left)
@@ -288,6 +289,7 @@ function CheckoutRow({ shared, checkout, refunds }: { shared: Shared; checkout: 
   // An answer only counts for the question it was given to: changing the amount can change the question.
   const answered = question && answer?.key === question.key && question.options.some((o) => o.value === answer.value) ? answer.value : null
   const hostData = question && answered !== null ? { [question.key]: answered } : undefined
+  const answerLabel = question?.options.find((o) => o.value === answered)?.label
 
   // Two steps, and the form clears as soon as the refund is recorded: if sending then fails, the refund
   // is already in Refunds to do, and a form still filled in would invite a second refund of the same money.
@@ -332,29 +334,33 @@ function CheckoutRow({ shared, checkout, refunds }: { shared: Shared; checkout: 
         <Field label="Reason" htmlFor={reasonId} className="min-w-48 flex-1">
           <Input id={reasonId} value={reason} disabled={busy || left < 1} placeholder="Refunded by an admin" onChange={(e) => setReason(e.target.value)} />
         </Field>
+        {question && (
+          // Before the button, so the button an answer unlocks is the next thing to tab to.
+          <fieldset className="flex basis-full flex-wrap items-center gap-x-4 gap-y-1" disabled={busy}>
+            <legend className="mb-1 basis-full">{question.label}</legend>
+            {question.options.map((o) => (
+              <label key={o.value} className="flex items-center gap-1.5">
+                <input type="radio" name={questionName} value={o.value} checked={answered === o.value} onChange={() => setAnswer({ key: question.key, value: o.value })} />
+                {o.label}
+              </label>
+            ))}
+          </fieldset>
+        )}
         {parsed.ok && (!question || answered !== null) ? (
           <ConfirmButton
             disabled={busy}
-            confirmLabel={skipApproval ? `Send ${dollars(parsed.cents)} back via ${processor}?` : `Ask to refund ${dollars(parsed.cents)}?`}
+            confirmLabel={`${skipApproval ? `Send ${dollars(parsed.cents)} back via ${processor}?` : `Ask to refund ${dollars(parsed.cents)}?`}${answerLabel ? ` (${answerLabel})` : ''}`}
             onConfirm={() => refund(parsed.cents)}
           >
             Refund {dollars(parsed.cents)}
           </ConfirmButton>
         ) : (
-          <Button disabled>{parsed.ok ? `Refund ${dollars(parsed.cents)}` : 'Refund'}</Button>
+          <Button disabled aria-describedby={question ? questionHintId : undefined}>
+            {parsed.ok ? `Refund ${dollars(parsed.cents)}` : 'Refund'}
+          </Button>
         )}
       </div>
-      {question && (
-        <fieldset className="flex flex-wrap items-center gap-x-4 gap-y-1" disabled={busy}>
-          <legend className="mb-1 basis-full">{question.label}</legend>
-          {question.options.map((o) => (
-            <label key={o.value} className="flex items-center gap-1.5">
-              <input type="radio" name={questionName} value={o.value} checked={answered === o.value} onChange={() => setAnswer({ key: question.key, value: o.value })} />
-              {o.label}
-            </label>
-          ))}
-        </fieldset>
-      )}
+      {question && answered === null && <Hint id={questionHintId}>Answer the question above to refund.</Hint>}
       {/* Only once something is typed: an untouched row with nothing left says so in its "left" column. Not an
           alert, which a screen reader would read out on every keystroke; the input points at it instead. */}
       <p id={amountErrorId} className="text-sm text-destructive empty:hidden">

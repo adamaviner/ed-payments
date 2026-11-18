@@ -42,7 +42,11 @@ export function callbackArgs<C extends GenericValidator>(context: C) {
      * accepted bounced.
      */
     failed: { ...b, reason: v.string(), declined: v.boolean(), wasProcessing: v.boolean() },
-    /** refunded: a refund went back to the buyer (sent, done by hand, or made at the processor). */
+    /**
+     * refunded: a refund went back to the buyer (sent, done by hand, or made at the processor). May come
+     * twice for one refundId (a refund the processor failed after sending, then sent again): act on it
+     * idempotently.
+     */
     refunded: {
       ...b,
       refundId: v.string(),

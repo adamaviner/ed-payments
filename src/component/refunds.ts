@@ -6,7 +6,7 @@ import { ConvexError, v } from 'convex/values'
 import type { Doc, Id } from './_generated/dataModel.js'
 import { mutation, query, type MutationCtx } from './_generated/server.js'
 import { COMMITTED_REFUND, notifyHost, openIssue, refundViewOf, refundView, refundsOf } from './lib.js'
-import { hostData, processor } from './schema.js'
+import { hostData as hostDataValidator, processor } from './schema.js'
 
 const dollarsOf = (cents: number) => `$${(cents / 100).toFixed(2)}`
 
@@ -57,7 +57,7 @@ function checkHostData(data: Record<string, string> | undefined) {
 
 /** Asks for a refund of a paid checkout; the whole remaining amount unless given. `hostData` is kept on it and passed to on.refunded. */
 export const request = mutation({
-  args: { checkoutId: v.string(), amountCents: v.optional(v.number()), reason: v.string(), by: v.optional(v.string()), hostData: v.optional(hostData), now: v.number() },
+  args: { checkoutId: v.string(), amountCents: v.optional(v.number()), reason: v.string(), by: v.optional(v.string()), hostData: v.optional(hostDataValidator), now: v.number() },
   returns: v.string(),
   handler: async (ctx, { checkoutId, amountCents, reason, by, hostData, now }) => {
     checkHostData(hostData)
@@ -240,7 +240,10 @@ export const recordExternal = mutation({
     const match =
       rows.find((r) => r.processorRefundId === a.processorRefundId) ??
       rows.find((r) => r._id === tagged) ??
-      rows.find((r) => r.status === 'manual' && !r.processorRefundId && r.amountCents === a.amountCents)
+      rows.find((r) => r.status === 'manual' && !r.processorRefundId && r.amountCents === a.amountCents) ??
+      // A request carrying the app's notes, made in the dashboard instead of sent from here: it is that
+      // refund, so the notes reach on.refunded (an external row would be counted without them).
+      (a.state === 'failed' ? undefined : rows.find((r) => r.hostData && (r.status === 'requested' || r.status === 'approved') && !r.processorRefundId && r.amountCents === a.amountCents))
     if (!match) {
       if (a.state === 'failed') return 'unchanged'
       const done = a.state === 'done'

@@ -241,7 +241,10 @@ Also exported: `parseRefundAmount(text, leftCents)`, `refundableCents(checkout, 
   progress. Keyed by the refund id, so a double click or a retry refunds once. Refunds made in a
   dashboard arrive by webhook (or the nightly comparison) as `external`. A refund can carry the app's
   `hostData` (`requestRefund({ ..., hostData })`, a few short strings, e.g. an admin's answer), which
-  `on.refunded` receives when it is done; refunds the library or a dashboard made have none.
+  `on.refunded` receives when it is done (also when that request was refunded in a dashboard instead: an
+  untagged refund of the same amount closes it); refunds the library or a dashboard made on their own
+  have none. `on.refunded` can come twice for one refund (failed at the processor after sending, then
+  sent again), so act on it idempotently.
 - **Sweep** (every 10 minutes): PayPal approvals whose webhook never came are captured; expired
   checkouts are settled if paid after all, else ended at the processor and abandoned; quiet off-session
   charges are tried again; refunds left sending are checked.

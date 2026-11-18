@@ -221,6 +221,24 @@ describe('refunds', () => {
     await expect(mutate(pay.refunds.request, { checkoutId: id, reason: 'x', hostData: { k: 'v'.repeat(201) }, now: NOW })).rejects.toThrow(/at most 200 characters/)
   })
 
+  test('the notes reach onRefunded however the refund ends: a tagged webhook, or the same amount refunded in the dashboard', async () => {
+    const { mutate, paid, calls } = setup()
+    const tagged = await paid()
+    const r = await mutate(pay.refunds.request, { checkoutId: tagged, reason: 'x', hostData: { relist: 'yes' }, now: NOW })
+    await mutate(pay.refunds.begin, { refundId: r, skipApproval: true, now: NOW })
+    await mutate(pay.refunds.finish, { refundId: r, ok: true, done: false, processorRefundId: 're_p', now: NOW })
+    expect(await mutate(pay.refunds.recordExternal, { processor: 'stripe', paymentRef: `pi_${tagged}`, processorRefundId: 're_p', refundId: r, amountCents: 2500, state: 'done', now: NOW })).toBe(
+      'updated',
+    )
+    const dash = await paid()
+    const d = await mutate(pay.refunds.request, { checkoutId: dash, reason: 'x', hostData: { relist: 'no' }, now: NOW })
+    expect(await mutate(pay.refunds.recordExternal, { processor: 'stripe', paymentRef: `pi_${dash}`, processorRefundId: 're_dash', amountCents: 2500, state: 'done', now: NOW })).toBe('updated')
+    expect((await calls('onRefunded')).map((c) => c.args)).toMatchObject([
+      { refundId: r, hostData: { relist: 'yes' } },
+      { refundId: d, origin: 'requested', hostData: { relist: 'no' } },
+    ])
+  })
+
   test('marking a refund done by hand never counts past what was paid', async () => {
     const { mutate, paid, checkout } = setup()
     const id = await paid()
