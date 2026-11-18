@@ -127,6 +127,34 @@ the app's main CSS, or Tailwind 4 skips the package's classes:
 It knows nothing about the app's login (`auth` goes through to `authorize.admin` as it is), router
 or bundler. `example/src` is the reference, typechecked in `npm run check` against the example's api.
 
+**Paying on the app's own page: `PaypalButtons` and `StripeEmbeddedCheckout`.** Start the checkout
+with `ui: 'embedded'` (`start` then returns `{ checkoutId, embedded }` instead of `redirectUrl`) and
+pass `embedded` to the matching component:
+
+```tsx
+const { embedded } = await startHere(args) // the app's action: payments.start(ctx, { ..., ui: 'embedded' })
+embedded.processor === 'paypal' ? (
+  <PaypalButtons payment={embedded} completeReturn={api.payments.completeReturn} onFallback={redirect} />
+) : (
+  <StripeEmbeddedCheckout payment={embedded} publishableKey={STRIPE_PUBLISHABLE_KEY} onFallback={redirect} />
+)
+```
+
+- **PayPal:** its JS SDK (v5 `paypal.Buttons`) for the REST app's client id, which `start` returns
+  (public; it also says sandbox or live). The PayPal button and "Debit or Credit Card"; Venmo and Pay
+  Later are turned off. The order names no `payment_source`, so the button pressed decides. On
+  approval the component calls `completeReturn`, which captures; if PayPal declines the card
+  (`INSTRUMENT_DECLINED`) the buyer is told and the buttons restart on the same order. Then it goes to
+  `returnPath` with PayPal's token, the page a redirect ends on.
+- **Stripe:** a Checkout Session with `ui_mode: 'embedded_page'` (API `2026-10-28.endive` refuses the
+  old `embedded`), shown with `createEmbeddedCheckoutPage` from `https://js.stripe.com/endive/stripe.js`.
+  Pass the app's publishable key. Stripe sends the buyer to `returnPath` (with `session_id`) when paid.
+- **When a script doesn't load** (an ad blocker, a slow connection: 8 seconds), the component offers
+  "Pay on PayPal's/Stripe's site instead", calling `onFallback`. The app starts the same purchase as a
+  redirect and sends the buyer there; the unused embedded checkout is abandoned by the sweep when it
+  expires.
+- Webhooks, refunds, the sweep and the comparison treat these checkouts like any other.
+
 **The return page: `useCheckoutReturn(completeReturn, { processor, token })`.** The app reads the
 token from its own URL (Stripe adds `session_id`, PayPal adds `token`) and words every state itself.
 The hook asks `completeReturn` once: StrictMode's double effects and two mounts at once share one
@@ -284,6 +312,13 @@ Also exported: `parseRefundAmount(text, leftCents)`, `refundableCents(checkout, 
   capture before approval refused (422 `ORDER_NOT_APPROVED`), `verify-webhook-signature` answering
   `FAILURE` for a made-up signature, Transaction Search refused (403: not enabled on the app), and the
   webhook CLI creating a webhook with exactly `PAYPAL_EVENTS`, leaving it, and removing it.
+- **Embedded checkouts** (2026-11-18): an `embedded_page` session made in test mode (a client secret, no
+  `url`; `embedded` refused with 400) and a buttons order (no `payment_source`, `application_context`)
+  made in the sandbox. Refunds, webhook endpoints and Transaction Search now pass with ed-market's
+  updated test keys, and a hosted Stripe bank payment and a PayPal card payment were each paid,
+  settled by webhook and refunded in part and in full on ed-market's dev deployment. **Not yet checked in
+  a browser:** PayPal's buttons and Stripe's embedded page themselves (only against fakes of their
+  browser objects in `src/react/embedded.test.tsx`).
 - **Local Convex backend:** the example app pushes and its generated functions run; a deployment with
   `PAYMENTS_MODE=live` and a test Stripe key is refused at push with the reason.
 - **Only against the fakes** (no browser in the loop, or no permission): a completed Stripe Checkout
@@ -315,22 +350,22 @@ AGENTS.md      the rules for apps that use it (shipped in the package)
 `SITE_URL`), `fees`, `limits`, `brandName`, `fetch` (tests). Wiring: `on` (all seven callbacks),
 `authorize.admin`, `worker`.
 
-| Method                                                                                  | From            | Does                                                                                                  |
-| --------------------------------------------------------------------------------------- | --------------- | ----------------------------------------------------------------------------------------------------- |
-| `start(ctx, args)`                                                                      | action          | A hosted checkout; `{ checkoutId, redirectUrl }`. Rate-limited.                                       |
-| `setupPaymentMethod(ctx, { owner, payer })`                                             | action          | `{ clientSecret, stripeCustomerId }` for the Payment Element. Rate-limited.                           |
-| `savedMethods(ctx, { owner })`                                                          | action          | `[{ paymentMethodId, kind, label, declined }]`, newest first.                                         |
-| `verifyMethodOwner(ctx, { owner, paymentMethodId })`                                    | action          | The method, or throws if it isn't the owner's.                                                        |
-| `chargeSaved(ctx, args)`                                                                | mutation/action | Queues an off-session charge; the checkout id. Same `idempotencyKey`, same checkout.                  |
-| `retryOnSession(ctx, { checkoutId })`                                                   | action          | `{ checkoutId, clientSecret }` for the buyer to pay after a decline. Rate-limited.                    |
-| `completeReturn(ctx, { processor, token })`                                             | action          | Settles if the processor says so; `{ checkoutId, ref, purpose, status }` or null.                     |
-| `status` / `get`, `forRef`, `byPaymentRef`, `list`, `refundable`                        | query           | Checkouts (`refundable` is paged and indexed).                                                        |
-| `requestRefund`, `approveRefund`, `markRefundedManually`, `dismissRefund`, `sendRefund` | mutation/action | The ledger; `by` is recorded.                                                                         |
-| `openRefunds`, `refundsFor`, `refund`, `issues`, `openIssueCount`, `resolveIssue`       | query/mutation  | Refunds and issues.                                                                                   |
-| `registerRoutes(http, { onUnhandledStripeEvent })`, `registerCrons(crons)`              | –               | Routes (when keys exist; start-up checks) and crons.                                                  |
-| `worker()`, `adminApi({ skipApproval })`, `publicApi()`                                 | –               | Functions for the app to export (see step 4).                                                         |
-| `sweep`, `reconcile`, `cleanup`, `issuesDigest`                                         | action/mutation | The upkeep the crons run.                                                                             |
-| `args.paid` … `args.issues`, `paidReturns`                                              | –               | Callback validators with the app's context (also `callbackArgs(validator)`, and untyped `paidArgs`…). |
+| Method                                                                                  | From            | Does                                                                                                                 |
+| --------------------------------------------------------------------------------------- | --------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `start(ctx, args)`                                                                      | action          | A hosted checkout; `{ checkoutId, redirectUrl }`, or with `ui: 'embedded'` `{ checkoutId, embedded }`. Rate-limited. |
+| `setupPaymentMethod(ctx, { owner, payer })`                                             | action          | `{ clientSecret, stripeCustomerId }` for the Payment Element. Rate-limited.                                          |
+| `savedMethods(ctx, { owner })`                                                          | action          | `[{ paymentMethodId, kind, label, declined }]`, newest first.                                                        |
+| `verifyMethodOwner(ctx, { owner, paymentMethodId })`                                    | action          | The method, or throws if it isn't the owner's.                                                                       |
+| `chargeSaved(ctx, args)`                                                                | mutation/action | Queues an off-session charge; the checkout id. Same `idempotencyKey`, same checkout.                                 |
+| `retryOnSession(ctx, { checkoutId })`                                                   | action          | `{ checkoutId, clientSecret }` for the buyer to pay after a decline. Rate-limited.                                   |
+| `completeReturn(ctx, { processor, token })`                                             | action          | Settles if the processor says so; `{ checkoutId, ref, purpose, status }` or null.                                    |
+| `status` / `get`, `forRef`, `byPaymentRef`, `list`, `refundable`                        | query           | Checkouts (`refundable` is paged and indexed).                                                                       |
+| `requestRefund`, `approveRefund`, `markRefundedManually`, `dismissRefund`, `sendRefund` | mutation/action | The ledger; `by` is recorded.                                                                                        |
+| `openRefunds`, `refundsFor`, `refund`, `issues`, `openIssueCount`, `resolveIssue`       | query/mutation  | Refunds and issues.                                                                                                  |
+| `registerRoutes(http, { onUnhandledStripeEvent })`, `registerCrons(crons)`              | –               | Routes (when keys exist; start-up checks) and crons.                                                                 |
+| `worker()`, `adminApi({ skipApproval })`, `publicApi()`                                 | –               | Functions for the app to export (see step 4).                                                                        |
+| `sweep`, `reconcile`, `cleanup`, `issuesDigest`                                         | action/mutation | The upkeep the crons run.                                                                                            |
+| `args.paid` … `args.issues`, `paidReturns`                                              | –               | Callback validators with the app's context (also `callbackArgs(validator)`, and untyped `paidArgs`…).                |
 
 `adminApi` functions take an optional `auth` argument, passed to `authorize.admin` as it came (for apps
 with their own session tokens); apps on Convex auth leave it out, as the caller's identity carries
@@ -345,7 +380,8 @@ the wire code (`stripe.*`, `paypal.*`, signatures, parsers) and `STRIPE_EVENTS` 
 
 ### `@earthdance/payments/react`
 
-`useCheckoutReturn`, `PaymentsAdminPage` and helpers; see "The React package" above.
+`PaypalButtons`, `StripeEmbeddedCheckout`, `useCheckoutReturn`, `PaymentsAdminPage` and helpers; see
+"The React package" above.
 
 ### `@earthdance/payments/test`
 

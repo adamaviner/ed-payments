@@ -1,7 +1,7 @@
 // A small shop: an item bought through Stripe Checkout or PayPal, and a bid charged later with a saved
 // card. The app prices on the server, keeps its own records (orders, bids) and is told what happened
 // through the callbacks below, each run inside the transaction that records the payment.
-import { paidReturns, type PaidResult } from '@earthdance/payments'
+import { paidReturns, type PaidResult, type StartedEmbedded } from '@earthdance/payments'
 import { ConvexError, v } from 'convex/values'
 import { internal } from './_generated/api.js'
 import { action, internalMutation, internalQuery, mutation, type MutationCtx } from './_generated/server.js'
@@ -27,6 +27,28 @@ export const buy = action({
     })
     return { redirectUrl }
   },
+})
+
+/**
+ * The same purchase paid on the app's own page (src/EmbeddedCheckout.tsx): PayPal's buttons for a card,
+ * Stripe's embedded Checkout for a bank account. The browser gets what it needs to show them.
+ */
+export const buyHere = action({
+  args: { itemId: v.string(), email: v.string(), card: v.boolean() },
+  handler: async (ctx, { itemId, email, card }): Promise<StartedEmbedded> =>
+    await payments.start(ctx, {
+      ref: { type: 'item', id: itemId },
+      purpose: 'order',
+      description: `Item ${itemId}`,
+      amountCents: PRICE_CENTS,
+      processor: card ? 'paypal' : 'stripe',
+      method: card ? 'card' : 'ach',
+      payer: { email },
+      returnPath: `/items/${itemId}/thanks`,
+      cancelPath: `/items/${itemId}`,
+      context: { itemId },
+      ui: 'embedded',
+    }),
 })
 
 // ── Bids: a card saved now, charged when the auction ends ─────────────────────────────────────
