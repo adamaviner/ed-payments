@@ -241,5 +241,18 @@ export function publicApi<C extends GenericValidator>(p: Payments<C>) {
         return r && { status: r.status, purpose: r.purpose, ref: r.ref, ...(r.declined ? { declined: r.declined } : {}) }
       },
     }),
+    /**
+     * The buyer won't pay the checkout they started on the app's page (they pressed Edit): closed
+     * now, and their start given back to their rate limit (Payments.cancel). `checkoutId` is what
+     * start returned to them. Returns how it stands; null: not this app's.
+     */
+    cancelCheckout: actionGeneric({
+      args: { checkoutId: v.string() },
+      handler: async (ctx, { checkoutId }): Promise<{ status: string } | null> => {
+        if (!checkoutId || checkoutId.length > 64) return null
+        await p.takeLimits(ctx, 'cancel', `checkout:${checkoutId}`, 4)
+        return await p.cancel(ctx, checkoutId)
+      },
+    }),
   }
 }

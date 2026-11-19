@@ -39,4 +39,5 @@ The README has the API and the "Adopt in 5 steps" set-up.
 10. **Paying on your own page:** `start(ctx, { ..., ui: 'embedded' })`, then `<PaypalButtons>` or
     `<StripeEmbeddedCheckout>` with the returned `embedded`; never load PayPal's or Stripe's scripts
     yourself or capture from the browser. Give them an `onFallback` that starts the same purchase as a
-    redirect, so a blocked script never strands the buyer.
+    redirect, so a blocked script never strands the buyer. When the buyer leaves the payment step
+    (Edit, or the fallback), close the started checkout with `publicApi().cancelCheckout`.

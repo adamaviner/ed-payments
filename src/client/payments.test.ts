@@ -469,6 +469,46 @@ describe('embedded checkouts (shown on the app’s own page)', () => {
     expect(await calls('onPaid')).toHaveLength(1)
   })
 
+  test('cancel (Edit): the Stripe session is expired at Stripe, the checkout abandoned, and the buyer’s start given back once', async () => {
+    const { t, status } = setup()
+    const start = () => t.action(api.shop.buyEmbedded, { processor: 'stripe', method: 'card', email: 'eve@example.org' })
+    const first = await start()
+    await start()
+    await start()
+    await expect(start()).rejects.toThrow(/Too many tries/)
+
+    expect(await t.action(api.payments.cancelCheckout, { checkoutId: first.checkoutId })).toEqual({ status: 'abandoned' })
+    const c = await status(first.checkoutId)
+    expect(c.status).toBe('abandoned')
+    expect(stripe.calls.some((x) => x.path === `/v1/checkout/sessions/${c.processorCheckoutId}/expire`)).toBe(true)
+    // Closing it again changes nothing and gives nothing more back.
+    expect(await t.action(api.payments.cancelCheckout, { checkoutId: first.checkoutId })).toEqual({ status: 'abandoned' })
+    await start()
+    await expect(start()).rejects.toThrow(/Too many tries/)
+  })
+
+  test('cancel (Edit): a PayPal order is abandoned, and approving it afterwards captures nothing', async () => {
+    const { t, status, calls } = setup()
+    const started = await t.action(api.shop.buyEmbedded, { processor: 'paypal', method: 'card' })
+    if (started.embedded.processor !== 'paypal') throw new Error('expected PayPal')
+    expect(await t.action(api.payments.cancelCheckout, { checkoutId: started.checkoutId })).toEqual({ status: 'abandoned' })
+    pp.approve(started.embedded.orderId)
+    await t.action(api.shop.back, { processor: 'paypal', token: started.embedded.orderId })
+    expect(pp.calls.filter((x) => x.path.endsWith('/capture'))).toHaveLength(0)
+    expect((await status(started.checkoutId)).status).toBe('abandoned')
+    expect(await calls('onPaid')).toHaveLength(0)
+  })
+
+  test('cancel: a Stripe checkout paid in the meantime is settled as paid, not abandoned; an id that isn’t a checkout is not ours', async () => {
+    const { t, calls } = setup()
+    const started = await t.action(api.shop.buyEmbedded, { processor: 'stripe', method: 'card' })
+    const c = (await t.query(api.shop.status, { id: started.checkoutId }))!
+    await stripe.pay(c.processorCheckoutId!)
+    expect(await t.action(api.payments.cancelCheckout, { checkoutId: started.checkoutId })).toEqual({ status: 'paid' })
+    expect(await calls('onPaid')).toHaveLength(1)
+    expect(await t.action(api.payments.cancelCheckout, { checkoutId: 'nope' })).toBeNull()
+  })
+
   test('PayPal: an approved order declined and left past its time is abandoned by sweep', async () => {
     const { t, status, later } = setup()
     const started = await t.action(api.shop.buyEmbedded, { processor: 'paypal', method: 'card', expiresAt: Date.now() + 30 * MIN })

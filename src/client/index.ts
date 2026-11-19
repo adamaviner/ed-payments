@@ -547,6 +547,42 @@ export class Payments<C extends GenericValidator = GenericValidator> {
     return { checkoutId: found.id, ref: found.ref, purpose: found.purpose, status: now?.status ?? found.status, ...(declined ? { declined: true as const } : {}) }
   }
 
+  /**
+   * Closes a checkout the buyer started and won't pay, e.g. they pressed Edit on the app's page: the
+   * Stripe session is expired at Stripe, a PayPal order is left to lapse (none of its money moves
+   * until the library captures, which it won't for an abandoned checkout), and the checkout is
+   * abandoned now instead of when it expires. The start it counted against the buyer's own rate limit
+   * is given back (pass the `limitKey` start was given, if any). If it was paid meanwhile, it is
+   * settled as paid instead. Returns how it stands; null: not this app's checkout.
+   *
+   * Only for a checkout id the buyer was given by start (the id is the buyer's secret; anyone holding
+   * it can close the unpaid checkout, nothing more). publicApi().cancelCheckout wraps this.
+   */
+  async cancel(ctx: RunActionCtx, checkoutId: string, o: { limitKey?: string } = {}): Promise<{ status: CheckoutStatus } | null> {
+    const c = await ctx.runQuery(this.component.checkouts.get, { id: checkoutId })
+    if (!c || c.app !== this.app || c.kind !== 'hosted') return null
+    if (c.status !== 'created' && c.status !== 'pending') return { status: c.status }
+    if (c.processor === 'stripe' && c.processorCheckoutId) {
+      const keys = this.stripeKeys()
+      try {
+        await stripe.expireSession(keys, c.processorCheckoutId, { fetch: this.fetch })
+      } catch (err) {
+        // Not open any more: paid (or on its way) in the meantime, or already expired.
+        if (!(err instanceof ProcessorError && err.status === 400)) throw err
+        const s = await stripe.retrieveSession(keys, c.processorCheckoutId, { fetch: this.fetch })
+        const state = sessionState(s)
+        if (state === 'paid' || state === 'processing') {
+          await this.settleStripeSession(ctx, c.id, s)
+          return { status: (await ctx.runQuery(this.component.checkouts.get, { id: c.id }))?.status ?? c.status }
+        }
+      }
+    }
+    const limits = await this.limits(ctx, 'start', o.limitKey ?? c.payer.email)
+    const own = limits?.find((l) => !l.key.endsWith(':all'))
+    const r = await ctx.runMutation(this.component.checkouts.cancel, { id: c.id, giveBack: own && { key: own.key, windowMs: own.windowMs }, now: Date.now() })
+    return { status: r.outcome === 'abandoned' ? 'abandoned' : r.status }
+  }
+
   // ── Saved payment methods ─────────────────────────────────────────────────────────────────────
 
   /**

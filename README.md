@@ -47,7 +47,7 @@ export const payments = definePayments(components.payments, {
 })
 
 export const { sweep, reconcile, cleanup, issuesDigest, charge } = payments.worker()
-export const { completeReturn } = payments.publicApi()
+export const { completeReturn, cancelCheckout } = payments.publicApi()
 ```
 
 Two calls, not one: the references in `withCallbacks` name the app's own modules, this one included,
@@ -151,8 +151,14 @@ embedded.processor === 'paypal' ? (
   Pass the app's publishable key. Stripe sends the buyer to `returnPath` (with `session_id`) when paid.
 - **When a script doesn't load** (an ad blocker, a slow connection: 8 seconds), the component offers
   "Pay on PayPal's/Stripe's site instead", calling `onFallback`. The app starts the same purchase as a
-  redirect and sends the buyer there; the unused embedded checkout is abandoned by the sweep when it
-  expires.
+  redirect and sends the buyer there. A script with no answer at all is given up after 30 seconds
+  (shown as not loaded), so it never holds up the next embedded form on the page.
+- **When the buyer goes back to change their choices** (an Edit button), call
+  `cancelCheckout({ checkoutId })` from `publicApi()` (or `payments.cancel(ctx, checkoutId)` from
+  the app's own action) with the id `start` returned. The Stripe session is expired at Stripe, the
+  checkout is abandoned at once (a PayPal order is then never captured), and the start is given back
+  to the buyer's own rate limit, once. A checkout paid in the meantime is settled as paid instead.
+  Call it for the unused embedded checkout after `onFallback` too.
 - Webhooks, refunds, the sweep and the comparison treat these checkouts like any other.
 
 **The return page: `useCheckoutReturn(completeReturn, { processor, token })`.** The app reads the
@@ -356,6 +362,7 @@ AGENTS.md      the rules for apps that use it (shipped in the package)
 | Method                                                                                  | From            | Does                                                                                                                 |
 | --------------------------------------------------------------------------------------- | --------------- | -------------------------------------------------------------------------------------------------------------------- |
 | `start(ctx, args)`                                                                      | action          | A hosted checkout; `{ checkoutId, redirectUrl }`, or with `ui: 'embedded'` `{ checkoutId, embedded }`. Rate-limited. |
+| `cancel(ctx, checkoutId, { limitKey? })`                                                | action          | Closes an unpaid hosted checkout the buyer won't use (Edit); gives their start back. `{ status }`, or null.          |
 | `setupPaymentMethod(ctx, { owner, payer })`                                             | action          | `{ clientSecret, stripeCustomerId }` for the Payment Element. Rate-limited.                                          |
 | `savedMethods(ctx, { owner })`                                                          | action          | `[{ paymentMethodId, kind, label, declined }]`, newest first.                                                        |
 | `verifyMethodOwner(ctx, { owner, paymentMethodId })`                                    | action          | The method, or throws if it isn't the owner's.                                                                       |

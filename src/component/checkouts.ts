@@ -7,7 +7,7 @@ import type { Doc, Id } from './_generated/dataModel.js'
 import { mutation, query, type MutationCtx } from './_generated/server.js'
 import { callHost, callbackBase, checkoutView, notifyHost, openIssue, resolveIssue, view } from './lib.js'
 import { callbacks, checkoutKind, checkoutStatus, method, payer, processor, ref } from './schema.js'
-import { limitsArg, takeAll } from './limits.js'
+import { giveBackOne, limitsArg, takeAll } from './limits.js'
 
 const already = v.object({ outcome: v.literal('already_handled'), status: checkoutStatus })
 const dollarsOf = (cents: number) => `$${(cents / 100).toFixed(2)}`
@@ -242,6 +242,24 @@ export const abandon = mutation({
     const c = await load(ctx, id)
     if (c.status !== 'created' && c.status !== 'pending') return { outcome: 'already_handled' as const, status: c.status }
     await ctx.db.patch(c._id, { status: 'abandoned', settledAt: now })
+    return { outcome: 'abandoned' as const }
+  },
+})
+
+/**
+ * The buyer closed a checkout they started (Edit on the app's page): abandoned now rather than when it
+ * expires, and the start it took from their own rate limit (`giveBack`, the per-payer key) handed
+ * back, so editing and continuing again isn't refused as too many tries. Only a waiting checkout is
+ * closed, and only once, so cancelling can't refill the limit; the overall limit keeps its count.
+ */
+export const cancel = mutation({
+  args: { id: v.string(), giveBack: v.optional(v.object({ key: v.string(), windowMs: v.number() })), now: v.number() },
+  returns: v.union(v.object({ outcome: v.literal('abandoned') }), already),
+  handler: async (ctx, { id, giveBack, now }) => {
+    const c = await load(ctx, id)
+    if (c.status !== 'created' && c.status !== 'pending') return { outcome: 'already_handled' as const, status: c.status }
+    await ctx.db.patch(c._id, { status: 'abandoned', settledAt: now })
+    if (giveBack && c.createdAt > now - giveBack.windowMs) await giveBackOne(ctx, giveBack.key, now, giveBack.windowMs)
     return { outcome: 'abandoned' as const }
   },
 })
