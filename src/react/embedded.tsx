@@ -17,6 +17,11 @@ type StripePayment = Extract<EmbeddedPayment, { processor: 'stripe' }>
 export const STRIPE_JS = 'https://js.stripe.com/endive/stripe.js'
 /** How long a processor's script may take before the buyer is offered the redirect. */
 const SLOW_MS = 8000
+/**
+ * How long a script or Stripe's embedded Checkout may take before it is given up as failed, so one
+ * that never answers can't hold up the next (a reload isn't needed to try again).
+ */
+export const GIVE_UP_MS = 30_000
 
 /** PayPal's JS SDK for one REST app: buttons only, card and PayPal, no Venmo or Pay Later. */
 export function paypalSdkUrl(clientId: string): string {
@@ -32,22 +37,28 @@ export function forgetScripts() {
 }
 
 /**
- * Loads a script once per address (every mount shares it); resolves once it has run. A failed load is
- * forgotten, so a later mount tries again.
+ * Loads a script once per address (every mount shares it); resolves once it has run. A failed load,
+ * or one with no answer after GIVE_UP_MS, is forgotten, so a later mount tries again.
  */
 export function loadScript(src: string): Promise<void> {
   const known = loading.get(src)
   if (known) return known
   const p = new Promise<void>((resolve, reject) => {
     const el = document.createElement('script')
-    el.src = src
-    el.async = true
-    el.addEventListener('load', () => resolve())
-    el.addEventListener('error', () => {
-      loading.delete(src)
+    const fail = () => {
+      clearTimeout(timer)
+      if (loading.get(src) === p) loading.delete(src)
       el.remove()
       reject(new Error(`Couldn’t load ${new URL(src).host}.`))
+    }
+    const timer = setTimeout(fail, GIVE_UP_MS)
+    el.src = src
+    el.async = true
+    el.addEventListener('load', () => {
+      clearTimeout(timer)
+      resolve()
     })
+    el.addEventListener('error', fail)
     document.head.appendChild(el)
   })
   loading.set(src, p)
@@ -225,13 +236,33 @@ export function StripeEmbeddedCheckout({ payment, publishableKey, onFallback, cl
     let live = true
     // Stripe allows one embedded Checkout per page and refuses a second while one exists, so each
     // waits for the one before it to be made and destroys it first (StrictMode mounts twice at once).
-    const made = lastStripePage.then(async (before) => {
+    const making = lastStripePage.then(async (before) => {
       destroyPage(before)
       await loadScript(STRIPE_JS)
       const make = globals().Stripe
       if (!make) throw new Error('Stripe.js loaded without Stripe.')
       if (!live) return null
       return await make(publishableKey).createEmbeddedCheckoutPage({ fetchClientSecret: () => Promise.resolve(clientSecret) })
+    })
+    // Given up after GIVE_UP_MS, so a Stripe.js that never answers doesn't hold up the next one; a
+    // page that turns up after that is destroyed at once, leaving the page free for another.
+    const made = new Promise<StripeEmbeddedPage | null>((resolve, reject) => {
+      let gaveUp = false
+      const timer = setTimeout(() => {
+        gaveUp = true
+        reject(new Error(`Stripe’s embedded Checkout didn’t answer in ${GIVE_UP_MS / 1000} seconds.`))
+      }, GIVE_UP_MS)
+      making.then(
+        (page) => {
+          clearTimeout(timer)
+          if (gaveUp) destroyPage(page)
+          else resolve(page)
+        },
+        (err: unknown) => {
+          clearTimeout(timer)
+          reject(err)
+        },
+      )
     })
     lastStripePage = made.catch(() => null)
     made.then(

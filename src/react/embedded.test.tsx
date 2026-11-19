@@ -2,7 +2,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { StrictMode } from 'react'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
-import { forgetScripts, paypalSdkUrl, PaypalButtons, STRIPE_JS, StripeEmbeddedCheckout } from './embedded.js'
+import { forgetScripts, GIVE_UP_MS, paypalSdkUrl, PaypalButtons, STRIPE_JS, StripeEmbeddedCheckout } from './embedded.js'
 import type { CompleteReturnRef } from './types.js'
 
 type Answer = { status: string; purpose: string; ref: { type: string; id: string }; declined?: true } | null
@@ -153,6 +153,48 @@ test('Stripe: Stripe.js for the library’s API version mounts one embedded Chec
   expect(stripeMounts.find((m) => !m.destroyed)).toMatchObject({ key: 'pk_test_1', secret: 'cs_test_1_secret', mounted: true })
   expect(screen.queryByRole('button', { name: /instead/ })).toBeNull()
   expect(STRIPE_JS).toBe('https://js.stripe.com/endive/stripe.js')
+})
+
+test('Stripe: an embedded Checkout that never answers is given up, with the redirect offered, and the next one still loads', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  const w = window as Win
+  const working = w.Stripe
+  let lateAnswer: (page: { mount: () => void; destroy: () => void }) => void = () => {}
+  const late = { destroyed: false }
+  w.Stripe = () => ({ createEmbeddedCheckoutPage: () => new Promise((resolve) => (lateAnswer = resolve)) })
+  const first = render(<StripeEmbeddedCheckout payment={{ processor: 'stripe', clientSecret: 'cs_test_3_secret' }} publishableKey="pk_test_1" onFallback={() => {}} />)
+  await act(async () => {})
+  act(() => {
+    scripts.find((s) => s.src === STRIPE_JS)?.dispatchEvent(new Event('load'))
+  })
+  await act(async () => {
+    vi.advanceTimersByTime(GIVE_UP_MS)
+  })
+  expect(screen.getByText('The payment form didn’t load.')).toBeTruthy()
+  // Stripe answering after all: that page is destroyed, not left in the way.
+  lateAnswer({ mount: () => {}, destroy: () => void (late.destroyed = true) })
+  await act(async () => {})
+  expect(late.destroyed).toBe(true)
+  first.unmount()
+
+  vi.useRealTimers()
+  w.Stripe = working
+  render(<StripeEmbeddedCheckout payment={{ processor: 'stripe', clientSecret: 'cs_test_4_secret' }} publishableKey="pk_test_1" />)
+  await waitFor(() => expect(stripeMounts.filter((m) => m.mounted && !m.destroyed)).toMatchObject([{ secret: 'cs_test_4_secret' }]))
+})
+
+test('a script with no answer is given up and tried afresh by the next mount', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  const onFallback = vi.fn()
+  const first = render(<PaypalButtons payment={{ ...paypalPayment, clientId: 'client-silent' }} completeReturn={ref} onFallback={onFallback} />)
+  await act(async () => {
+    vi.advanceTimersByTime(GIVE_UP_MS)
+  })
+  expect(screen.getByText('The payment form didn’t load.')).toBeTruthy()
+  first.unmount()
+  vi.useRealTimers()
+  render(<PaypalButtons payment={{ ...paypalPayment, clientId: 'client-silent' }} completeReturn={ref} onFallback={onFallback} />)
+  await waitFor(() => expect(scripts.filter((s) => s.src === paypalSdkUrl('client-silent'))).toHaveLength(2))
 })
 
 test('Stripe: keys from different modes are said, not shown as a blank box; a failed Stripe.js offers the redirect', async () => {
