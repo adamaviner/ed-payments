@@ -285,7 +285,8 @@ export interface PaymentIntentInput {
   app: string
   checkoutId: string
   amountCents: number
-  customer: string
+  /** The payer's Customer; an on-session retry of a charge made at PayPal has none. */
+  customer?: string
   description: string
   /** offSession: confirm now with the saved method and nobody present; a card that needs the buyer to authenticate is refused (error_on_requires_action). onSession: the browser confirms it. */
   offSession: boolean
@@ -348,14 +349,22 @@ export const stripe = {
     stripeCall<StripeList<StripePaymentMethod>>(keys, 'GET', `/v1/customers/${encodeURIComponent(customer)}/payment_methods`, { limit: 100 }, o),
   retrievePaymentMethod: (keys: Keys, id: string, o: StripeCallOptions) => stripeCall<StripePaymentMethod>(keys, 'GET', `/v1/payment_methods/${encodeURIComponent(id)}`, undefined, o),
   /** Saves a card or bank account for charging later with nobody present (usage off_session also collects a bank account's debit mandate). */
-  createSetupIntent: (keys: Keys, s: { customer: string; app: string; owner: string }, o: StripeCallOptions) =>
+  createSetupIntent: (keys: Keys, s: { customer: string; app: string; owner: string; types?: readonly (typeof SAVED_METHOD_TYPES)[number][] }, o: StripeCallOptions) =>
     stripeCall<StripeSetupIntent>(
       keys,
       'POST',
       '/v1/setup_intents',
-      { customer: s.customer, usage: 'off_session', allowed_payment_method_types: [...SAVED_METHOD_TYPES], payment_method_options: SAVED_METHOD_OPTIONS, metadata: { app: s.app, owner: s.owner } },
+      {
+        customer: s.customer,
+        usage: 'off_session',
+        allowed_payment_method_types: [...(s.types ?? SAVED_METHOD_TYPES)],
+        payment_method_options: SAVED_METHOD_OPTIONS,
+        metadata: { app: s.app, owner: s.owner },
+      },
       o,
     ),
+  /** Takes a saved method off its Customer, so it can't be charged again (needs write access to PaymentMethods). */
+  detachPaymentMethod: (keys: Keys, id: string, o: StripeCallOptions) => stripeCall<StripePaymentMethod>(keys, 'POST', `/v1/payment_methods/${encodeURIComponent(id)}/detach`, undefined, o),
   createPaymentIntent: (keys: Keys, i: PaymentIntentInput, o: StripeCallOptions) => stripeCall<StripePaymentIntent>(keys, 'POST', '/v1/payment_intents', paymentIntentParams(i), o),
   /** Without the expansions, for its status and client secret. */
   paymentIntent: (keys: Keys, id: string, o: StripeCallOptions) => stripeCall<StripePaymentIntent>(keys, 'GET', `/v1/payment_intents/${encodeURIComponent(id)}`, undefined, o),

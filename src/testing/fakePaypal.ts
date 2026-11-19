@@ -10,6 +10,24 @@ import { fixture, paypalEvent, paypalObjectFixtures } from './fixtures.js'
 
 const VALID_SIGNATURE = 'fake-valid-signature'
 
+/**
+ * How a method saved in the fake vault behaves. ok: verified, charges go through. unverified: its $0
+ * check fails (saving answers 422 INVALID_PAYMENT_SOURCE, as the sandbox does). decline: a charge is
+ * refused (422 INSTRUMENT_DECLINED). captureDeclined: the order is made but its capture DECLINED.
+ * pending: the capture comes back PENDING. error: the next charge gets no answer (500), later ones work.
+ */
+export type VaultBehaviour = 'ok' | 'unverified' | 'decline' | 'captureDeclined' | 'pending' | 'error'
+
+interface SetupToken {
+  id: string
+  status: 'CREATED' | 'PAYER_ACTION_REQUIRED' | 'APPROVED'
+  kind: 'card' | 'paypal'
+  customerId: string
+  merchantCustomerId: string
+  behaviour: VaultBehaviour
+  source?: { card?: { brand: string; last_digits: string; expiry: string }; paypal?: { email_address: string } }
+}
+
 interface Order {
   id: string
   status: PaypalOrder['status']
@@ -41,6 +59,9 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
   let declineNext = false
   let refuse: ((call: { method: string; path: string }) => Response | undefined) | undefined
   let searchEnabled = search
+  const setupTokens = new Map<string, SetupToken>()
+  const vaultCharges: { vaultId: string; body: unknown }[] = []
+  const vault = new Map<string, { id: string; customerId: string; merchantCustomerId: string; kind: 'card' | 'paypal'; behaviour: VaultBehaviour; source: SetupToken['source']; deleted?: boolean }>()
 
   const refundedOf = (captureId: string) =>
     [...refunds.values()].filter((r) => r.captureId === captureId && r.status !== 'FAILED' && r.status !== 'CANCELLED').reduce((s, r) => s + (decimalToCents(r.amount?.value) ?? 0), 0)
@@ -108,6 +129,68 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
       const events = patch.find((x) => x.path === '/event_types')?.value
       if (events) w.event_types = events.map((e) => ({ name: e.name }))
       return ok(w)
+    }
+    if (method === 'POST' && url.pathname === '/v3/vault/setup-tokens') {
+      const b = body as { customer?: { id?: string; merchant_customer_id?: string }; payment_source: { card?: unknown; paypal?: unknown } }
+      const kind = b.payment_source.paypal ? 'paypal' : 'card'
+      const t: SetupToken = {
+        id: `FAKESETUP${++n}`,
+        status: kind === 'paypal' ? 'PAYER_ACTION_REQUIRED' : 'CREATED',
+        kind,
+        customerId: b.customer?.id ?? `FAKECUST${++n}`,
+        merchantCustomerId: b.customer?.merchant_customer_id ?? '',
+        behaviour: 'ok',
+      }
+      setupTokens.set(t.id, t)
+      return remember(setupJson(t), 201)
+    }
+    if (path[0] === 'v3' && path[2] === 'setup-tokens' && path[3] && method === 'GET') {
+      const t = setupTokens.get(path[3])
+      return t ? ok(setupJson(t)) : issue(404, 'RESOURCE_NOT_FOUND', 'INVALID_RESOURCE_ID', 'Specified resource ID does not exist.')
+    }
+    if (method === 'POST' && url.pathname === '/v3/vault/payment-tokens') {
+      const id = (body as { payment_source: { token: { id: string } } }).payment_source.token.id
+      const t = setupTokens.get(id)
+      if (!t) return issue(404, 'RESOURCE_NOT_FOUND', 'INVALID_RESOURCE_ID', 'Specified resource ID does not exist.')
+      if (t.status !== 'APPROVED') return issue(422, 'UNPROCESSABLE_ENTITY', 'SETUP_TOKEN_NOT_APPROVED', 'The setup token isn’t approved.')
+      if (t.behaviour === 'unverified') return issue(422, 'UNPROCESSABLE_ENTITY', 'INVALID_PAYMENT_SOURCE', 'The provided payment source is not valid.')
+      const token = { id: `fakepaytoken${++n}`, customerId: t.customerId, merchantCustomerId: t.merchantCustomerId, kind: t.kind, behaviour: t.behaviour, source: t.source }
+      vault.set(token.id, token)
+      return remember(tokenJson(token), 201)
+    }
+    if (path[0] === 'v3' && path[2] === 'payment-tokens' && path[3] && method === 'DELETE') {
+      const v = vault.get(path[3])
+      if (v) v.deleted = true
+      return new Response(null, { status: 204 })
+    }
+    if (method === 'POST' && url.pathname === '/v2/checkout/orders' && (body as { payment_source?: { card?: { vault_id?: string }; paypal?: { vault_id?: string } } }).payment_source) {
+      const b = body as { purchase_units: { custom_id: string; amount: { value: string } }[]; payment_source: { card?: { vault_id?: string }; paypal?: { vault_id?: string } } }
+      const vaultId = b.payment_source.card?.vault_id ?? b.payment_source.paypal?.vault_id
+      if (vaultId) {
+        const v = vault.get(vaultId)
+        if (!v || v.deleted) return issue(422, 'UNPROCESSABLE_ENTITY', 'INVALID_PAYMENT_SOURCE', 'The provided payment source is not valid.')
+        if (v.behaviour === 'error') {
+          v.behaviour = 'ok'
+          return issue(500, 'INTERNAL_SERVER_ERROR', 'INTERNAL_SERVICE_ERROR', 'An internal service error has occurred.')
+        }
+        if (v.behaviour === 'decline')
+          return issue(422, 'UNPROCESSABLE_ENTITY', 'INSTRUMENT_DECLINED', 'The instrument presented was either declined by the processor or bank, or it can’t be used for this payment.')
+        const cents = decimalToCents(b.purchase_units[0].amount.value) ?? 0
+        const o: Order = { id: `FAKEORDER${++n}`, status: 'COMPLETED', amountCents: cents, customId: b.purchase_units[0].custom_id, createdAt: Date.now() }
+        const status = v.behaviour === 'captureDeclined' ? 'DECLINED' : v.behaviour === 'pending' ? 'PENDING' : 'COMPLETED'
+        o.capture = {
+          id: `FAKECAP${++n}`,
+          status,
+          amount: { currency_code: 'USD', value: centsToDecimal(cents) },
+          custom_id: o.customId,
+          // What the sandbox kept on a saved card: 2.59% + 49¢.
+          seller_receivable_breakdown: { paypal_fee: { currency_code: 'USD', value: centsToDecimal(Math.round(cents * 0.0259) + 49) } },
+          supplementary_data: { related_ids: { order_id: o.id } },
+        }
+        orders.set(o.id, o)
+        vaultCharges.push({ vaultId, body })
+        return remember(orderJson(o), 201)
+      }
     }
     if (method === 'POST' && url.pathname === '/v2/checkout/orders') {
       const b = body as { purchase_units: { custom_id: string; amount: { value: string } }[] }
@@ -177,6 +260,27 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
     return issue(404, 'NOT_FOUND', 'NOT_FOUND', `fakePaypal doesn’t know ${method} ${url.pathname}`)
   }
 
+  function setupJson(t: SetupToken) {
+    return {
+      id: t.id,
+      status: t.status,
+      customer: { id: t.customerId, merchant_customer_id: t.merchantCustomerId },
+      payment_source: t.source ?? { [t.kind]: {} },
+      links: t.status === 'PAYER_ACTION_REQUIRED' ? [{ href: `https://www.sandbox.paypal.com/agreements/approve?approval_session_id=${t.id}`, rel: 'approve', method: 'GET' }] : [],
+    }
+  }
+
+  function tokenJson(v: { id: string; customerId: string; merchantCustomerId: string; source: SetupToken['source'] }) {
+    const card = v.source?.card
+    return {
+      id: v.id,
+      customer: { id: v.customerId, merchant_customer_id: v.merchantCustomerId },
+      payment_source: card
+        ? { card: { ...card, verification_status: 'VERIFIED', verification: { amount: { currency_code: 'USD', value: '0.00' }, processor_response: { response_code: '0000' } } } }
+        : v.source,
+    }
+  }
+
   function makeRefund(captureId: string, cents: number, customId: string | undefined, status: PaypalRefund['status'] = 'COMPLETED') {
     const r = {
       id: `FAKEREFUND${++n}`,
@@ -238,6 +342,30 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
      */
     declineNextCapture() {
       declineNext = true
+    },
+    /**
+     * The buyer finishes PayPal's Card Fields (or approves on PayPal's page) for a setup token: it is
+     * APPROVED with the card or account given, and the method saved from it behaves as `behaviour`.
+     */
+    approveSetup(id: string, o: { card?: { brand?: string; last4?: string }; paypalEmail?: string; behaviour?: VaultBehaviour } = {}) {
+      const t = setupTokens.get(id)
+      if (!t) throw new Error(`fakePaypal: no setup token ${id}`)
+      t.status = 'APPROVED'
+      t.behaviour = o.behaviour ?? 'ok'
+      t.source =
+        t.kind === 'paypal'
+          ? { paypal: { email_address: o.paypalEmail ?? 'buyer@example.org' } }
+          : { card: { brand: o.card?.brand ?? 'VISA', last_digits: o.card?.last4 ?? '1111', expiry: '2030-12' } }
+    },
+    /** Methods in the vault (deleted ones marked). */
+    vault: () => [...vault.values()],
+    /** Orders made on saved methods, with what was asked. */
+    vaultCharges,
+    /** Makes a saved method behave differently from now on. */
+    setVaultBehaviour(tokenId: string, behaviour: VaultBehaviour) {
+      const v = vault.get(tokenId)
+      if (!v) throw new Error(`fakePaypal: no payment token ${tokenId}`)
+      v.behaviour = behaviour
     },
     enableSearch(on = true) {
       searchEnabled = on

@@ -133,10 +133,40 @@ export default defineSchema({
     label: v.string(),
     declinedAt: v.optional(v.number()),
     declineReason: v.optional(v.string()),
+    /** The owner removed it (removeSavedMethod); it is detached at Stripe too, and never offered again. */
+    removedAt: v.optional(v.number()),
     createdAt: v.number(),
   })
     .index('by_customer', ['customerId'])
     .index('by_stripePaymentMethodId', ['stripePaymentMethodId']),
+
+  /** One PayPal vault customer per payer of the app, made by PayPal the first time they save a card or account. */
+  paypalCustomers: defineTable({
+    app: v.string(),
+    owner: ref,
+    paypalCustomerId: v.string(),
+    createdAt: v.number(),
+  })
+    .index('by_owner', ['app', 'owner.type', 'owner.id'])
+    .index('by_paypalCustomerId', ['paypalCustomerId']),
+
+  /**
+   * Cards and PayPal accounts saved in PayPal's vault. Unlike Stripe's, these rows are the list the
+   * library offers: PayPal's own list of a customer's methods lags (a method saved seconds ago is
+   * missing, a deleted one still shown; seen in the sandbox 2026-11-19). A removed method's row is deleted.
+   */
+  paypalMethods: defineTable({
+    customerId: v.id('paypalCustomers'),
+    /** PayPal's payment token id: the vault_id a charge names. */
+    paymentTokenId: v.string(),
+    kind: v.union(v.literal('card'), v.literal('paypal')),
+    label: v.string(),
+    declinedAt: v.optional(v.number()),
+    declineReason: v.optional(v.string()),
+    createdAt: v.number(),
+  })
+    .index('by_customer', ['customerId'])
+    .index('by_paymentTokenId', ['paymentTokenId']),
 
   /** The refund ledger: many per checkout. Kept forever, as a financial record. */
   refunds: defineTable({

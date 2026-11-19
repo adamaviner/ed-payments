@@ -749,8 +749,63 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           declined: boolean;
           kind: "card" | "ach";
           label: string;
+          removed: boolean;
           stripePaymentMethodId: string;
         } | null,
+        Name
+      >;
+      paypalCustomer: FunctionReference<
+        "query",
+        "internal",
+        { app: string; owner: { id: string; type: string } },
+        string | null,
+        Name
+      >;
+      paypalMethod: FunctionReference<
+        "query",
+        "internal",
+        { paymentTokenId: string },
+        {
+          app: string;
+          method: {
+            createdAt: number;
+            declineReason: string | null;
+            declined: boolean;
+            kind: "card" | "paypal";
+            label: string;
+            paymentTokenId: string;
+          };
+          owner: { id: string; type: string };
+          paypalCustomerId: string;
+        } | null,
+        Name
+      >;
+      paypalMethods: FunctionReference<
+        "query",
+        "internal",
+        { app: string; owner: { id: string; type: string } },
+        Array<{
+          createdAt: number;
+          declineReason: string | null;
+          declined: boolean;
+          kind: "card" | "paypal";
+          label: string;
+          paymentTokenId: string;
+        }>,
+        Name
+      >;
+      removeMethod: FunctionReference<
+        "mutation",
+        "internal",
+        { now: number; stripePaymentMethodId: string },
+        null,
+        Name
+      >;
+      removePaypalMethod: FunctionReference<
+        "mutation",
+        "internal",
+        { paymentTokenId: string },
+        null,
         Name
       >;
       save: FunctionReference<
@@ -783,8 +838,31 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           declined: boolean;
           kind: "card" | "ach";
           label: string;
+          removed: boolean;
           stripePaymentMethodId: string;
         }>,
+        Name
+      >;
+      savePaypalMethod: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          app: string;
+          kind: "card" | "paypal";
+          label: string;
+          now: number;
+          owner: { id: string; type: string };
+          paymentTokenId: string;
+          paypalCustomerId: string;
+        },
+        {
+          createdAt: number;
+          declineReason: string | null;
+          declined: boolean;
+          kind: "card" | "paypal";
+          label: string;
+          paymentTokenId: string;
+        },
         Name
       >;
     };

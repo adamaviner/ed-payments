@@ -26,20 +26,33 @@ import {
 } from 'convex/server'
 import { ConvexError, v, type GenericValidator, type Infer } from 'convex/values'
 import type { ComponentApi } from '../component/_generated/component.js'
-import { DEFAULT_FEE_RATES, feeRates, feeSchedule, type FeeRates, type FeeRatesInput, type FeeSchedule } from '../core/fees.js'
-import { PAYPAL_LIVE_API, PAYPAL_SANDBOX_API, approveUrl, captureFee, moneyCents, orderCapture, paypal, paypalToken, type PaypalKeys, type PaypalOrder } from '../core/paypal.js'
+import { cheaperCardProcessor, DEFAULT_FEE_RATES, feeRates, feeSchedule, type CardProcessorChoice, type FeeRates, type FeeRatesInput, type FeeSchedule } from '../core/fees.js'
+import { PAYPAL_LIVE_API, PAYPAL_SANDBOX_API, approveUrl, captureFee, moneyCents, orderCapture, paypal, paypalToken, paypalTokenOf, type PaypalKeys, type PaypalOrder } from '../core/paypal.js'
 import { sessionState, stripe, stripeFee, paymentIntentId, type StripeKeys, type StripeSession } from '../core/stripe.js'
 import { accountFingerprint, decryptToken, encryptToken } from '../core/tokenCrypt.js'
 import { ProcessorError, isMethodFor, tagFor, type Fetch, type Method, type Payer, type Processor, type Ref } from '../core/types.js'
 import { adminApi, publicApi, worker, type AdminApiOptions } from './api.js'
 import { mismatch } from './context.js'
 import { reconcile, type ReconcileResult } from './reconcile.js'
-import { chargeNow, completeIntentReturn, retryOnSession, savedMethods, setupPaymentMethod, sweepIntent, verifyMethodOwner, type SavedMethod } from './saved.js'
+import {
+  chargeNow,
+  completeIntentReturn,
+  removeSavedMethod,
+  retryOnSession,
+  retryWithPaypal,
+  savedMethods,
+  setupPaymentMethod,
+  sweepIntent,
+  verifyMethodOwner,
+  type SavedMethod,
+  type VerifiedMethod,
+} from './saved.js'
+import { savePaypalMethod, setupPaypalMethod } from './paypalVault.js'
 import { errorText, paypalRefundState, stripeRefundState } from './util.js'
 import { callbackArgs, paidReturns, type Dispute, type Failed, type IssuesDigest, type Paid, type PaidResult, type Processing, type RefundNeeded, type Refunded } from './validators.js'
 import { handlePaypalWebhook, handleStripeWebhook, type UnhandledStripeEvent } from './webhooks.js'
 
-export type { ComponentApi, ReconcileResult, UnhandledStripeEvent, SavedMethod, AdminApiOptions }
+export type { ComponentApi, ReconcileResult, UnhandledStripeEvent, SavedMethod, VerifiedMethod, AdminApiOptions }
 export * from './validators.js'
 export { fromEnv, isLive, stripeProblems, paypalProblems, type KeySource, type Problem } from './env.js'
 export { PAYPAL_LIVE_API, PAYPAL_SANDBOX_API }
@@ -243,6 +256,18 @@ export class Payments<C extends GenericValidator = GenericValidator> {
   /** The fee schedule for one processor and method, from this app's rates. */
   feeSchedule(processor: Processor, method: Method): FeeSchedule {
     return feeSchedule(this.fees, processor, method)
+  }
+
+  /**
+   * Where a card for a charge of this amount should be saved or paid: the processor with the lower fee
+   * at this app's rates (Stripe on a tie), with both fees. Only a processor the deployment has keys
+   * for is chosen.
+   */
+  cardProcessorFor(amountCents: number): CardProcessorChoice {
+    const choice = cheaperCardProcessor(amountCents, this.fees)
+    const has = { stripe: !!this.options.stripe?.()?.secretKey, paypal: !!this.options.paypal?.()?.clientId }
+    if (!has[choice.processor] && has[choice.processor === 'stripe' ? 'paypal' : 'stripe']) return { ...choice, processor: choice.processor === 'stripe' ? 'paypal' : 'stripe' }
+    return choice
   }
 
   /** @internal */
@@ -534,7 +559,7 @@ export class Payments<C extends GenericValidator = GenericValidator> {
     if (!found || found.processor !== processor || found.app !== this.app) return null
     let declined = false
     if (!FINAL.has(found.status) || found.status === 'abandoned') {
-      if (found.kind !== 'hosted') await completeIntentReturn(this, ctx, found)
+      if (found.kind !== 'hosted' && found.processor === 'stripe') await completeIntentReturn(this, ctx, found)
       else if (processor === 'paypal') {
         const order = await this.withPaypal(ctx, (call) => paypal.getOrder(call, token))
         if (order.status === 'APPROVED') declined = (await this.capturePaypal(ctx, found.id, token, 'buyer')) === 'declined'
@@ -590,21 +615,53 @@ export class Payments<C extends GenericValidator = GenericValidator> {
    * Customer if needed and a SetupIntent for charging later with nobody present (bank accounts
    * verified at once). Returns its client secret for Stripe's Payment Element. Rate-limited.
    */
-  async setupPaymentMethod(ctx: RunActionCtx, a: { owner: Ref; payer: Payer; stripeCustomerId?: string }): Promise<{ clientSecret: string; stripeCustomerId: string }> {
+  async setupPaymentMethod(
+    ctx: RunActionCtx,
+    a: { owner: Ref; payer: Payer; stripeCustomerId?: string; methods?: readonly ('card' | 'ach')[] },
+  ): Promise<{ clientSecret: string; stripeCustomerId: string }> {
     return await setupPaymentMethod(this, ctx, a)
   }
 
-  /** The owner's saved cards and bank accounts, newest first, each with whether a charge of it was declined. */
+  /**
+   * Starts saving a card or PayPal account in PayPal's vault for `owner`: a setup token for PayPal's
+   * Card Fields (`PaypalCardFields`) or its PayPal button (`PaypalSaveButton`) in the browser, with the
+   * REST app's client id. A card is checked when saved ($0 authorization; 3-D Secure only if the bank
+   * asks). `description` is what a PayPal account holder agrees to. Rate-limited.
+   */
+  async setupPaypalMethod(ctx: RunActionCtx, a: { owner: Ref; payer: Payer; kind: 'card' | 'paypal'; description?: string }): Promise<{ setupTokenId: string; clientId: string }> {
+    return await setupPaypalMethod(this, ctx, a)
+  }
+
+  /**
+   * Saves what the buyer approved a setup token with (the browser component's onSaved gives its id),
+   * refusing a token made for someone else or a card whose check failed. Returns the saved method,
+   * charged later with chargeSaved like a Stripe one. Rate-limited.
+   */
+  async savePaypalMethod(ctx: RunActionCtx, a: { owner: Ref; setupTokenId: string; payerEmail?: string }): Promise<SavedMethod> {
+    return await savePaypalMethod(this, ctx, a)
+  }
+
+  /** The owner's saved cards, bank accounts and PayPal accounts at both processors, newest first, each with whether a charge of it was declined. */
   async savedMethods(ctx: RunActionCtx, a: { owner: Ref; stripeCustomerId?: string }): Promise<SavedMethod[]> {
     return await savedMethods(this, ctx, a)
   }
 
   /**
-   * Checks that a payment method id (from the browser) is a card or bank account saved to this owner's
-   * Customer, and returns it; anything else throws, so nobody can pay with a made-up or someone else's method.
+   * Checks that a payment method id (from the browser) is one saved for this owner, at Stripe or in
+   * PayPal's vault, and returns it; anything else throws, so nobody can pay with a made-up or someone
+   * else's method.
    */
-  async verifyMethodOwner(ctx: RunActionCtx, a: { owner: Ref; paymentMethodId: string; stripeCustomerId?: string }): Promise<SavedMethod & { stripeCustomerId: string }> {
+  async verifyMethodOwner(ctx: RunActionCtx, a: { owner: Ref; paymentMethodId: string; stripeCustomerId?: string }): Promise<VerifiedMethod> {
     return await verifyMethodOwner(this, ctx, a)
+  }
+
+  /**
+   * The owner removes one of their saved methods (checked to be theirs): deleted from PayPal's vault
+   * or detached from their Stripe Customer, and never offered or charged again. Whether it may go
+   * (e.g. a bid still relies on it) is the app's to check first.
+   */
+  async removeSavedMethod(ctx: RunActionCtx, a: { owner: Ref; paymentMethodId: string; stripeCustomerId?: string }): Promise<void> {
+    await removeSavedMethod(this, ctx, a)
   }
 
   /**
@@ -621,10 +678,7 @@ export class Payments<C extends GenericValidator = GenericValidator> {
     this.checkContext(a.context)
     const existing = await ctx.runQuery(this.component.checkouts.byChargeKey, { chargeKey: `${this.app}:${a.idempotencyKey}` })
     if (existing) return existing.id
-    const customer = await ctx.runQuery(this.component.customers.byOwner, { app: this.app, owner: a.owner })
-    const stripeCustomerId = customer?.stripeCustomerId ?? a.stripeCustomerId
-    if (!stripeCustomerId) throw new ConvexError('This payer has no saved payment method here.')
-    const method = await ctx.runQuery(this.component.customers.method, { stripePaymentMethodId: a.paymentMethodId })
+    const target = await this.chargeTarget(ctx, a)
     const now = Date.now()
     const site = this.url('/')
     const checkoutId = await ctx.runMutation(this.component.checkouts.create, {
@@ -633,8 +687,8 @@ export class Payments<C extends GenericValidator = GenericValidator> {
       purpose: a.purpose,
       description: a.description,
       amountCents: a.amountCents,
-      processor: 'stripe',
-      method: method?.kind ?? 'card',
+      processor: target.processor,
+      method: target.method,
       kind: 'offSession',
       payer: cleanPayer(a.payer),
       returnUrl: site,
@@ -643,13 +697,28 @@ export class Payments<C extends GenericValidator = GenericValidator> {
       expiresAt: now + 3650 * 24 * 60 * 60_000,
       context: a.context,
       callbacks: await this.handles(),
-      stripeCustomerId,
+      stripeCustomerId: target.stripeCustomerId,
       paymentMethodId: a.paymentMethodId,
       chargeKey: `${this.app}:${a.idempotencyKey}`,
       now,
     })
     await ctx.scheduler.runAfter(0, this.wiring.worker.charge, { checkoutId })
     return checkoutId
+  }
+
+  /** @internal Which processor charges a saved method: PayPal's must be the owner's, recorded here; Stripe's need the owner's Customer. */
+  private async chargeTarget(ctx: RunQueryCtx, a: ChargeArgs<Infer<C>>): Promise<{ processor: Processor; method: Method; stripeCustomerId?: string }> {
+    const tokenId = paypalTokenOf(a.paymentMethodId)
+    if (tokenId) {
+      const found = await ctx.runQuery(this.component.customers.paypalMethod, { paymentTokenId: tokenId })
+      if (!found || found.app !== this.app || found.owner.type !== a.owner.type || found.owner.id !== a.owner.id) throw new ConvexError('That payment method isn’t saved for this payer.')
+      return { processor: 'paypal', method: found.method.kind }
+    }
+    const customer = await ctx.runQuery(this.component.customers.byOwner, { app: this.app, owner: a.owner })
+    const stripeCustomerId = customer?.stripeCustomerId ?? a.stripeCustomerId
+    if (!stripeCustomerId) throw new ConvexError('This payer has no saved payment method here.')
+    const method = await ctx.runQuery(this.component.customers.method, { stripePaymentMethodId: a.paymentMethodId })
+    return { processor: 'stripe', method: method?.kind ?? 'card', stripeCustomerId }
   }
 
   /** @internal Makes (or retries) an off-session charge; payments.worker().charge runs this. */
@@ -665,6 +734,19 @@ export class Payments<C extends GenericValidator = GenericValidator> {
    */
   async retryOnSession(ctx: RunActionCtx, a: { checkoutId: string; expiresAt?: number }): Promise<{ checkoutId: string; clientSecret: string }> {
     return await retryOnSession(this, ctx, a)
+  }
+
+  /**
+   * The same, paid with PayPal's buttons on the app's page (`PaypalButtons` with the `embedded` it
+   * returns): a PayPal account or a card. Only one retry is open at a time, so asking for PayPal
+   * closes an unpaid Stripe one and the other way round. `returnPath` is where the buttons send the
+   * buyer once paid (with PayPal's token, for completeReturn). Rate-limited.
+   */
+  async retryWithPaypal(
+    ctx: RunActionCtx,
+    a: { checkoutId: string; returnPath: string; expiresAt?: number },
+  ): Promise<{ checkoutId: string; embedded: Extract<EmbeddedPayment, { processor: 'paypal' }> }> {
+    return await retryWithPaypal(this, ctx, a)
   }
 
   // ── Queries ───────────────────────────────────────────────────────────────────────────────────
@@ -822,7 +904,9 @@ export class Payments<C extends GenericValidator = GenericValidator> {
       if (!look) continue
       try {
         const before = c.status
-        const acted = c.kind === 'hosted' ? (await this.sweepOne(ctx, c, expired), true) : await sweepIntent(this, ctx, c, expired, now)
+        // A PayPal retry on the app's page is a PayPal order like a hosted one; off-session charges and Stripe's own go through sweepIntent.
+        const asOrder = c.kind === 'hosted' || (c.kind === 'onSession' && c.processor === 'paypal')
+        const acted = asOrder ? (await this.sweepOne(ctx, c, expired), true) : await sweepIntent(this, ctx, c, expired, now)
         if (!acted) continue
         out.checked++
         const after = (await ctx.runQuery(this.component.checkouts.get, { id: c.id }))?.status

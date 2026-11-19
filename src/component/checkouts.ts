@@ -298,7 +298,17 @@ async function paidElsewhere(ctx: MutationCtx, c: Doc<'checkouts'>): Promise<boo
   return siblings.some(isPaid)
 }
 
-async function markDeclined(ctx: MutationCtx, stripePaymentMethodId: string, reason: string, now: number) {
+async function markDeclined(ctx: MutationCtx, paymentMethodId: string, reason: string, now: number) {
+  // A PayPal method's id is `paypal:<payment token id>` (core/paypal.ts paypalMethodId).
+  if (paymentMethodId.startsWith('paypal:')) {
+    const pp = await ctx.db
+      .query('paypalMethods')
+      .withIndex('by_paymentTokenId', (q) => q.eq('paymentTokenId', paymentMethodId.slice('paypal:'.length)))
+      .first()
+    if (pp && pp.declinedAt === undefined) await ctx.db.patch(pp._id, { declinedAt: now, declineReason: reason })
+    return
+  }
+  const stripePaymentMethodId = paymentMethodId
   const row = await ctx.db
     .query('paymentMethods')
     .withIndex('by_stripePaymentMethodId', (q) => q.eq('stripePaymentMethodId', stripePaymentMethodId))

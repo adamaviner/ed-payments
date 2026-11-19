@@ -73,8 +73,8 @@ describe('saving a payment method', () => {
     const card = stripe.saveMethod(stripeCustomerId, 'ok')
     const bank = stripe.saveMethod(stripeCustomerId, 'bank')
     expect(await t.action(api.bids.methods, { user: 'u1' })).toEqual([
-      { paymentMethodId: bank, kind: 'ach', label: 'STRIPE TEST BANK account •••• 6789', declined: false },
-      { paymentMethodId: card, kind: 'card', label: 'Visa •••• 4242', declined: false },
+      { paymentMethodId: bank, processor: 'stripe', kind: 'ach', label: 'STRIPE TEST BANK account •••• 6789', declined: false, createdAt: expect.any(Number) },
+      { paymentMethodId: card, processor: 'stripe', kind: 'card', label: 'Visa •••• 4242', declined: false, createdAt: expect.any(Number) },
     ])
     expect(await t.action(api.bids.verify, { user: 'u1', paymentMethodId: card })).toMatchObject({ paymentMethodId: card, kind: 'card', stripeCustomerId })
     const other = await t.action(api.bids.setup, { user: 'u2', email: 'ben@example.org' })

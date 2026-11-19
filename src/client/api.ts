@@ -6,6 +6,7 @@ import { actionGeneric, internalActionGeneric, internalMutationGeneric, mutation
 import { ConvexError, v, type GenericValidator } from 'convex/values'
 import { stripe } from '../core/stripe.js'
 import type { Payments, RunQueryCtx, Who } from './index.js'
+import { giveUpPaypalCharge } from './paypalVault.js'
 import { findIntent, settleIntent } from './saved.js'
 
 const processor = v.union(v.literal('stripe'), v.literal('paypal'))
@@ -215,6 +216,7 @@ export function adminApi<C extends GenericValidator>(p: Payments<C>, o: AdminApi
         if (!x || x.app !== p.app || x.kind !== 'offSession') throw new ConvexError('There is no such charge.')
         if (x.status !== 'created' && x.status !== 'pending')
           throw new ConvexError(x.status === 'processing' ? 'A bank payment for this is on its way; wait for it.' : `This charge is already ${x.status}.`)
+        if (x.processor === 'paypal') return await giveUpPaypalCharge(p, ctx, x, who.name)
         const pi = await findIntent(p, x)
         if (pi && (await settleIntent(p, ctx, x, pi))) return { status: (await ctx.runQuery(c.checkouts.get, { id: x.id }))?.status ?? x.status }
         if (pi && pi.status !== 'canceled') await stripe.cancelPaymentIntent(p.stripeKeys(), pi.id, { fetch: p.fetch })

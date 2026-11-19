@@ -120,3 +120,20 @@ export function compareProcessingFees(netCents: number, covered: boolean, schedu
   const achFeeCents = processingFeeFor(netCents, schedules.ach, covered)
   return { cardFeeCents, achFeeCents, achSavingsCents: Math.max(0, cardFeeCents - achFeeCents), steerToAch: isLargeTransaction(netCents, thresholdCents) }
 }
+
+/** What a card charge of this amount costs at each processor, and the cheaper one. */
+export interface CardProcessorChoice {
+  processor: Processor
+  feeCents: Record<Processor, number>
+}
+
+/**
+ * Which processor a card for a charge of `amountCents` should go to: the one whose fee (from the app's
+ * rates) is lower, Stripe on a tie. With a percentage plus a fixed fee each, one is cheaper below a
+ * crossover and the other above it (2.9% + 30¢ against 1.99% + 49¢ cross near $21).
+ */
+export function cheaperCardProcessor(amountCents: number, rates: FeeRates): CardProcessorChoice {
+  assertCents('amountCents', amountCents)
+  const feeCents = { stripe: estimateProcessingFee(amountCents, rates.stripe.card), paypal: estimateProcessingFee(amountCents, rates.paypal.card) }
+  return { processor: feeCents.paypal < feeCents.stripe ? 'paypal' : 'stripe', feeCents }
+}
