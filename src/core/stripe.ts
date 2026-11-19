@@ -162,7 +162,10 @@ export interface StripeWebhookEndpoint {
 export interface StripeSession {
   id: string
   object: 'checkout.session'
+  /** Stripe's page; null for an embedded session. */
   url: string | null
+  /** An embedded session's, for Stripe.js in the buyer's browser. */
+  client_secret?: string | null
   status: 'open' | 'complete' | 'expired' | null
   payment_status: 'paid' | 'unpaid' | 'no_payment_required'
   payment_intent: string | StripePaymentIntent | null
@@ -231,6 +234,11 @@ export interface SessionInput {
   /** When the session stops taking payment, ms. Stripe allows 30 minutes to 24 hours; clamped inside that. */
   expiresAt: number
   now: number
+  /**
+   * Shown inside the app's page (Stripe.js createEmbeddedCheckoutPage) instead of on Stripe's own. Such a
+   * session has no cancel page (the buyer is still on the app's) and sends the buyer to successUrl when paid.
+   */
+  embedded?: boolean
 }
 
 const MIN_EXPIRY_MS = 31 * 60_000
@@ -253,8 +261,8 @@ export function sessionParams(i: SessionInput): FormParams {
     payment_intent_data: { metadata, description: i.description.slice(0, 1000) },
     line_items: [{ quantity: 1, price_data: { currency: 'usd', unit_amount: i.amountCents, product_data: { name: i.description.slice(0, 250) || 'Payment' } } }],
     expires_at: sessionExpiry(i.expiresAt, i.now),
-    success_url: i.successUrl,
-    cancel_url: i.cancelUrl,
+    // Since 2026-10-28.endive the embedded value is `embedded_page` (`embedded` answers 400).
+    ...(i.embedded ? { ui_mode: 'embedded_page', return_url: i.successUrl } : { success_url: i.successUrl, cancel_url: i.cancelUrl }),
   }
 }
 

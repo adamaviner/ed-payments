@@ -179,7 +179,9 @@ async function actOnPaypal(p: Payments, ctx: RunActionCtx, event: PaypalEvent): 
       const c = await paypalCheckout(p, ctx, orderCustomId(order), order.id)
       if (!c) return 'foreign'
       // capturePaypal leaves a checkout that was given up alone; the buyer is simply never charged.
-      await p.capturePaypal(ctx, c.id, order.id)
+      // After a decline only the buyer captures (the buttons call completeReturn), so this leaves
+      // it alone and answers 200: PayPal sending the event again wouldn't change anything.
+      await p.capturePaypal(ctx, c.id, order.id, 'background')
       return 'handled'
     }
     case 'PAYMENT.CAPTURE.COMPLETED':

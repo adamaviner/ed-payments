@@ -136,12 +136,27 @@ export interface OrderInput {
   returnUrl: string
   cancelUrl: string
   brandName?: string
+  /**
+   * For PayPal's buttons on the app's own page (JS SDK) instead of a redirect. The order then names no
+   * payment_source: the button the buyer presses decides it (PayPal or a card), and a payment_source of
+   * paypal would turn the card button away. What experience_context carried goes in application_context,
+   * which the buttons still read: no shipping address asked, "Pay Now", the brand name.
+   */
+  embedded?: boolean
 }
 
 export function orderBody(i: OrderInput) {
+  const unit = { custom_id: i.customId, description: i.description.slice(0, 127) || 'Payment', amount: { currency_code: 'USD', value: centsToDecimal(i.amountCents) } }
+  if (i.embedded) {
+    return {
+      intent: 'CAPTURE',
+      purchase_units: [unit],
+      application_context: { shipping_preference: 'NO_SHIPPING', user_action: 'PAY_NOW', ...(i.brandName ? { brand_name: i.brandName.slice(0, 127) } : {}) },
+    }
+  }
   return {
     intent: 'CAPTURE',
-    purchase_units: [{ custom_id: i.customId, description: i.description.slice(0, 127) || 'Payment', amount: { currency_code: 'USD', value: centsToDecimal(i.amountCents) } }],
+    purchase_units: [unit],
     payment_source: {
       paypal: {
         experience_context: {

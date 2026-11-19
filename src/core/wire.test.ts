@@ -112,6 +112,27 @@ describe('Stripe requests', () => {
     })
     expect(sessionExpiry(now + 48 * 60 * MIN, now)).toBe((now + 24 * 60 * MIN - MIN) / 1000)
     expect(sessionExpiry(now + 2 * 60 * MIN, now)).toBe((now + 2 * 60 * MIN) / 1000)
+    expect(p).toMatchObject({ success_url: 's', cancel_url: 'c' })
+    expect(p).not.toHaveProperty('ui_mode')
+  })
+
+  test('an embedded session is embedded_page with a return_url, and has no success or cancel page', () => {
+    const now = Date.UTC(2030, 0, 1)
+    const p = sessionParams({
+      app: 'market',
+      checkoutId: 'k1',
+      description: 'A bowl',
+      amountCents: 2500,
+      method: 'card',
+      successUrl: 's',
+      cancelUrl: 'c',
+      expiresAt: now + 60 * MIN,
+      now,
+      embedded: true,
+    })
+    expect(p).toMatchObject({ ui_mode: 'embedded_page', return_url: 's', client_reference_id: 'k1', allowed_payment_method_types: ['card'] })
+    expect(p).not.toHaveProperty('success_url')
+    expect(p).not.toHaveProperty('cancel_url')
   })
 
   test('calls carry the pinned version, the key and an idempotency key; errors keep Stripe’s message and code', async () => {
@@ -217,8 +238,15 @@ describe('PayPal', () => {
   test('an order uses experience_context (not application_context), cents as a decimal, and the tag as custom_id', () => {
     const body = orderBody({ customId: 'market:k1', description: 'x'.repeat(200), amountCents: 2529, returnUrl: 'https://r', cancelUrl: 'https://c' })
     expect(body.purchase_units[0]).toEqual({ custom_id: 'market:k1', description: 'x'.repeat(127), amount: { currency_code: 'USD', value: '25.29' } })
-    expect(body.payment_source.paypal.experience_context).toMatchObject({ return_url: 'https://r', cancel_url: 'https://c', user_action: 'PAY_NOW', shipping_preference: 'NO_SHIPPING' })
+    expect(body.payment_source?.paypal.experience_context).toMatchObject({ return_url: 'https://r', cancel_url: 'https://c', user_action: 'PAY_NOW', shipping_preference: 'NO_SHIPPING' })
     expect(JSON.stringify(body)).not.toContain('application_context')
+  })
+
+  test('an order for the buttons names no payment_source (the button pressed decides) and keeps no shipping and Pay Now', () => {
+    const body = orderBody({ customId: 'market:k1', description: 'd', amountCents: 2529, returnUrl: 'https://r', cancelUrl: 'https://c', brandName: 'Earthdance', embedded: true })
+    expect(body).not.toHaveProperty('payment_source')
+    expect(body.purchase_units[0]).toMatchObject({ custom_id: 'market:k1', amount: { currency_code: 'USD', value: '25.29' } })
+    expect(body).toMatchObject({ intent: 'CAPTURE', application_context: { shipping_preference: 'NO_SHIPPING', user_action: 'PAY_NOW', brand_name: 'Earthdance' } })
   })
 
   test('the buyer goes to the payer-action link of a real sandbox order', async () => {

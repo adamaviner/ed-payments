@@ -36,6 +36,15 @@ export async function takeAll(ctx: MutationCtx, limits: Limits, now: number): Pr
   }
 }
 
+/** Hands back one counted against `key` in its current window (a start the buyer closed again). */
+export async function giveBackOne(ctx: MutationCtx, key: string, now: number, windowMs: number): Promise<void> {
+  const row = await ctx.db
+    .query('limits')
+    .withIndex('by_key', (q) => q.eq('key', key))
+    .first()
+  if (row && now - row.windowStart < windowMs && row.count > 0) await ctx.db.patch(row._id, { count: row.count - 1 })
+}
+
 export const take = mutation({
   args: { limits: limitsArg, now: v.number() },
   returns: v.null(),

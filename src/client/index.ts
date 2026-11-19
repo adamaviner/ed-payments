@@ -145,6 +145,34 @@ export interface StartArgs<T> {
   limitKey?: string
   /** Passed to every callback; checked against the context validator. */
   context: T
+  /**
+   * redirect (default): send the buyer to the processor's page. embedded: show it on the app's own page,
+   * with `PaypalButtons` or `StripeEmbeddedCheckout` from `@earthdance/payments/react`. Either way the
+   * buyer ends on returnPath and the webhooks settle the payment.
+   */
+  ui?: StartUi
+}
+
+export type StartUi = 'redirect' | 'embedded'
+
+/** What the browser needs to show an embedded checkout. */
+export type EmbeddedPayment =
+  /** For Stripe.js's createEmbeddedCheckoutPage, with the app's publishable key. Stripe sends the buyer to returnPath when paid. */
+  | { processor: 'stripe'; clientSecret: string }
+  /**
+   * For PayPal's buttons: the order the buttons pay, the REST app's client id (public; it also says
+   * sandbox or live), and where to go once paid (returnPath with PayPal's token, as a redirect would).
+   */
+  | { processor: 'paypal'; orderId: string; clientId: string; returnUrl: string }
+
+export interface StartedRedirect {
+  checkoutId: string
+  redirectUrl: string
+}
+
+export interface StartedEmbedded {
+  checkoutId: string
+  embedded: EmbeddedPayment
 }
 
 export interface ChargeArgs<T> {
@@ -179,6 +207,9 @@ const PAYPAL_LOOK_AFTER_MS = 5 * 60_000
 const REFUND_STUCK_MS = 10 * 60_000
 
 const FINAL: ReadonlySet<CheckoutStatus> = new Set(['paid', 'refund_needed', 'failed', 'abandoned'])
+
+/** A PayPal checkout's lastError once PayPal declined what the buyer chose: only the buyer captures it after that (capturePaypal). */
+export const PAYPAL_DECLINED = 'PayPal declined the card or account the buyer chose; waiting for them to choose another.'
 
 /**
  * Step one: the app's tag, keys and context type. Returns { withCallbacks } for step two.
@@ -306,10 +337,14 @@ export class Payments<C extends GenericValidator = GenericValidator> {
 
   /**
    * Starts a checkout from an action: makes the row, asks the processor for its checkout (keyed by
-   * the row's id, so a retry gets the same one), and returns where to send the buyer. Rate-limited
-   * per signed-in user (else per payer email, or limitKey) and overall.
+   * the row's id, so a retry gets the same one), and returns where to send the buyer, or with
+   * `ui: 'embedded'` what the app's page needs to show it. Rate-limited per signed-in user (else per
+   * payer email, or limitKey) and overall.
    */
-  async start(ctx: RunActionCtx, a: StartArgs<Infer<C>>): Promise<{ checkoutId: string; redirectUrl: string }> {
+  async start(ctx: RunActionCtx, a: StartArgs<Infer<C>> & { ui: 'embedded' }): Promise<StartedEmbedded>
+  async start(ctx: RunActionCtx, a: StartArgs<Infer<C>> & { ui?: 'redirect' }): Promise<StartedRedirect>
+  async start(ctx: RunActionCtx, a: StartArgs<Infer<C>>): Promise<StartedRedirect | StartedEmbedded>
+  async start(ctx: RunActionCtx, a: StartArgs<Infer<C>>): Promise<StartedRedirect | StartedEmbedded> {
     if (!isMethodFor(a.processor, a.method)) throw new ConvexError(`${a.processor === 'stripe' ? 'Stripe' : 'PayPal'} doesn’t take ${a.method} payments here.`)
     if (!Number.isInteger(a.amountCents) || a.amountCents < 1) throw new ConvexError('A checkout needs an amount of at least one cent.')
     this.checkContext(a.context)
@@ -340,7 +375,7 @@ export class Payments<C extends GenericValidator = GenericValidator> {
     try {
       const made = a.processor === 'stripe' ? await this.startStripe(checkoutId, a, returnUrl, cancelUrl, expiresAt, now) : await this.startPaypal(ctx, checkoutId, a, returnUrl, cancelUrl)
       await ctx.runMutation(this.component.checkouts.attach, { id: checkoutId, processorCheckoutId: made.id })
-      return { checkoutId, redirectUrl: made.url }
+      return made.embedded ? { checkoutId, embedded: made.embedded } : { checkoutId, redirectUrl: made.url }
     } catch (err) {
       await ctx.runMutation(this.component.checkouts.failStart, { id: checkoutId, error: errorText(err), now: Date.now() })
       console.error(`payments: starting ${a.processor} checkout ${checkoutId} failed: ${errorText(err)}`)
@@ -349,24 +384,45 @@ export class Payments<C extends GenericValidator = GenericValidator> {
   }
 
   private async startStripe(checkoutId: string, a: StartArgs<Infer<C>>, returnUrl: string, cancelUrl: string, expiresAt: number, now: number) {
-    const successUrl = `${returnUrl}${returnUrl.includes('?') ? '&' : '?'}session_id={CHECKOUT_SESSION_ID}`
+    const successUrl = withParam(returnUrl, 'session_id', '{CHECKOUT_SESSION_ID}')
+    const embedded = a.ui === 'embedded'
     const s = await stripe.createSession(
       this.stripeKeys(),
-      { app: this.app, checkoutId, description: a.description, amountCents: a.amountCents, method: a.method === 'ach' ? 'ach' : 'card', email: a.payer.email, successUrl, cancelUrl, expiresAt, now },
+      {
+        app: this.app,
+        checkoutId,
+        description: a.description,
+        amountCents: a.amountCents,
+        method: a.method === 'ach' ? 'ach' : 'card',
+        email: a.payer.email,
+        successUrl,
+        cancelUrl,
+        expiresAt,
+        now,
+        embedded,
+      },
       { fetch: this.fetch },
     )
+    if (embedded) {
+      if (!s.client_secret) throw new Error('Stripe returned no client secret for the embedded checkout.')
+      return { id: s.id, embedded: { processor: 'stripe', clientSecret: s.client_secret } satisfies EmbeddedPayment }
+    }
     if (!s.url) throw new Error('Stripe returned no checkout address.')
     return { id: s.id, url: s.url }
   }
 
   private async startPaypal(ctx: RunActionCtx, checkoutId: string, a: StartArgs<Infer<C>>, returnUrl: string, cancelUrl: string) {
+    const embedded = a.ui === 'embedded'
     const order = await this.withPaypal(ctx, (call) =>
       paypal.createOrder(
         call,
-        { customId: tagFor(this.app, checkoutId), description: a.description, amountCents: a.amountCents, returnUrl, cancelUrl, brandName: this.options.brandName },
+        { customId: tagFor(this.app, checkoutId), description: a.description, amountCents: a.amountCents, returnUrl, cancelUrl, brandName: this.options.brandName, embedded },
         `checkout-${checkoutId}`,
       ),
     )
+    if (embedded) {
+      return { id: order.id, embedded: { processor: 'paypal', orderId: order.id, clientId: this.paypalKeys().clientId, returnUrl: withParam(returnUrl, 'token', order.id) } satisfies EmbeddedPayment }
+    }
     const url = approveUrl(order)
     if (!url) throw new Error('PayPal returned no approval address.')
     return { id: order.id, url }
@@ -427,44 +483,104 @@ export class Payments<C extends GenericValidator = GenericValidator> {
    * order is then fetched and settled from what it says, instead of failing (fix b). A checkout
    * that is no longer waiting (abandoned, failed, settled) is never captured: with PayPal no money
    * moves until the capture, so taking it now would only mean refunding it.
+   *
+   * 'declined': PayPal refused the card or account the buyer chose (INSTRUMENT_DECLINED). The order
+   * stays open, so on the app's page PayPal's buttons let the buyer choose another way to pay and
+   * approve again; the decline is noted on the checkout. From then on only the buyer captures it
+   * (`by: 'buyer'`: completeReturn, which the buttons and the return page call): the webhook and the
+   * sweep leave it alone, and the sweep abandons it when it expires. Otherwise a card that went
+   * through later (funds arrived, a fraud check cleared) would be charged after the buyer gave up or
+   * paid another way. The buyer's captures each have their own request id (PayPal answers a repeated
+   * id with its first answer, which would repeat the decline); the background's keep one per
+   * checkout. An order can't be captured twice whatever the id.
    */
-  async capturePaypal(ctx: RunActionCtx, checkoutId: string, orderId: string): Promise<void> {
+  async capturePaypal(ctx: RunActionCtx, checkoutId: string, orderId: string, by: 'buyer' | 'background'): Promise<'declined' | undefined> {
     const c = await ctx.runQuery(this.component.checkouts.get, { id: checkoutId })
-    if (c?.status !== 'pending' && c?.status !== 'created') return
+    if (c?.status !== 'pending' && c?.status !== 'created') return undefined
+    if (by === 'background' && c.lastError === PAYPAL_DECLINED) return 'declined'
+    const requestId = by === 'buyer' ? `capture-${checkoutId}-${Date.now().toString(36)}` : `capture-${checkoutId}`
     const order = await this.withPaypal(ctx, async (call) => {
       try {
-        return await paypal.captureOrder(call, orderId, `capture-${checkoutId}`)
+        return await paypal.captureOrder(call, orderId, requestId)
       } catch (err) {
         if (err instanceof ProcessorError && err.code === 'ORDER_ALREADY_CAPTURED') return await paypal.getOrder(call, orderId)
         if (err instanceof ProcessorError && err.code === 'ORDER_NOT_APPROVED') return null
+        if (err instanceof ProcessorError && err.code === 'INSTRUMENT_DECLINED') return 'declined' as const
         throw err
       }
     })
+    if (order === 'declined') {
+      await ctx.runMutation(this.component.checkouts.noteError, { id: checkoutId, error: PAYPAL_DECLINED })
+      return order
+    }
     if (order) await this.settlePaypalOrder(ctx, checkoutId, order)
+    return undefined
   }
 
   /**
    * For the page the buyer comes back to (`token`: Stripe's session_id or payment_intent, or PayPal's
    * token). Returns the outcome at once if the checkout is already settled; otherwise asks the
    * processor and settles (capturing an approved PayPal order), so the page doesn't wait for a
-   * webhook. Null: not ours. publicApi().completeReturn wraps this with a rate limit.
+   * webhook. Null: not ours. publicApi().completeReturn wraps this with a rate limit. PayPal's
+   * buttons call it when the buyer approves; `declined` then means PayPal refused what the buyer
+   * chose and the buttons should let them choose again (the checkout is still pending).
    */
-  async completeReturn(ctx: RunActionCtx, { processor, token }: { processor: Processor; token: string }): Promise<{ checkoutId: string; ref: Ref; purpose: string; status: CheckoutStatus } | null> {
+  async completeReturn(
+    ctx: RunActionCtx,
+    { processor, token }: { processor: Processor; token: string },
+  ): Promise<{ checkoutId: string; ref: Ref; purpose: string; status: CheckoutStatus; declined?: true } | null> {
     if (!token || token.length > 255) return null
     const found = await ctx.runQuery(this.component.checkouts.byProcessorId, { processorCheckoutId: token })
     if (!found || found.processor !== processor || found.app !== this.app) return null
+    let declined = false
     if (!FINAL.has(found.status) || found.status === 'abandoned') {
       if (found.kind !== 'hosted') await completeIntentReturn(this, ctx, found)
       else if (processor === 'paypal') {
         const order = await this.withPaypal(ctx, (call) => paypal.getOrder(call, token))
-        if (order.status === 'APPROVED') await this.capturePaypal(ctx, found.id, token)
+        if (order.status === 'APPROVED') declined = (await this.capturePaypal(ctx, found.id, token, 'buyer')) === 'declined'
         else if (order.status === 'COMPLETED') await this.settlePaypalOrder(ctx, found.id, order)
       } else {
         await this.settleStripeSession(ctx, found.id, await stripe.retrieveSession(this.stripeKeys(), token, { fetch: this.fetch }))
       }
     }
     const now = await ctx.runQuery(this.component.checkouts.get, { id: found.id })
-    return { checkoutId: found.id, ref: found.ref, purpose: found.purpose, status: now?.status ?? found.status }
+    return { checkoutId: found.id, ref: found.ref, purpose: found.purpose, status: now?.status ?? found.status, ...(declined ? { declined: true as const } : {}) }
+  }
+
+  /**
+   * Closes a checkout the buyer started and won't pay, e.g. they pressed Edit on the app's page: the
+   * Stripe session is expired at Stripe, a PayPal order is left to lapse (none of its money moves
+   * until the library captures, which it won't for an abandoned checkout), and the checkout is
+   * abandoned now instead of when it expires. The start it counted against the buyer's own rate limit
+   * is given back (pass the `limitKey` start was given, if any). If it was paid meanwhile, it is
+   * settled as paid instead. Returns how it stands; null: not this app's checkout.
+   *
+   * Only for a checkout id the buyer was given by start (the id is the buyer's secret; anyone holding
+   * it can close the unpaid checkout, nothing more). publicApi().cancelCheckout wraps this.
+   */
+  async cancel(ctx: RunActionCtx, checkoutId: string, o: { limitKey?: string } = {}): Promise<{ status: CheckoutStatus } | null> {
+    const c = await ctx.runQuery(this.component.checkouts.get, { id: checkoutId })
+    if (!c || c.app !== this.app || c.kind !== 'hosted') return null
+    if (c.status !== 'created' && c.status !== 'pending') return { status: c.status }
+    if (c.processor === 'stripe' && c.processorCheckoutId) {
+      const keys = this.stripeKeys()
+      try {
+        await stripe.expireSession(keys, c.processorCheckoutId, { fetch: this.fetch })
+      } catch (err) {
+        // Not open any more: paid (or on its way) in the meantime, or already expired.
+        if (!(err instanceof ProcessorError && err.status === 400)) throw err
+        const s = await stripe.retrieveSession(keys, c.processorCheckoutId, { fetch: this.fetch })
+        const state = sessionState(s)
+        if (state === 'paid' || state === 'processing') {
+          await this.settleStripeSession(ctx, c.id, s)
+          return { status: (await ctx.runQuery(this.component.checkouts.get, { id: c.id }))?.status ?? c.status }
+        }
+      }
+    }
+    const limits = await this.limits(ctx, 'start', o.limitKey ?? c.payer.email)
+    const own = limits?.find((l) => !l.key.endsWith(':all'))
+    const r = await ctx.runMutation(this.component.checkouts.cancel, { id: c.id, giveBack: own && { key: own.key, windowMs: own.windowMs }, now: Date.now() })
+    return { status: r.outcome === 'abandoned' ? 'abandoned' : r.status }
   }
 
   // ── Saved payment methods ─────────────────────────────────────────────────────────────────────
@@ -746,7 +862,21 @@ export class Payments<C extends GenericValidator = GenericValidator> {
           throw err
         }
       })
-      if (order?.status === 'APPROVED') return await this.capturePaypal(ctx, c.id, c.processorCheckoutId)
+      if (order?.status === 'APPROVED') {
+        let outcome: 'declined' | 'failed' | undefined
+        try {
+          outcome = await this.capturePaypal(ctx, c.id, id, 'background')
+        } catch (err) {
+          // Before its time, the next sweep tries again; past it, look once more and give up rather than retry for ever.
+          if (!expired) throw err
+          console.warn(`payments: capturing expired PayPal order ${id} failed: ${errorText(err)}`)
+          outcome = 'failed'
+        }
+        if (!expired || !outcome) return null
+        // Declined (the buyer left without choosing another way to pay) or not capturable, and past its time.
+        const now = await this.withPaypal(ctx, (call) => paypal.getOrder(call, id))
+        return now.status === 'COMPLETED' ? await this.settlePaypalOrder(ctx, c.id, now) : await abandon()
+      }
       if (order?.status === 'COMPLETED') return await this.settlePaypalOrder(ctx, c.id, order)
       return expired || order?.status === 'VOIDED' ? await abandon() : null
     }
@@ -882,6 +1012,9 @@ const defaultSiteUrl = () => {
 }
 
 const cleanPayer = (p: Payer): Payer => ({ email: p.email.trim(), ...(p.name?.trim() ? { name: p.name.trim() } : {}) })
+
+/** `url` with one more query parameter. Not encoded: Stripe's {CHECKOUT_SESSION_ID} must reach Stripe as it is, and PayPal's ids are letters and digits. */
+const withParam = (url: string, name: string, value: string) => `${url}${url.includes('?') ? '&' : '?'}${name}=${value}`
 
 /** The idempotency key of a refund's send: the same for every repeat of one attempt (component refunds.begin makes the same). */
 export const refundKey = (refundId: string, attempts: number) => (attempts ? `refund-${refundId}-${attempts}` : `refund-${refundId}`)

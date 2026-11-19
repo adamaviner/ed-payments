@@ -240,6 +240,28 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         }>,
         Name
       >;
+      cancel: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          giveBack?: { key: string; windowMs: number };
+          id: string;
+          now: number;
+        },
+        | { outcome: "abandoned" }
+        | {
+            outcome: "already_handled";
+            status:
+              | "created"
+              | "pending"
+              | "processing"
+              | "paid"
+              | "failed"
+              | "abandoned"
+              | "refund_needed";
+          },
+        Name
+      >;
       create: FunctionReference<
         "mutation",
         "internal",

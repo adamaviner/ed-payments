@@ -189,12 +189,17 @@ export function fakeStripe({ webhookSecret = FAKE_STRIPE_WEBHOOK_SECRET, fallbac
 
     if (method === 'POST' && url.pathname === '/v1/checkout/sessions') {
       if (params.has('payment_method_types[0]')) return refusedTypes()
+      if (params.get('ui_mode') === 'embedded')
+        return Response.json({ error: { type: 'invalid_request_error', message: 'The ui_mode value `embedded` is no longer supported. Use `embedded_page` instead.' } }, { status: 400 })
       const id = `cs_test_fake${++n}`
       const base = fixture(stripeObjectFixtures.sessionOpen) as unknown as StripeSession
+      // An embedded session (as in test mode on 2026-10-28.endive) has no page of its own, only a client secret for Stripe.js.
+      const embedded = params.get('ui_mode') === 'embedded_page'
       const s: StripeSession = {
         ...base,
         id,
-        url: `https://checkout.stripe.com/c/pay/${id}`,
+        url: embedded ? null : `https://checkout.stripe.com/c/pay/${id}`,
+        client_secret: embedded ? `${id}_secret_fake` : null,
         status: 'open',
         payment_status: 'unpaid',
         payment_intent: null,

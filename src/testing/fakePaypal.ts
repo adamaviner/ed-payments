@@ -38,6 +38,7 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
   let n = 0
   let tokens = 0
   let captureOutcome: PaypalCapture['status'] = 'COMPLETED'
+  let declineNext = false
   let refuse: ((call: { method: string; path: string }) => Response | undefined) | undefined
   let searchEnabled = search
 
@@ -127,6 +128,10 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
       if (path[4] === 'capture') {
         if (o.status === 'COMPLETED') return Response.json(fixture(paypalObjectFixtures.errorOrderAlreadyCaptured), { status: 422 })
         if (o.status !== 'APPROVED') return Response.json(fixture(paypalObjectFixtures.errorOrderNotApproved), { status: 422 })
+        if (declineNext) {
+          declineNext = false
+          return issue(422, 'UNPROCESSABLE_ENTITY', 'INSTRUMENT_DECLINED', 'The instrument presented was either declined by the processor or bank, or it can’t be used for this payment.')
+        }
         const fee = Math.ceil(o.amountCents * 0.029) + 30
         o.capture = {
           id: `FAKECAP${++n}`,
@@ -226,6 +231,13 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
     /** Captures made after this come back with this status (DECLINED, PENDING). */
     capturesCome(status: PaypalCapture['status']) {
       captureOutcome = status
+    },
+    /**
+     * The next capture is refused with INSTRUMENT_DECLINED (422), as PayPal answers when the card or
+     * account the buyer chose on the buttons is turned down; the order stays APPROVED for another try.
+     */
+    declineNextCapture() {
+      declineNext = true
     },
     enableSearch(on = true) {
       searchEnabled = on
