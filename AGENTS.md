@@ -22,8 +22,8 @@ The README has the API and the "Adopt in 5 steps" set-up.
    `paid` (or throw) when the sale can't happen, so the money is owed back.
 5. **One instance, all callbacks.** `definePayments(...).withCallbacks(...)` once, in `convex/payments.ts`.
    Every callback is required, even if it only logs. Use `payments.args.*` as their `args`.
-6. **Who may do what is the app's.** Gate your own actions (`setupPaymentMethod`, `chargeSaved`,
-   `retryOnSession` callers) with your own login; the admin functions go through `authorize.admin`.
+6. **Who may do what is the app's.** Gate your own actions (`setupPaymentMethod`, `setupPaypalMethod`,
+   `savePaypalMethod`, `removeSavedMethod`, `chargeSaved`, `retryOnSession`, `retryWithPaypal` callers) with your own login; the admin functions go through `authorize.admin`.
    A `stripeCustomerId` passed to adopt an existing Customer must come from your own records, never
    from the browser: the library records it as that owner's for good.
 7. **Webhooks with the CLI.** Register them with `npx ed-payments webhooks`, not by hand, and run it
@@ -41,3 +41,8 @@ The README has the API and the "Adopt in 5 steps" set-up.
     yourself or capture from the browser. Give them an `onFallback` that starts the same purchase as a
     redirect, so a blocked script never strands the buyer. When the buyer leaves the payment step
     (Edit, or the fallback), close the started checkout with `publicApi().cancelCheckout`.
+11. **Saving for later in PayPal's vault:** `setupPaypalMethod` in your action, `<PaypalCardFields>` or
+    `<PaypalSaveButton>` with the setup token, then `savePaypalMethod` with the id `onSaved` gives you;
+    store only the returned `paymentMethodId` (`paypal:…`). Pick where a new card goes with
+    `cardProcessorFor(amount)`, not by hand. Before `removeSavedMethod`, check nothing of yours (an open
+    bid) still relies on the method. Never send card numbers to your server: Card Fields keep them in PayPal's frames.

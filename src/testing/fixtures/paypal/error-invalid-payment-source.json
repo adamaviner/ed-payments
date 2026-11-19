@@ -1,0 +1,18 @@
+{
+  "_source": "PayPal sandbox 2026-11-19: a card whose check failed (name CCREJECT-REFUSED) at POST /v3/vault/setup-tokens, 422",
+  "name": "UNPROCESSABLE_ENTITY",
+  "message": "The requested action could not be performed, semantically incorrect, or failed business validation.",
+  "debug_id": "0000000000000",
+  "details": [
+    {
+      "issue": "INVALID_PAYMENT_SOURCE",
+      "description": "The provided payment source is not valid."
+    }
+  ],
+  "links": [
+    {
+      "href": "https://developer.paypal.com/docs/limited-release/payment-tokens/v3/api/#error-UNPROCESSABLE_ENTITY",
+      "method": "GET"
+    }
+  ]
+}

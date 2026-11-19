@@ -85,8 +85,11 @@ describe('saving a card or PayPal account in PayPal’s vault', () => {
     const bens = await t.action(api.bids.paypalSetup, { user: 'u2', kind: 'card' })
     pp.approveSetup(bens.setupTokenId)
     await expect(t.action(api.bids.paypalSave, { user: 'u1', setupTokenId: bens.setupTokenId })).rejects.toThrow(/couldn’t be used/)
-    const waiting = await t.action(api.bids.paypalSetup, { user: 'u1', kind: 'card' })
+    // A PayPal account still waiting on the buyer is refused here; a card PayPal never approved is refused by PayPal.
+    const waiting = await t.action(api.bids.paypalSetup, { user: 'u1', kind: 'paypal' })
     await expect(t.action(api.bids.paypalSave, { user: 'u1', setupTokenId: waiting.setupTokenId })).rejects.toThrow(/hasn’t approved/)
+    const unfinished = await t.action(api.bids.paypalSetup, { user: 'u1', kind: 'card' })
+    await expect(t.action(api.bids.paypalSave, { user: 'u1', setupTokenId: unfinished.setupTokenId })).rejects.toThrow(/couldn’t be verified/)
     await expect(save({ behaviour: 'unverified' })).rejects.toThrow(/couldn’t be verified/)
     await expect(t.action(api.bids.paypalSave, { user: 'u1', setupTokenId: 'bad id!' })).rejects.toThrow(/couldn’t be used/)
     expect(await t.action(api.bids.methods, { user: 'u1' })).toEqual([])

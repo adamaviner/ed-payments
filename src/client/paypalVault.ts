@@ -94,7 +94,8 @@ export async function savePaypalMethod(p: Payments, ctx: RunActionCtx, a: { owne
       throw err
     }
     if (setup.customer?.merchant_customer_id !== tag) throw new ConvexError(UNUSABLE)
-    if (setup.status !== 'APPROVED' && setup.status !== 'VAULTED') throw new ConvexError('PayPal hasn’t approved that payment method yet. Please try again.')
+    // Still with the buyer (PayPal's page, or 3-D Secure). Anything else is PayPal's to accept or refuse below.
+    if (setup.status === 'PAYER_ACTION_REQUIRED') throw new ConvexError('PayPal hasn’t approved that payment method yet. Please try again.')
     try {
       return await paypal.createPaymentToken(call, a.setupTokenId, `save-${a.setupTokenId}`)
     } catch (err) {
@@ -103,7 +104,9 @@ export async function savePaypalMethod(p: Payments, ctx: RunActionCtx, a: { owne
       throw err
     }
   })
-  if (token.payment_source?.card?.verification_status === 'FAILED') {
+  const checked = token.payment_source?.card?.verification_status
+  if (token.payment_source?.card && checked !== 'VERIFIED') console.warn(`payments: PayPal saved card ${token.id} with verification ${checked ?? 'not reported'}`)
+  if (checked === 'FAILED') {
     await p
       .withPaypal(ctx, (call) => paypal.deletePaymentToken(call, token.id))
       .catch((err: unknown) => console.warn(`payments: couldn’t delete unverified PayPal token ${token.id}: ${errorText(err)}`))

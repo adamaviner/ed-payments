@@ -61,6 +61,7 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
   let searchEnabled = search
   const setupTokens = new Map<string, SetupToken>()
   const vaultCharges: { vaultId: string; body: unknown }[] = []
+  const vaultOrders = new Set<string>()
   const vault = new Map<string, { id: string; customerId: string; merchantCustomerId: string; kind: 'card' | 'paypal'; behaviour: VaultBehaviour; source: SetupToken['source']; deleted?: boolean }>()
 
   const refundedOf = (captureId: string) =>
@@ -73,7 +74,7 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
       ...base.purchase_units[0],
       custom_id: o.customId,
       amount: { currency_code: 'USD', value: centsToDecimal(o.amountCents) },
-      ...(o.capture ? { payments: { captures: [o.capture] } } : {}),
+      ...(o.capture ? { payments: { captures: o.capture ? [o.capture] : [] } } : {}),
     }
     const links =
       o.status === 'PAYER_ACTION_REQUIRED'
@@ -185,11 +186,12 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
           custom_id: o.customId,
           // What the sandbox kept on a saved card: 2.59% + 49¢.
           seller_receivable_breakdown: { paypal_fee: { currency_code: 'USD', value: centsToDecimal(Math.round(cents * 0.0259) + 49) } },
-          supplementary_data: { related_ids: { order_id: o.id } },
+          links: [{ href: `${apiBase}/v2/checkout/orders/${o.id}`, rel: 'up', method: 'GET' }],
         }
         orders.set(o.id, o)
+        vaultOrders.add(o.id)
         vaultCharges.push({ vaultId, body })
-        return remember(orderJson(o), 201)
+        return remember(vaultOrderJson(o), 201)
       }
     }
     if (method === 'POST' && url.pathname === '/v2/checkout/orders') {
@@ -207,7 +209,7 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
     if (path[1] === 'checkout' && path[2] === 'orders' && path[3]) {
       const o = orders.get(path[3])
       if (!o) return issue(404, 'RESOURCE_NOT_FOUND', 'INVALID_RESOURCE_ID', 'Specified resource ID does not exist.')
-      if (method === 'GET') return ok(orderJson(o))
+      if (method === 'GET') return ok(vaultOrders.has(o.id) ? vaultOrderJson(o) : orderJson(o))
       if (path[4] === 'capture') {
         if (o.status === 'COMPLETED') return Response.json(fixture(paypalObjectFixtures.errorOrderAlreadyCaptured), { status: 422 })
         if (o.status !== 'APPROVED') return Response.json(fixture(paypalObjectFixtures.errorOrderNotApproved), { status: 422 })
@@ -258,6 +260,13 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
       return ok({ transaction_details: details, total_pages: 1, page: 1 })
     }
     return issue(404, 'NOT_FOUND', 'NOT_FOUND', `fakePaypal doesn’t know ${method} ${url.pathname}`)
+  }
+
+  /** An order on a saved method, as the sandbox answered one (vault-order-captured.json). */
+  function vaultOrderJson(o: Order): PaypalOrder {
+    const base = fixture(paypalObjectFixtures.vaultOrderCaptured) as unknown as PaypalOrder & { purchase_units: Record<string, unknown>[] }
+    const unit = { ...base.purchase_units[0], custom_id: o.customId, amount: { currency_code: 'USD', value: centsToDecimal(o.amountCents) }, payments: { captures: o.capture ? [o.capture] : [] } }
+    return { ...base, id: o.id, status: o.status, purchase_units: [unit], links: [{ href: `${apiBase}/v2/checkout/orders/${o.id}`, rel: 'self', method: 'GET' }] }
   }
 
   function setupJson(t: SetupToken) {
@@ -323,8 +332,8 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
     webhooks: () => [...webhooks.values()],
     calls,
     webhook,
-    order: (id: string) => orderJson(order(id)),
-    orders: () => [...orders.values()].map((o) => orderJson(o)),
+    order: (id: string) => (vaultOrders.has(id) ? vaultOrderJson(order(id)) : orderJson(order(id))),
+    orders: () => [...orders.values()].map((o) => (vaultOrders.has(o.id) ? vaultOrderJson(o) : orderJson(o))),
     refunds: () => [...refunds.values()],
     get tokens() {
       return tokens

@@ -40,11 +40,12 @@ export function forgetScripts() {
  * Loads a script once per address (every mount shares it); resolves once it has run. A failed load,
  * or one with no answer after GIVE_UP_MS, is forgotten, so a later mount tries again.
  */
-export function loadScript(src: string): Promise<void> {
+export function loadScript(src: string, attributes: Record<string, string> = {}): Promise<void> {
   const known = loading.get(src)
   if (known) return known
   const p = new Promise<void>((resolve, reject) => {
     const el = document.createElement('script')
+    for (const [name, value] of Object.entries(attributes)) el.setAttribute(name, value)
     const fail = () => {
       clearTimeout(timer)
       if (loading.get(src) === p) loading.delete(src)
@@ -104,7 +105,7 @@ function destroyPage(page: StripeEmbeddedPage | null) {
   }
 }
 
-type Load = 'loading' | 'slow' | 'ready' | 'failed'
+export type Load = 'loading' | 'slow' | 'ready' | 'failed'
 
 /** "Having trouble?" with the redirect, shown when the script is slow or failed. */
 function Fallback({ load, site, onFallback }: { load: Load; site: string; onFallback?: () => void }) {
@@ -120,7 +121,7 @@ function Fallback({ load, site, onFallback }: { load: Load; site: string; onFall
 }
 
 /** Marks the load slow after SLOW_MS unless it settled first. */
-function useSlow(load: Load, setLoad: (l: Load) => void) {
+export function useSlow(load: Load, setLoad: (l: Load) => void) {
   useEffect(() => {
     if (load !== 'loading') return undefined
     const t = setTimeout(() => setLoad('slow'), SLOW_MS)

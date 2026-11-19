@@ -4,7 +4,7 @@
 import { paidReturns, type PaidResult, type StartedEmbedded } from '@earthdance/payments'
 import { ConvexError, v } from 'convex/values'
 import { internal } from './_generated/api.js'
-import { action, internalMutation, internalQuery, mutation, type MutationCtx } from './_generated/server.js'
+import { action, internalMutation, internalQuery, mutation, query, type MutationCtx } from './_generated/server.js'
 import { payments } from './payments.js'
 
 const PRICE_CENTS = 2500
@@ -72,6 +72,45 @@ export const bidPaymentMethod = action({
   },
 })
 
+/**
+ * Saving a card in PayPal's vault instead, when PayPal is cheaper for this bid (cardProcessorFor):
+ * a setup token for PaypalCardFields (kind 'card') or PaypalSaveButton (kind 'paypal').
+ */
+export const paypalSetupToken = action({
+  args: { kind: v.union(v.literal('card'), v.literal('paypal')) },
+  handler: async (ctx, { kind }): Promise<{ setupTokenId: string; clientId: string }> => {
+    const me = await signedIn(ctx)
+    return await payments.setupPaypalMethod(ctx, { owner: { type: 'user', id: me.subject }, payer: { email: me.email ?? '' }, kind, description: 'Bids you win at the example auction' })
+  },
+})
+
+/** The bid form's choice for a bid of this amount: where a new card goes. */
+export const cardProcessor = query({
+  args: { amountCents: v.number() },
+  handler: async (_ctx, { amountCents }) => payments.cardProcessorFor(amountCents),
+})
+
+/** PayPal approved the setup token: save it, then place the bid with it. */
+export const placeBidWithPaypal = action({
+  args: { itemId: v.string(), amountCents: v.number(), setupTokenId: v.string() },
+  handler: async (ctx, a): Promise<null> => {
+    const me = await signedIn(ctx)
+    const method = await payments.savePaypalMethod(ctx, { owner: { type: 'user', id: me.subject }, setupTokenId: a.setupTokenId, payerEmail: me.email })
+    await ctx.runMutation(internal.shop.recordBid, { userId: me.subject, itemId: a.itemId, amountCents: a.amountCents, paymentMethodId: method.paymentMethodId })
+    return null
+  },
+})
+
+/** The bidder removes a saved card or account (the app first checks no open bid relies on it). */
+export const removeMethod = action({
+  args: { paymentMethodId: v.string() },
+  handler: async (ctx, { paymentMethodId }): Promise<null> => {
+    const me = await signedIn(ctx)
+    await payments.removeSavedMethod(ctx, { owner: { type: 'user', id: me.subject }, paymentMethodId })
+    return null
+  },
+})
+
 /** Places a bid with a method checked to be the bidder's own. */
 export const placeBid = action({
   args: { itemId: v.string(), amountCents: v.number(), paymentMethodId: v.string() },
@@ -119,6 +158,16 @@ export const retryBidPayment = action({
     const me = await signedIn(ctx)
     const checkoutId = await ctx.runQuery(internal.shop.retryableCheckout, { bidId, userId: me.subject })
     return { clientSecret: (await payments.retryOnSession(ctx, { checkoutId })).clientSecret }
+  },
+})
+
+/** The retry page's PayPal button: the same payment with PayPal's buttons (PaypalButtons). */
+export const retryBidWithPaypal = action({
+  args: { bidId: v.id('bids') },
+  handler: async (ctx, { bidId }): Promise<StartedEmbedded> => {
+    const me = await signedIn(ctx)
+    const checkoutId = await ctx.runQuery(internal.shop.retryableCheckout, { bidId, userId: me.subject })
+    return await payments.retryWithPaypal(ctx, { checkoutId, returnPath: `/bids/${bidId}/paid` })
   },
 })
 
