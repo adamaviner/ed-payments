@@ -181,7 +181,7 @@ export interface PaypalPaymentToken {
   id: string
   customer?: { id?: string; merchant_customer_id?: string }
   payment_source?: {
-    card?: { brand?: string; last_digits?: string; expiry?: string; verification_status?: 'VERIFIED' | 'FAILED' | string }
+    card?: { brand?: string; last_digits?: string; expiry?: string; /** VERIFIED or FAILED (the $0 check at saving). */ verification_status?: string }
     paypal?: { email_address?: string; payer_id?: string }
   }
 }

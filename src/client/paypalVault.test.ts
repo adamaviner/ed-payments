@@ -51,7 +51,7 @@ describe('saving a card or PayPal account in PayPal’s vault', () => {
     const { t, save } = setup()
     const { setupTokenId, clientId } = await t.action(api.bids.paypalSetup, { user: 'u1', kind: 'card' })
     expect(clientId).toBe('fake-client')
-    const body = pp.calls.find((c) => c.path === '/v3/vault/setup-tokens')!.body as Record<string, any>
+    const body = pp.calls.find((c) => c.path === '/v3/vault/setup-tokens')!.body
     expect(body).toEqual({
       customer: { merchant_customer_id: 'test.user.u1' },
       payment_source: {
@@ -71,7 +71,7 @@ describe('saving a card or PayPal account in PayPal’s vault', () => {
     vi.advanceTimersByTime(60_000)
     const account = await save({ kind: 'paypal' })
     expect(account).toMatchObject({ kind: 'paypal', label: 'PayPal (buyer@example.org)', processor: 'paypal' })
-    const second = pp.calls.filter((c) => c.path === '/v3/vault/setup-tokens')[1].body as Record<string, any>
+    const second = pp.calls.filter((c) => c.path === '/v3/vault/setup-tokens')[1].body as { customer: { id?: string }; payment_source: { paypal?: unknown } }
     expect(second.customer.id).toMatch(/^FAKECUST/)
     expect(second.payment_source.paypal).toMatchObject({ usage_type: 'MERCHANT', usage_pattern: 'UNSCHEDULED_POSTPAID', permit_multiple_payment_tokens: true })
 
@@ -136,7 +136,7 @@ describe('charging a PayPal method with nobody present', () => {
     const account = await save({ kind: 'paypal' })
     const id = await charge(account.paymentMethodId)
     expect(await status(id)).toMatchObject({ status: 'paid', method: 'paypal' })
-    expect((pp.vaultCharges[0].body as Record<string, any>).payment_source).toEqual({ paypal: { vault_id: account.paymentMethodId.slice('paypal:'.length) } })
+    expect((pp.vaultCharges[0].body as { payment_source: unknown }).payment_source).toEqual({ paypal: { vault_id: account.paymentMethodId.slice('paypal:'.length) } })
   })
 
   test.each(['decline', 'captureDeclined'] as const)('%s: failed with declined, and the method is marked so it isn’t offered again', async (behaviour) => {
