@@ -33,6 +33,7 @@ import { accountFingerprint, decryptToken, encryptToken } from '../core/tokenCry
 import { ProcessorError, isMethodFor, tagFor, type Fetch, type Method, type Payer, type Processor, type Ref } from '../core/types.js'
 import { adminApi, publicApi, worker, type AdminApiOptions } from './api.js'
 import { mismatch } from './context.js'
+import { paypalHistory, type PaypalHistory, type PaypalHistoryArgs, type PaypalHistoryLine } from './paypalHistory.js'
 import { reconcile, type ReconcileResult } from './reconcile.js'
 import {
   chargeNow,
@@ -52,7 +53,7 @@ import { errorText, paypalRefundState, stripeRefundState } from './util.js'
 import { callbackArgs, paidReturns, type Dispute, type Failed, type IssuesDigest, type Paid, type PaidResult, type Processing, type RefundNeeded, type Refunded } from './validators.js'
 import { handlePaypalWebhook, handleStripeWebhook, type UnhandledStripeEvent } from './webhooks.js'
 
-export type { ComponentApi, ReconcileResult, UnhandledStripeEvent, SavedMethod, VerifiedMethod, AdminApiOptions }
+export type { ComponentApi, PaypalHistory, PaypalHistoryArgs, PaypalHistoryLine, ReconcileResult, UnhandledStripeEvent, SavedMethod, VerifiedMethod, AdminApiOptions }
 export * from './validators.js'
 export { fromEnv, isLive, stripeProblems, paypalProblems, type KeySource, type Problem } from './env.js'
 export { PAYPAL_LIVE_API, PAYPAL_SANDBOX_API }
@@ -1019,6 +1020,15 @@ export class Payments<C extends GenericValidator = GenericValidator> {
    */
   async reconcile(ctx: RunActionCtx, o: { days?: number } = {}): Promise<ReconcileResult> {
     return await reconcile(this, ctx, o.days ?? 3)
+  }
+
+  /**
+   * The PayPal account's history for one email, newest first: every transaction in the range whose
+   * other party is that address (payments in, refunds and payments out), not only this library's.
+   * Needs Transaction Search on the REST app; PayPal keeps three years, and is up to three hours late.
+   */
+  async paypalHistory(ctx: RunActionCtx, a: PaypalHistoryArgs): Promise<PaypalHistory> {
+    return await paypalHistory(this, ctx, a)
   }
 
   /** Nightly: deletes what isn't kept (see the component's maintenance.ts), a batch at a time; call again while `more`. */

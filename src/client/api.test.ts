@@ -44,6 +44,7 @@ describe('adminApi', () => {
     ['resolveIssue', (t, auth) => t.mutation(api.payments.resolveIssue, { auth, issueId: 'x' })],
     ['retryCharge', (t, auth) => t.mutation(api.payments.retryCharge, { auth, checkoutId: 'x' })],
     ['giveUpCharge', (t, auth) => t.action(api.payments.giveUpCharge, { auth, checkoutId: 'x' })],
+    ['paypalHistory', (t, auth) => t.action(api.payments.paypalHistory, { auth, email: 'a@b.org', start: 0, end: Date.now() })],
   ]
 
   test('every generated admin function is listed here', () => {

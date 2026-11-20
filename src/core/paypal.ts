@@ -468,6 +468,144 @@ export async function searchTransactions(c: Call, q: { start: number; end: numbe
   return { transactions, totalPages: res.total_pages ?? 1 }
 }
 
+/** One line of the PayPal account's history, with the other party (PayPal calls them the payer, whichever way the money went). */
+export interface PaypalActivity {
+  transactionId: string
+  /** When it was made (ms). */
+  at: number
+  eventCode: string
+  /** The event code in words ("Website payment", "Refund"). */
+  type: string
+  /** in: money to the account; out: money from it (refunds, payments sent). */
+  direction: 'in' | 'out'
+  /** Signed, as PayPal reports it: negative is money out. */
+  amountCents: number
+  /** PayPal's fee, signed (negative is a fee taken); null when none. */
+  feeCents: number | null
+  currency: string
+  /** S success, P pending, V reversed, D denied. */
+  status: string
+  name: string | null
+  /** Lower-cased. */
+  email: string | null
+  subject: string | null
+  note: string | null
+  /** Item names from the cart, in order. */
+  items: string[]
+  invoiceId: string | null
+  customField: string | null
+  /** The transaction this one refers to (a refund's payment). */
+  referenceId: string | null
+}
+
+const EVENT_TYPES: Record<string, string> = {
+  T0000: 'Payment',
+  T0001: 'Mass payment',
+  T0002: 'Subscription payment',
+  T0003: 'Pre-approved payment',
+  T0005: 'Card payment',
+  T0006: 'Checkout payment',
+  T0007: 'Website payment',
+  T0011: 'Mobile payment',
+  T0012: 'Virtual terminal payment',
+  T0013: 'Donation',
+  T1106: 'Payment reversal',
+  T1107: 'Refund',
+  T1110: 'Hold for dispute',
+  T1111: 'Dispute hold released',
+  T1201: 'Chargeback',
+}
+
+const EVENT_GROUPS: Record<string, string> = {
+  T00: 'Payment',
+  T01: 'Fee',
+  T03: 'Bank deposit',
+  T04: 'Bank withdrawal',
+  T11: 'Reversal',
+  T12: 'Adjustment',
+  T15: 'Hold',
+  T21: 'Reserve',
+  T22: 'Transfer',
+}
+
+/** A Transaction Search event code in words: the code itself when PayPal's list has nothing plainer. */
+export const paypalEventType = (code: string) => EVENT_TYPES[code] ?? EVENT_GROUPS[code.slice(0, 3)] ?? code
+
+/** "-12.34" → -1234; null when it isn't money. */
+const signedCents = (value: string | undefined) => {
+  const v = value?.trim()
+  const cents = decimalToCents(v?.replace(/^-/, ''))
+  return cents === null || v === undefined ? null : v.startsWith('-') ? -cents : cents
+}
+
+/** PayPal's "2026-11-01T12:00:00+0000" → ms. */
+const paypalTime = (s: string | undefined) => (s ? Date.parse(s.replace(/([+-]\d\d)(\d\d)$/, '$1:$2')) : NaN)
+
+interface PaypalTransactionDetail {
+  transaction_info?: {
+    transaction_id?: string
+    transaction_event_code?: string
+    transaction_initiation_date?: string
+    transaction_amount?: PaypalMoney
+    fee_amount?: PaypalMoney
+    transaction_status?: string
+    transaction_subject?: string
+    transaction_note?: string
+    invoice_id?: string
+    custom_field?: string
+    paypal_reference_id?: string
+  }
+  payer_info?: { email_address?: string; payer_name?: { alternate_full_name?: string; given_name?: string; surname?: string } }
+  cart_info?: { item_details?: { item_name?: string }[] }
+}
+
+const payerName = (n: NonNullable<PaypalTransactionDetail['payer_info']>['payer_name']) => n?.alternate_full_name?.trim() || [n?.given_name, n?.surname].filter(Boolean).join(' ').trim() || null
+
+function toActivity(d: PaypalTransactionDetail): PaypalActivity[] {
+  const t = d.transaction_info
+  const amountCents = signedCents(t?.transaction_amount?.value)
+  const at = paypalTime(t?.transaction_initiation_date)
+  if (!t?.transaction_id || amountCents === null || Number.isNaN(at)) return []
+  const code = t.transaction_event_code ?? ''
+  return [
+    {
+      transactionId: t.transaction_id,
+      at,
+      eventCode: code,
+      type: paypalEventType(code),
+      direction: amountCents < 0 ? 'out' : 'in',
+      amountCents,
+      feeCents: signedCents(t.fee_amount?.value),
+      currency: t.transaction_amount?.currency_code ?? 'USD',
+      status: t.transaction_status ?? '',
+      name: payerName(d.payer_info?.payer_name),
+      email: d.payer_info?.email_address?.trim().toLowerCase() || null,
+      subject: t.transaction_subject || null,
+      note: t.transaction_note || null,
+      items: (d.cart_info?.item_details ?? []).flatMap((i) => (i.item_name ? [i.item_name] : [])),
+      invoiceId: t.invoice_id || null,
+      customField: t.custom_field || null,
+      referenceId: t.paypal_reference_id || null,
+    },
+  ]
+}
+
+/**
+ * Transaction Search with the other party and cart, one page: the whole account's history, not only
+ * this library's payments. Same limits as searchTransactions (the permission, 31-day windows, three
+ * hours late), and PayPal keeps three years. It can't filter by email: callers filter what comes back.
+ */
+export async function searchActivity(c: Call, q: { start: number; end: number; page: number }): Promise<{ activity: PaypalActivity[]; totalPages: number }> {
+  const iso = (ms: number) => new Date(ms).toISOString().replace(/\.\d+Z$/, 'Z')
+  const query = `start_date=${iso(q.start)}&end_date=${iso(q.end)}&fields=transaction_info,payer_info,cart_info&page_size=500&page=${q.page}`
+  const res = await paypalCall<{ transaction_details?: PaypalTransactionDetail[]; total_pages?: number }>(c.apiBase, c.token, 'GET', `/v1/reporting/transactions?${query}`, undefined, opts(c))
+  return { activity: (res.transaction_details ?? []).flatMap(toActivity), totalPages: res.total_pages ?? 1 }
+}
+
+/** The transaction on PayPal's own site, for an admin to open. */
+export const paypalActivityUrl = (apiBase: string, transactionId: string) =>
+  `${apiBase.includes('sandbox') ? 'https://www.sandbox.paypal.com' : 'https://www.paypal.com'}/activity/payment/${encodeURIComponent(transactionId)}`
+
 /**
  * The id the library gives a method saved in PayPal's vault, `paypal:<payment token id>`, so one
  * `paymentMethodId` names either processor's methods (Stripe's start `pm_`).
