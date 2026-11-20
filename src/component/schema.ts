@@ -153,7 +153,7 @@ export default defineSchema({
   /**
    * Cards and PayPal accounts saved in PayPal's vault. Unlike Stripe's, these rows are the list the
    * library offers: PayPal's own list of a customer's methods lags (a method saved seconds ago is
-   * missing, a deleted one still shown; seen in the sandbox 2026-11-19). A removed method's row is deleted.
+   * missing, a deleted one still shown; seen in the sandbox 2026-11-19). A removed method's row stays, marked.
    */
   paypalMethods: defineTable({
     customerId: v.id('paypalCustomers'),
@@ -163,6 +163,8 @@ export default defineSchema({
     label: v.string(),
     declinedAt: v.optional(v.number()),
     declineReason: v.optional(v.string()),
+    /** The owner removed it (deleted from PayPal's vault); kept so a charge of it fails instead of erring, and it can't be saved again. */
+    removedAt: v.optional(v.number()),
     createdAt: v.number(),
   })
     .index('by_customer', ['customerId'])

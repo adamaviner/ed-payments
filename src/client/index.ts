@@ -499,7 +499,14 @@ export class Payments<C extends GenericValidator = GenericValidator> {
       })
     }
     if (capture.status === 'PENDING') return await ctx.runMutation(this.component.checkouts.markProcessing, { id: checkoutId, paymentRef: capture.id, now: Date.now() })
-    return await ctx.runMutation(this.component.checkouts.settleFailed, { id: checkoutId, reason: `PayPal ${capture.status.toLowerCase()} the payment.`, now: Date.now() })
+    // A saved method's charge declined later (a pending capture, then PAYMENT.CAPTURE.DECLINED) marks the method too.
+    const c = await ctx.runQuery(this.component.checkouts.get, { id: checkoutId })
+    return await ctx.runMutation(this.component.checkouts.settleFailed, {
+      id: checkoutId,
+      reason: `PayPal ${capture.status.toLowerCase()} the payment.`,
+      declined: c?.kind === 'offSession' || undefined,
+      now: Date.now(),
+    })
   }
 
   /**

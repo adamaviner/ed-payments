@@ -199,7 +199,7 @@ export const noteChargeAttempt = mutation({
         checkoutId: c._id,
         processor: c.processor,
         paymentRef: ref,
-        detail: `The charge of ${dollarsOf(c.amountCents)} for ${c.description} may or may not have gone through (${error}). Retry it (Stripe replays it rather than charging twice) or give up on it.`,
+        detail: `The charge of ${dollarsOf(c.amountCents)} for ${c.description} may or may not have gone through (${error}). Retry it (${c.processor === 'paypal' ? 'PayPal refuses a second payment for the same charge' : 'Stripe replays it rather than charging twice'}) or give up on it.`,
         now,
       })
     }

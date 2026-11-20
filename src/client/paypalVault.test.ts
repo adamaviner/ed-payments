@@ -220,3 +220,56 @@ test('a card goes to whichever processor costs less at the app’s rates', async
   expect(await t.query(api.bids.cardProcessor, { amountCents: 1000 })).toEqual({ processor: 'stripe', feeCents: { stripe: 59, paypal: 69 } })
   expect(await t.query(api.bids.cardProcessor, { amountCents: 10_000 })).toEqual({ processor: 'paypal', feeCents: { stripe: 320, paypal: 248 } })
 })
+
+describe('after the review', () => {
+  test('a PayPal retry approved but declined at capture doesn’t block switching to Stripe', async () => {
+    const { t, status, save, charge } = setup()
+    const card = await save()
+    pp.setVaultBehaviour(card.paymentMethodId.slice('paypal:'.length), 'decline')
+    const declined = await charge(card.paymentMethodId)
+    const viaPaypal = await t.action(api.bids.retryPaypal, { checkoutId: declined })
+    pp.approve(viaPaypal.embedded.orderId)
+    pp.declineNextCapture()
+    expect(await t.action(api.payments.completeReturn, { processor: 'paypal', token: viaPaypal.embedded.orderId })).toMatchObject({ declined: true })
+    const viaStripe = await t.action(api.bids.retry, { checkoutId: declined })
+    expect(viaStripe.clientSecret).toMatch(/_secret_/)
+    expect(await status(viaPaypal.checkoutId)).toMatchObject({ status: 'abandoned' })
+  })
+
+  test('a charge retried after PayPal forgot its request id is refused by the invoice id, not charged twice', async () => {
+    const { status, save, charge } = setup()
+    const card = await save()
+    const id = await charge(card.paymentMethodId)
+    expect(await status(id)).toMatchObject({ status: 'paid' })
+    // As if the first answer never arrived and the same charge was sent again the next day.
+    pp.forgetRequestIds()
+    expect((pp.vaultCharges[0].body as { purchase_units: { invoice_id: string }[] }).purchase_units[0].invoice_id).toBe(`test:${id}`)
+    const res = await pp.fetch('https://api-m.sandbox.paypal.com/v2/checkout/orders', { method: 'POST', body: JSON.stringify(pp.vaultCharges[0].body) })
+    expect(res.status).toBe(422)
+    expect(pp.vaultCharges).toHaveLength(1)
+  })
+
+  test('a pending capture declined later marks the method declined', async () => {
+    const { t, status, save, charge } = setup()
+    const card = await save()
+    pp.setVaultBehaviour(card.paymentMethodId.slice('paypal:'.length), 'pending')
+    const id = await charge(card.paymentMethodId)
+    const order = pp.orders().find((o) => o.purchase_units?.[0]?.custom_id === `test:${id}`)!
+    const capture = order.purchase_units![0].payments!.captures![0]
+    await t.fetch('/paypal/webhook', pp.event('PAYMENT.CAPTURE.DECLINED', { ...capture, status: 'DECLINED' }))
+    expect(await status(id)).toMatchObject({ status: 'failed' })
+    expect(await t.action(api.bids.methods, { user: 'u1' })).toMatchObject([{ declined: true }])
+  })
+
+  test('a removed method charged anyway fails as declined instead of erring, and can’t be saved again', async () => {
+    const { t, status, charge } = setup()
+    const { setupTokenId } = await t.action(api.bids.paypalSetup, { user: 'u1', kind: 'card' })
+    pp.approveSetup(setupTokenId)
+    const card = await t.action(api.bids.paypalSave, { user: 'u1', setupTokenId })
+    await t.action(api.bids.remove, { user: 'u1', paymentMethodId: card.paymentMethodId })
+    const id = await charge(card.paymentMethodId)
+    expect(await status(id)).toMatchObject({ status: 'failed', lastError: expect.stringMatching(/removed/) })
+    expect(pp.vaultCharges).toHaveLength(0)
+    await expect(t.action(api.bids.paypalSave, { user: 'u1', setupTokenId })).rejects.toThrow(/couldn’t be used/)
+  })
+})

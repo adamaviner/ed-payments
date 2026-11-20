@@ -124,6 +124,8 @@ export async function savePaypalMethod(p: Payments, ctx: RunActionCtx, a: { owne
     label: what.label,
     now: Date.now(),
   })
+  // The same setup token saved again after the method was removed: PayPal has deleted it.
+  if (saved.removed) throw new ConvexError(UNUSABLE)
   return viewOf(saved)
 }
 
@@ -136,7 +138,7 @@ export async function paypalMethods(p: Payments, ctx: RunActionCtx, owner: Ref):
 export async function verifyPaypalOwner(p: Payments, ctx: RunActionCtx, owner: Ref, paymentMethodId: string): Promise<SavedMethod & { customerId: string }> {
   const tokenId = paypalTokenOf(paymentMethodId)
   const found = tokenId ? await ctx.runQuery(p.component.customers.paypalMethod, { paymentTokenId: tokenId }) : null
-  if (!found || found.app !== p.app || found.owner.type !== owner.type || found.owner.id !== owner.id) throw new ConvexError(UNUSABLE)
+  if (!found || found.method.removed || found.app !== p.app || found.owner.type !== owner.type || found.owner.id !== owner.id) throw new ConvexError(UNUSABLE)
   return { ...viewOf(found.method), customerId: found.paypalCustomerId }
 }
 
@@ -150,7 +152,7 @@ export async function removePaypalMethod(p: Payments, ctx: RunActionCtx, payment
       if (!(err instanceof ProcessorError && err.status === 404)) throw err
     }
   })
-  await ctx.runMutation(p.component.customers.removePaypalMethod, { paymentTokenId: tokenId })
+  await ctx.runMutation(p.component.customers.removePaypalMethod, { paymentTokenId: tokenId, now: Date.now() })
 }
 
 const declinedIssue = (err: unknown): err is ProcessorError => err instanceof ProcessorError && err.processor === 'paypal' && err.status === 422 && !!err.code && PAYPAL_DECLINE_ISSUES.has(err.code)
@@ -185,6 +187,11 @@ async function settleCharge(p: Payments, ctx: RunActionCtx, c: Checkout, order: 
 export async function chargePaypalNow(p: Payments, ctx: RunActionCtx & { scheduler: Scheduler }, c: Checkout, note: (error: string, retry: boolean, orderId?: string) => Promise<void>): Promise<void> {
   const tokenId = c.paymentMethodId ? paypalTokenOf(c.paymentMethodId) : null
   if (!tokenId || !c.chargeKey) return await note('The charge is missing its PayPal payment method.', false)
+  const saved = await ctx.runQuery(p.component.customers.paypalMethod, { paymentTokenId: tokenId })
+  if (saved?.method.removed) {
+    await ctx.runMutation(p.component.checkouts.settleFailed, { id: c.id, reason: 'The payer removed this payment method.', declined: true, now: Date.now() })
+    return
+  }
   let order: PaypalOrder
   try {
     const requestId = await chargeRequestId(c.chargeKey)
@@ -196,6 +203,9 @@ export async function chargePaypalNow(p: Payments, ctx: RunActionCtx & { schedul
       ),
     )
   } catch (err) {
+    // The same charge paid before, under a request id PayPal has since forgotten: a person looks in PayPal.
+    if (err instanceof ProcessorError && err.code === 'DUPLICATE_INVOICE_ID')
+      return await note('PayPal already has a payment for this charge (duplicate invoice id); look it up in PayPal before doing anything.', false)
     if (declinedIssue(err)) {
       await ctx.runMutation(p.component.checkouts.settleFailed, { id: c.id, reason: err.message, declined: true, now: Date.now() })
       return

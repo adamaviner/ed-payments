@@ -85,6 +85,8 @@ export function PaypalCardFields({ clientId, createSetupToken, onSaved, submitLa
   const expiryBox = useRef<HTMLDivElement>(null)
   const cvvBox = useRef<HTMLDivElement>(null)
   const fields = useRef<CardFieldsInstance | null>(null)
+  // What onSaved threw, in case PayPal reports it to onError instead of rejecting submit().
+  const saveError = useRef<unknown>(null)
   const [load, setLoad] = useState<Load>('loading')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -106,7 +108,12 @@ export function PaypalCardFields({ clientId, createSetupToken, onSaved, submitLa
           style: FIELD_STYLE,
           createVaultSetupToken: () => latest.current.createSetupToken(),
           onApprove: async ({ vaultSetupToken }) => {
-            await latest.current.onSaved(vaultSetupToken)
+            try {
+              await latest.current.onSaved(vaultSetupToken)
+            } catch (err) {
+              saveError.current = err
+              throw err
+            }
           },
           onError: (err) => console.error('payments: PayPal card fields:', err),
         })
@@ -143,12 +150,14 @@ export function PaypalCardFields({ clientId, createSetupToken, onSaved, submitLa
     if (!fields.current || busy) return
     setBusy(true)
     setError(null)
+    saveError.current = null
     try {
       // PayPal calls createVaultSetupToken, checks the card (a 3-D Secure window if the bank wants
       // one), then onApprove, which runs onSaved; a problem anywhere rejects here.
       await fields.current.submit()
+      if (saveError.current) setError(messageOf(saveError.current) ?? 'The card couldn’t be saved. Please try again.')
     } catch (err) {
-      setError(messageOf(err) ?? 'The card couldn’t be saved. Check the details and try again.')
+      setError(messageOf(saveError.current ?? err) ?? 'The card couldn’t be saved. Check the details and try again.')
     } finally {
       setBusy(false)
     }

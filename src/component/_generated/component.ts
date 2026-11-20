@@ -774,6 +774,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             kind: "card" | "paypal";
             label: string;
             paymentTokenId: string;
+            removed: boolean;
           };
           owner: { id: string; type: string };
           paypalCustomerId: string;
@@ -791,6 +792,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           kind: "card" | "paypal";
           label: string;
           paymentTokenId: string;
+          removed: boolean;
         }>,
         Name
       >;
@@ -804,7 +806,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
       removePaypalMethod: FunctionReference<
         "mutation",
         "internal",
-        { paymentTokenId: string },
+        { now: number; paymentTokenId: string },
         null,
         Name
       >;
@@ -862,6 +864,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           kind: "card" | "paypal";
           label: string;
           paymentTokenId: string;
+          removed: boolean;
         },
         Name
       >;

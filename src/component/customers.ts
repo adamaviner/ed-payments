@@ -118,6 +118,7 @@ const paypalMethodView = v.object({
   label: v.string(),
   declined: v.boolean(),
   declineReason: v.union(v.string(), v.null()),
+  removed: v.boolean(),
   createdAt: v.number(),
 })
 
@@ -127,6 +128,7 @@ const paypalMethodViewOf = (m: Doc<'paypalMethods'>) => ({
   label: m.label,
   declined: m.declinedAt !== undefined,
   declineReason: m.declineReason ?? null,
+  removed: m.removedAt !== undefined,
   createdAt: m.createdAt,
 })
 
@@ -144,7 +146,7 @@ export const paypalCustomer = query({
   handler: async (ctx, { app, owner }) => (await findPaypal(ctx, app, owner))?.paypalCustomerId ?? null,
 })
 
-/** The owner's saved PayPal methods, newest first. */
+/** The owner's saved PayPal methods, newest first, without removed ones. */
 export const paypalMethods = query({
   args: { app: v.string(), owner: ref },
   returns: v.array(paypalMethodView),
@@ -156,7 +158,7 @@ export const paypalMethods = query({
       .withIndex('by_customer', (q) => q.eq('customerId', c._id))
       .order('desc')
       .take(50)
-    return rows.map(paypalMethodViewOf)
+    return rows.filter((m) => m.removedAt === undefined).map(paypalMethodViewOf)
   },
 })
 
@@ -192,16 +194,16 @@ export const savePaypalMethod = mutation({
   },
 })
 
-/** The owner removed a PayPal method (deleted from PayPal's vault first). */
+/** The owner removed a PayPal method (deleted from PayPal's vault first): marked, never offered again. */
 export const removePaypalMethod = mutation({
-  args: { paymentTokenId: v.string() },
+  args: { paymentTokenId: v.string(), now: v.number() },
   returns: v.null(),
-  handler: async (ctx, { paymentTokenId }) => {
+  handler: async (ctx, { paymentTokenId, now }) => {
     const row = await ctx.db
       .query('paypalMethods')
       .withIndex('by_paymentTokenId', (q) => q.eq('paymentTokenId', paymentTokenId))
       .first()
-    if (row) await ctx.db.delete(row._id)
+    if (row && row.removedAt === undefined) await ctx.db.patch(row._id, { removedAt: now })
     return null
   },
 })

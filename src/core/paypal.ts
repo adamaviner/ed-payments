@@ -250,7 +250,14 @@ export interface VaultChargeInput {
  * charge of a stored card (the card networks require it; PayPal fills in the earlier transaction).
  */
 export function vaultChargeBody(i: VaultChargeInput) {
-  const unit = { custom_id: i.customId, description: i.description.slice(0, 127) || 'Payment', amount: { currency_code: 'USD', value: centsToDecimal(i.amountCents) } }
+  // invoice_id too: PayPal refuses a second payment with the same one (DUPLICATE_INVOICE_ID, seen in the
+  // sandbox), so a retry after PayPal has forgotten the request id can't charge twice.
+  const unit = {
+    custom_id: i.customId,
+    invoice_id: i.customId.slice(0, 127),
+    description: i.description.slice(0, 127) || 'Payment',
+    amount: { currency_code: 'USD', value: centsToDecimal(i.amountCents) },
+  }
   const payment_source =
     i.kind === 'card' ? { card: { vault_id: i.vaultId, stored_credential: { payment_initiator: 'MERCHANT', payment_type: 'UNSCHEDULED', usage: 'SUBSEQUENT' } } } : { paypal: { vault_id: i.vaultId } }
   return { intent: 'CAPTURE', purchase_units: [unit], payment_source }

@@ -62,6 +62,8 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
   const setupTokens = new Map<string, SetupToken>()
   const vaultCharges: { vaultId: string; body: unknown }[] = []
   const vaultOrders = new Set<string>()
+  /** Invoice ids of payments made, refused a second time as PayPal's default account setting does. */
+  const invoices = new Set<string>()
   const vault = new Map<string, { id: string; customerId: string; merchantCustomerId: string; kind: 'card' | 'paypal'; behaviour: VaultBehaviour; source: SetupToken['source']; deleted?: boolean }>()
 
   const refundedOf = (captureId: string) =>
@@ -165,7 +167,15 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
       return new Response(null, { status: 204 })
     }
     if (method === 'POST' && url.pathname === '/v2/checkout/orders' && (body as { payment_source?: { card?: { vault_id?: string }; paypal?: { vault_id?: string } } }).payment_source) {
-      const b = body as { purchase_units: { custom_id: string; amount: { value: string } }[]; payment_source: { card?: { vault_id?: string }; paypal?: { vault_id?: string } } }
+      const b = body as { purchase_units: { custom_id: string; invoice_id?: string; amount: { value: string } }[]; payment_source: { card?: { vault_id?: string }; paypal?: { vault_id?: string } } }
+      const invoice = b.purchase_units[0].invoice_id
+      if (invoice && invoices.has(invoice))
+        return issue(
+          422,
+          'UNPROCESSABLE_ENTITY',
+          'DUPLICATE_INVOICE_ID',
+          'Duplicate Invoice ID detected. To avoid a potential duplicate transaction your account setting requires that Invoice Id be unique for each transaction.',
+        )
       const vaultId = b.payment_source.card?.vault_id ?? b.payment_source.paypal?.vault_id
       if (vaultId) {
         const v = vault.get(vaultId)
@@ -190,6 +200,7 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
         }
         orders.set(o.id, o)
         vaultOrders.add(o.id)
+        if (invoice) invoices.add(invoice)
         vaultCharges.push({ vaultId, body })
         return remember(vaultOrderJson(o), 201)
       }
@@ -370,6 +381,10 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
     vault: () => [...vault.values()],
     /** Orders made on saved methods, with what was asked. */
     vaultCharges,
+    /** Forgets the request ids it would replay, as PayPal does after some hours. */
+    forgetRequestIds() {
+      replies.clear()
+    },
     /** Makes a saved method behave differently from now on. */
     setVaultBehaviour(tokenId: string, behaviour: VaultBehaviour) {
       const v = vault.get(tokenId)
