@@ -21,7 +21,9 @@ import {
   paypal,
   paypalToken,
   refundCaptureId,
+  searchActivity,
   searchTransactions,
+  paypalEventType,
   sessionExpiry,
   sessionParams,
   sessionState,
@@ -341,5 +343,66 @@ describe('PayPal', () => {
     expect(r.calls[0].url).toContain('start_date=2030-01-01T00:00:00Z&end_date=2030-01-04T00:00:00Z')
     const denied = recorder(() => Response.json(fixture(paypalObjectFixtures.transactionSearchNotAuthorized), { status: 403 }))
     await expect(searchTransactions(call(denied.fetch), { start: 0, end: 1, page: 1 })).rejects.toMatchObject({ status: 403, code: 'NOT_AUTHORIZED' })
+  })
+
+  test('searchActivity: the other party, cart and fee, as the live API answers (dates with +0000)', async () => {
+    const r = recorder(() =>
+      Response.json({
+        transaction_details: [
+          {
+            transaction_info: {
+              transaction_id: 'TX1',
+              transaction_event_code: 'T0006',
+              transaction_initiation_date: '2030-01-02T15:04:05+0000',
+              transaction_amount: { currency_code: 'USD', value: '50.00' },
+              fee_amount: { currency_code: 'USD', value: '-1.49' },
+              transaction_status: 'S',
+              invoice_id: 'INV-1',
+              custom_field: 'market:k1',
+            },
+            payer_info: { email_address: 'Ann@Example.org', payer_name: { given_name: 'Ann', surname: 'Lee' } },
+            cart_info: { item_details: [{ item_name: 'Workshop pass' }, {}] },
+          },
+          {
+            transaction_info: {
+              transaction_id: 'TX2',
+              transaction_event_code: 'T0005',
+              transaction_initiation_date: '2030-01-03T00:00:00+0000',
+              transaction_amount: { currency_code: 'USD', value: '20.00' },
+              transaction_status: 'S',
+            },
+            payer_info: { payer_name: { alternate_full_name: 'Guest Card' } },
+          },
+          { transaction_info: { transaction_id: 'NODATE', transaction_amount: { currency_code: 'USD', value: '1.00' } } },
+        ],
+        total_pages: 3,
+      }),
+    )
+    const found = await searchActivity(call(r.fetch), { start: Date.UTC(2030, 0, 1), end: Date.UTC(2030, 0, 4), page: 2 })
+    expect(found.totalPages).toBe(3)
+    expect(found.activity).toEqual([
+      {
+        transactionId: 'TX1',
+        at: Date.UTC(2030, 0, 2, 15, 4, 5),
+        eventCode: 'T0006',
+        type: 'Checkout payment',
+        direction: 'in',
+        amountCents: 5000,
+        feeCents: -149,
+        currency: 'USD',
+        status: 'S',
+        name: 'Ann Lee',
+        email: 'ann@example.org',
+        subject: null,
+        note: null,
+        items: ['Workshop pass'],
+        invoiceId: 'INV-1',
+        customField: 'market:k1',
+        referenceId: null,
+      },
+      expect.objectContaining({ transactionId: 'TX2', type: 'Card payment', name: 'Guest Card', email: null, feeCents: null, items: [] }),
+    ])
+    expect(r.calls[0].url).toContain('fields=transaction_info,payer_info,cart_info&page_size=500&page=2')
+    expect([paypalEventType('T1107'), paypalEventType('T0399'), paypalEventType('T9999')]).toEqual(['Refund', 'Bank deposit', 'T9999'])
   })
 })

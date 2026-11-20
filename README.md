@@ -81,6 +81,7 @@ payments.registerCrons(crons) // sweep every 10 minutes; reconcile, issues diges
 // convex/paymentsAdmin.ts (Convex registers only top-level exports, so they are named)
 export const { openRefunds, refundable, issues, openCount, checkout, requestRefund, approveRefund, sendRefund, markRefundedManually, dismissRefund, resolveIssue, retryCharge, giveUpCharge } =
   payments.adminApi({ skipApproval: true })
+// optional: export paypalHistory too, for an admin page searching PayPal by email (see API)
 ```
 
 **5. Take payments** from your own actions, priced on the server:
@@ -402,6 +403,7 @@ AGENTS.md      the rules for apps that use it (shipped in the package)
 | `status` / `get`, `forRef`, `byPaymentRef`, `list`, `refundable`                        | query           | Checkouts (`refundable` is paged and indexed).                                                                         |
 | `requestRefund`, `approveRefund`, `markRefundedManually`, `dismissRefund`, `sendRefund` | mutation/action | The ledger; `by` is recorded.                                                                                          |
 | `openRefunds`, `refundsFor`, `refund`, `issues`, `openIssueCount`, `resolveIssue`       | query/mutation  | Refunds and issues.                                                                                                    |
+| `paypalHistory(ctx, { email, start, end })`                                             | action          | The PayPal account's whole history (not only this library's) with that address as the other party, newest first.       |
 | `registerRoutes(http, { onUnhandledStripeEvent })`, `registerCrons(crons)`              | –               | Routes (when keys exist; start-up checks) and crons.                                                                   |
 | `worker()`, `adminApi({ skipApproval })`, `publicApi()`                                 | –               | Functions for the app to export (see step 4).                                                                          |
 | `sweep`, `reconcile`, `cleanup`, `issuesDigest`                                         | action/mutation | The upkeep the crons run.                                                                                              |
@@ -410,6 +412,15 @@ AGENTS.md      the rules for apps that use it (shipped in the package)
 `adminApi` functions take an optional `auth` argument, passed to `authorize.admin` as it came (for apps
 with their own session tokens); apps on Convex auth leave it out, as the caller's identity carries
 through. Each refuses with "Only an admin may do this." when the check says no.
+
+`paypalHistory` (an admin function too, not used by `PaymentsAdminPage`, so export it only if you have
+a page for it; `PaypalHistoryRef` / `PaypalHistoryLine` from the React package type it) searches with
+PayPal's Transaction Search, which needs "Transaction search" on the REST app, keeps three years, is up
+to three hours late, and can't filter by email: it reads every 31-day window of the range (four at a
+time) and keeps the lines whose payer email matches. PayPal names the other party there whichever way
+the money went, so payments in, refunds and payments sent all match; guest card payments (T0005) carry
+no email and never do. Each line has PayPal's event code in words (`paypalEventType`), the signed
+amount and fee, name, items, subject/note, and a `url` to the transaction on PayPal's site.
 
 ### `@earthdance/payments/core`
 

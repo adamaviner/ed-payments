@@ -6,6 +6,7 @@ import { actionGeneric, internalActionGeneric, internalMutationGeneric, mutation
 import { ConvexError, v, type GenericValidator } from 'convex/values'
 import { stripe } from '../core/stripe.js'
 import type { Payments, RunQueryCtx, Who } from './index.js'
+import type { PaypalHistory } from './paypalHistory.js'
 import { giveUpPaypalCharge } from './paypalVault.js'
 import { findIntent, settleIntent } from './saved.js'
 
@@ -185,6 +186,18 @@ export function adminApi<C extends GenericValidator>(p: Payments<C>, o: AdminApi
         await admin(p, ctx, a.auth)
         await p.resolveIssue(ctx, a.issueId)
         return null
+      },
+    }),
+
+    /**
+     * The PayPal account's history for one email between `start` and `end` (ms): see
+     * Payments.paypalHistory. Slow for long ranges (one PayPal call per 31 days).
+     */
+    paypalHistory: actionGeneric({
+      args: { auth, email: v.string(), start: v.number(), end: v.number() },
+      handler: async (ctx, { auth: token, ...a }): Promise<PaypalHistory> => {
+        await admin(p, ctx, token)
+        return await p.paypalHistory(ctx, a)
       },
     }),
 

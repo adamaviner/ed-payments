@@ -11,4 +11,4 @@ export { PaypalButtons, StripeEmbeddedCheckout, type PaypalButtonsProps, type St
 export { PaypalCardFields, PaypalSaveButton, paypalVaultSdkUrl, type PaypalCardFieldsProps, type PaypalSaveButtonProps } from './vault.js'
 export { parseRefundAmount, refundableCents, type RefundAmount } from './refundAmount.js'
 export { errorMessage } from './errors.js'
-export type { CheckoutSummary, CompleteReturnRef, OpenRefund, PaymentIssue, PaymentRef, PaymentsAdminApi, PaymentsAuth, PaymentsPublicApi } from './types.js'
+export type { CheckoutSummary, CompleteReturnRef, OpenRefund, PaymentIssue, PaymentRef, PaymentsAdminApi, PaymentsAuth, PaymentsPublicApi, PaypalHistoryLine, PaypalHistoryRef } from './types.js'

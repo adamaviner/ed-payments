@@ -9,6 +9,9 @@ import type { PaypalCapture, PaypalEvent, PaypalOrder, PaypalRefund } from '../c
 import { fixture, paypalEvent, paypalObjectFixtures } from './fixtures.js'
 
 const VALID_SIGNATURE = 'fake-valid-signature'
+const DAY = 24 * 60 * 60 * 1000
+/** PayPal's own date format: 2030-01-01T12:00:00+0000. */
+const paypalDate = (ms: number) => new Date(ms).toISOString().replace(/\.\d+Z$/, '+0000')
 
 /**
  * How a method saved in the fake vault behaves. ok: verified, charges go through. unverified: its $0
@@ -59,6 +62,7 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
   let declineNext = false
   let refuse: ((call: { method: string; path: string }) => Response | undefined) | undefined
   let searchEnabled = search
+  const activity: { at: number; detail: unknown }[] = []
   const setupTokens = new Map<string, SetupToken>()
   const vaultCharges: { vaultId: string; body: unknown }[] = []
   const vaultOrders = new Set<string>()
@@ -257,20 +261,40 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
     }
     if (url.pathname === '/v1/reporting/transactions') {
       if (!searchEnabled) return Response.json(fixture(paypalObjectFixtures.transactionSearchNotAuthorized), { status: 403 })
-      const details = [...orders.values()]
-        .filter((o) => o.capture)
-        .map((o) => ({
-          transaction_info: {
-            transaction_id: o.capture?.id,
-            custom_field: o.customId,
-            transaction_amount: { currency_code: 'USD', value: centsToDecimal(o.amountCents) },
-            transaction_status: 'S',
-            transaction_event_code: 'T0006',
-          },
-        }))
-      return ok({ transaction_details: details, total_pages: 1, page: 1 })
+      const from = Date.parse(url.searchParams.get('start_date') ?? '')
+      const to = Date.parse(url.searchParams.get('end_date') ?? '')
+      if (!(to > from) || to - from > 31 * DAY) return issue(400, 'INVALID_REQUEST', 'INVALID_DATE_RANGE', 'Date range is greater than 31 days')
+      const size = Number(url.searchParams.get('page_size') ?? 100)
+      const page = Number(url.searchParams.get('page') ?? 1)
+      const inRange = searchRows().filter((r) => r.at >= from && r.at <= to)
+      const details = inRange.slice((page - 1) * size, page * size).map((r) => r.detail)
+      return ok({ transaction_details: details, total_pages: Math.max(1, Math.ceil(inRange.length / size)), page })
     }
     return issue(404, 'NOT_FOUND', 'NOT_FOUND', `fakePaypal doesn’t know ${method} ${url.pathname}`)
+  }
+
+  /** What Transaction Search finds: this fake's captures, then the activity a test added. */
+  function searchRows(): { at: number; detail: unknown }[] {
+    const captures = [...orders.values()].flatMap((o) =>
+      o.capture
+        ? [
+            {
+              at: o.createdAt,
+              detail: {
+                transaction_info: {
+                  transaction_id: o.capture.id,
+                  custom_field: o.customId,
+                  transaction_initiation_date: paypalDate(o.createdAt),
+                  transaction_amount: { currency_code: 'USD', value: centsToDecimal(o.amountCents) },
+                  transaction_status: 'S',
+                  transaction_event_code: 'T0006',
+                },
+              },
+            },
+          ]
+        : [],
+    )
+    return [...captures, ...activity]
   }
 
   /** An order on a saved method, as the sandbox answered one (vault-order-captured.json). */
@@ -393,6 +417,31 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
     },
     enableSearch(on = true) {
       searchEnabled = on
+    },
+    /**
+     * A line of the account's history outside this app (a donation, a refund, a payment sent), as
+     * Transaction Search reports it with the other party. `cents` is signed: negative is money out.
+     */
+    addActivity(a: { at: number; email?: string; name?: string; cents: number; eventCode?: string; subject?: string; items?: string[]; feeCents?: number }) {
+      const id = `FAKETXN${++n}`
+      const money = (c: number) => ({ currency_code: 'USD', value: `${c < 0 ? '-' : ''}${centsToDecimal(Math.abs(c))}` })
+      activity.push({
+        at: a.at,
+        detail: {
+          transaction_info: {
+            transaction_id: id,
+            transaction_event_code: a.eventCode ?? (a.cents < 0 ? 'T0000' : 'T0006'),
+            transaction_initiation_date: paypalDate(a.at),
+            transaction_amount: money(a.cents),
+            ...(a.feeCents === undefined ? {} : { fee_amount: money(a.feeCents) }),
+            transaction_status: 'S',
+            ...(a.subject ? { transaction_subject: a.subject } : {}),
+          },
+          payer_info: { ...(a.email ? { email_address: a.email } : {}), ...(a.name ? { payer_name: { alternate_full_name: a.name } } : {}) },
+          cart_info: { item_details: (a.items ?? []).map((item_name) => ({ item_name })) },
+        },
+      })
+      return id
     },
     /** The buyer approves on PayPal's page; returns the CHECKOUT.ORDER.APPROVED webhook. */
     approve(id: string, o: { eventId?: string } = {}) {

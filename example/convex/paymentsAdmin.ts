@@ -2,5 +2,19 @@
 // isAdmin; the React page from @earthdance/payments/react calls them as api.paymentsAdmin.
 import { payments } from './payments.js'
 
-export const { openRefunds, refundable, issues, openCount, checkout, requestRefund, approveRefund, sendRefund, markRefundedManually, dismissRefund, resolveIssue, retryCharge, giveUpCharge } =
-  payments.adminApi({ skipApproval: true })
+export const {
+  openRefunds,
+  refundable,
+  issues,
+  openCount,
+  checkout,
+  requestRefund,
+  approveRefund,
+  sendRefund,
+  markRefundedManually,
+  dismissRefund,
+  resolveIssue,
+  retryCharge,
+  giveUpCharge,
+  paypalHistory,
+} = payments.adminApi({ skipApproval: true })
