@@ -176,6 +176,126 @@ export function approveUrl(order: PaypalOrder): string | null {
   return order.links?.find((l) => l.rel === 'payer-action')?.href ?? order.links?.find((l) => l.rel === 'approve')?.href ?? null
 }
 
+/** A saved method in PayPal's vault (Payment Method Tokens v3); the parts the library reads. */
+export interface PaypalPaymentToken {
+  id: string
+  customer?: { id?: string; merchant_customer_id?: string }
+  payment_source?: {
+    card?: { brand?: string; last_digits?: string; expiry?: string; /** VERIFIED or FAILED (the $0 check at saving). */ verification_status?: string }
+    paypal?: { email_address?: string; payer_id?: string }
+  }
+}
+
+export interface PaypalSetupToken {
+  id: string
+  /** CREATED, PAYER_ACTION_REQUIRED (the buyer approves on PayPal, or 3-D Secure), APPROVED, VAULTED, TOKENIZED. */
+  status: string
+  customer?: { id?: string; merchant_customer_id?: string }
+  payment_source?: PaypalPaymentToken['payment_source']
+  links?: PaypalLink[]
+}
+
+export interface SetupTokenInput {
+  kind: 'card' | 'paypal'
+  /** The owner's PayPal customer, once they have one, so every method they save is under it. */
+  customerId?: string
+  /**
+   * The app's own tag for the owner (`<app>.<type>.<id>`), stored by PayPal on the setup token and every
+   * saved method. Saving checks it, so a setup token from someone else's browser can't be saved as yours.
+   */
+  merchantCustomerId: string
+  /** For a PayPal account: what the buyer agrees to, shown on PayPal's page. */
+  description: string
+  returnUrl: string
+  cancelUrl: string
+  brandName?: string
+}
+
+/**
+ * A card is checked when it is saved: PayPal runs a $0 authorization (or a small one where the bank
+ * has no $0 check) and 3-D Secure only where the bank requires it. A PayPal account is saved for
+ * unscheduled charges after the fact (UNSCHEDULED_POSTPAID: we charge when a bid wins), the buyer
+ * agreeing on PayPal's page; several saved accounts per customer are allowed (the default is one).
+ */
+export function setupTokenBody(i: SetupTokenInput) {
+  const experience = { return_url: i.returnUrl, cancel_url: i.cancelUrl, ...(i.brandName ? { brand_name: i.brandName.slice(0, 127) } : {}) }
+  const customer = { ...(i.customerId ? { id: i.customerId } : {}), merchant_customer_id: i.merchantCustomerId.slice(0, 64) }
+  if (i.kind === 'card') return { customer, payment_source: { card: { verification_method: 'SCA_WHEN_REQUIRED', experience_context: experience } } }
+  return {
+    customer,
+    payment_source: {
+      paypal: {
+        description: i.description.slice(0, 128) || 'Payments',
+        usage_pattern: 'UNSCHEDULED_POSTPAID',
+        usage_type: 'MERCHANT',
+        customer_type: 'CONSUMER',
+        permit_multiple_payment_tokens: true,
+        experience_context: { ...experience, shipping_preference: 'NO_SHIPPING' },
+      },
+    },
+  }
+}
+
+export interface VaultChargeInput {
+  customId: string
+  description: string
+  amountCents: number
+  kind: 'card' | 'paypal'
+  /** The saved method's payment token id. */
+  vaultId: string
+}
+
+/**
+ * An order on a saved method, captured at once. A card is marked a merchant-initiated, unscheduled
+ * charge of a stored card (the card networks require it; PayPal fills in the earlier transaction).
+ */
+export function vaultChargeBody(i: VaultChargeInput) {
+  // invoice_id too: PayPal refuses a second payment with the same one (DUPLICATE_INVOICE_ID, seen in the
+  // sandbox), so a retry after PayPal has forgotten the request id can't charge twice.
+  const unit = {
+    custom_id: i.customId,
+    invoice_id: i.customId.slice(0, 127),
+    description: i.description.slice(0, 127) || 'Payment',
+    amount: { currency_code: 'USD', value: centsToDecimal(i.amountCents) },
+  }
+  const payment_source =
+    i.kind === 'card' ? { card: { vault_id: i.vaultId, stored_credential: { payment_initiator: 'MERCHANT', payment_type: 'UNSCHEDULED', usage: 'SUBSEQUENT' } } } : { paypal: { vault_id: i.vaultId } }
+  return { intent: 'CAPTURE', purchase_units: [unit], payment_source }
+}
+
+/**
+ * PayPal's issues that mean the card or account said no to a charge; asking again won't change it.
+ * From the Orders v2 error reference (UNPROCESSABLE_ENTITY), looked up 2026-11-19.
+ */
+export const PAYPAL_DECLINE_ISSUES: ReadonlySet<string> = new Set([
+  'INSTRUMENT_DECLINED',
+  'TRANSACTION_REFUSED',
+  'PAYMENT_DENIED',
+  'CARD_EXPIRED',
+  'PAYER_CANNOT_PAY',
+  'PAYER_ACCOUNT_RESTRICTED',
+  'PAYER_ACCOUNT_LOCKED_OR_CLOSED',
+  'PAYER_ACTION_REQUIRED',
+  'TRANSACTION_LIMIT_EXCEEDED',
+  'MAX_NUMBER_OF_PAYMENT_ATTEMPTS_EXCEEDED',
+  'INVALID_PREVIOUS_TRANSACTION_REFERENCE',
+  'MISSING_PREVIOUS_REFERENCE',
+  'INVALID_PAYMENT_SOURCE',
+])
+
+/** "Visa •••• 4242" for a saved card, "PayPal (jo@example.com)" for an account; null when PayPal said too little. */
+export function paymentTokenLabel(t: Pick<PaypalPaymentToken, 'payment_source'>): { kind: 'card' | 'paypal'; label: string } | null {
+  const card = t.payment_source?.card
+  if (card?.last_digits) {
+    const brand = (card.brand ?? 'Card').toLowerCase().replace(/_/g, ' ')
+    const name = brand === 'amex' ? 'American Express' : brand === 'mastercard' ? 'Mastercard' : brand.replace(/\b\w/g, (ch) => ch.toUpperCase())
+    return { kind: 'card', label: `${name} •••• ${card.last_digits}` }
+  }
+  const pp = t.payment_source?.paypal
+  if (pp) return { kind: 'paypal', label: pp.email_address ? `PayPal (${pp.email_address})` : 'PayPal account' }
+  return null
+}
+
 type Call = { apiBase: string; token: string; fetch: Fetch }
 const opts = (c: Call) => ({ fetch: c.fetch })
 
@@ -196,6 +316,20 @@ export const paypal = {
       { ...opts(c), requestId, representation: true },
     ),
   getRefund: (c: Call, id: string) => paypalCall<PaypalRefund>(c.apiBase, c.token, 'GET', `/v2/payments/refunds/${encodeURIComponent(id)}`, undefined, opts(c)),
+
+  // Payment Method Tokens v3 (https://developer.paypal.com/docs/api/payment-tokens/v3/): saving a card
+  // or PayPal account without a payment, to charge later with nobody present.
+  createSetupToken: (c: Call, i: SetupTokenInput, requestId: string) =>
+    paypalCall<PaypalSetupToken>(c.apiBase, c.token, 'POST', '/v3/vault/setup-tokens', setupTokenBody(i), { ...opts(c), requestId }),
+  getSetupToken: (c: Call, id: string) => paypalCall<PaypalSetupToken>(c.apiBase, c.token, 'GET', `/v3/vault/setup-tokens/${encodeURIComponent(id)}`, undefined, opts(c)),
+  /** Turns an approved setup token into a saved method (its id is the vault_id later charges use). */
+  createPaymentToken: (c: Call, setupTokenId: string, requestId: string) =>
+    paypalCall<PaypalPaymentToken>(c.apiBase, c.token, 'POST', '/v3/vault/payment-tokens', { payment_source: { token: { id: setupTokenId, type: 'SETUP_TOKEN' } } }, { ...opts(c), requestId }),
+  /** 204 even for a token already deleted (checked in the sandbox, 2026-11-19). */
+  deletePaymentToken: (c: Call, id: string) => paypalCall<null>(c.apiBase, c.token, 'DELETE', `/v3/vault/payment-tokens/${encodeURIComponent(id)}`, undefined, opts(c)),
+  /** Charges a saved card or PayPal account; PayPal captures at once and answers with the captured order. */
+  chargeVaulted: (c: Call, i: VaultChargeInput, requestId: string) =>
+    paypalCall<PaypalOrder>(c.apiBase, c.token, 'POST', '/v2/checkout/orders', vaultChargeBody(i), { ...opts(c), requestId, representation: true }),
 
   // Webhooks Management v1 (https://developer.paypal.com/docs/api/webhooks/v1/). An app may have ten webhooks.
   listWebhooks: (c: Call) => paypalCall<{ webhooks?: PaypalWebhook[] }>(c.apiBase, c.token, 'GET', '/v1/notifications/webhooks', undefined, opts(c)),
@@ -332,4 +466,16 @@ export async function searchTransactions(c: Call, q: { start: number; end: numbe
     ]
   })
   return { transactions, totalPages: res.total_pages ?? 1 }
+}
+
+/**
+ * The id the library gives a method saved in PayPal's vault, `paypal:<payment token id>`, so one
+ * `paymentMethodId` names either processor's methods (Stripe's start `pm_`).
+ */
+export const paypalMethodId = (paymentTokenId: string) => `paypal:${paymentTokenId}`
+
+/** The payment token id in a library method id, or null when it isn't a PayPal one. */
+export function paypalTokenOf(paymentMethodId: string): string | null {
+  const m = /^paypal:([A-Za-z0-9_-]{1,64})$/.exec(paymentMethodId)
+  return m ? m[1] : null
 }

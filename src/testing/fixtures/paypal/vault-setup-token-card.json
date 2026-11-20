@@ -1,0 +1,49 @@
+{
+  "_source": "PayPal sandbox 2026-11-19: POST /v3/vault/setup-tokens, card with verification_method SCA_WHEN_REQUIRED (card sent server-side for the capture only), ids scrubbed",
+  "id": "SETUPTOKEN1",
+  "customer": {
+    "id": "TESTCUSTOMER",
+    "merchant_customer_id": "test.user.u1"
+  },
+  "status": "APPROVED",
+  "payment_source": {
+    "card": {
+      "name": "Test Bidder",
+      "last_digits": "0004",
+      "brand": "VISA",
+      "expiry": "2030-12",
+      "verification_status": "VERIFIED",
+      "verification": {
+        "network_transaction_id": "000000000000000",
+        "network": "VISA",
+        "time": "2026-11-19T23:39:54.000Z",
+        "amount": {
+          "currency_code": "USD",
+          "value": "0.00"
+        },
+        "processor_response": {
+          "response_code": "0000"
+        }
+      },
+      "network_transaction_reference": {
+        "id": "000000000000000",
+        "network": "VISA",
+        "time": "2026-11-19T23:39:54.000Z"
+      }
+    }
+  },
+  "links": [
+    {
+      "href": "https://api.sandbox.paypal.com/v3/vault/setup-tokens/SETUPTOKEN1",
+      "rel": "self",
+      "method": "GET",
+      "encType": "application/json"
+    },
+    {
+      "href": "https://api.sandbox.paypal.com/v3/vault/payment-tokens",
+      "rel": "confirm",
+      "method": "POST",
+      "encType": "application/json"
+    }
+  ]
+}

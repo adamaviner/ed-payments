@@ -1,0 +1,32 @@
+{
+  "_source": "PayPal sandbox 2026-11-19: POST /v3/vault/setup-tokens, PayPal account (UNSCHEDULED_POSTPAID), ids scrubbed",
+  "id": "SETUPTOKEN2",
+  "customer": {
+    "id": "TESTCUSTOMER",
+    "merchant_customer_id": "test.user.u1"
+  },
+  "status": "PAYER_ACTION_REQUIRED",
+  "payment_source": {
+    "paypal": {
+      "description": "Bids you win",
+      "usage_pattern": "UNSCHEDULED_POSTPAID",
+      "permit_multiple_payment_tokens": true,
+      "usage_type": "MERCHANT",
+      "customer_type": "CONSUMER"
+    }
+  },
+  "links": [
+    {
+      "href": "https://api.sandbox.paypal.com/v3/vault/setup-tokens/SETUPTOKEN2",
+      "rel": "self",
+      "method": "GET",
+      "encType": "application/json"
+    },
+    {
+      "href": "https://www.sandbox.paypal.com/agreements/approve?approval_session_id=SETUPTOKEN2",
+      "rel": "approve",
+      "method": "GET",
+      "encType": "application/json"
+    }
+  ]
+}

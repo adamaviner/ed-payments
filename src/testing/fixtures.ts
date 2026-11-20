@@ -59,6 +59,11 @@ import pErrorNotApproved from './fixtures/paypal/error-order-not-approved.json' 
 import pErrorAlreadyCaptured from './fixtures/paypal/error-order-already-captured.json' with { type: 'json' }
 import pSearchNotAuthorized from './fixtures/paypal/transaction-search-not-authorized.json' with { type: 'json' }
 import pVerifyFailure from './fixtures/paypal/verify-failure.json' with { type: 'json' }
+import pVaultSetupCard from './fixtures/paypal/vault-setup-token-card.json' with { type: 'json' }
+import pVaultSetupPaypal from './fixtures/paypal/vault-setup-token-paypal.json' with { type: 'json' }
+import pVaultPaymentToken from './fixtures/paypal/vault-payment-token-card.json' with { type: 'json' }
+import pVaultOrder from './fixtures/paypal/vault-order-captured.json' with { type: 'json' }
+import pErrorInvalidSource from './fixtures/paypal/error-invalid-payment-source.json' with { type: 'json' }
 
 export const stripeEventFixtures = {
   'checkout.session.completed': sCompleted,
@@ -126,6 +131,11 @@ export const paypalObjectFixtures = {
   errorOrderAlreadyCaptured: pErrorAlreadyCaptured,
   transactionSearchNotAuthorized: pSearchNotAuthorized,
   verifyFailure: pVerifyFailure,
+  vaultSetupTokenCard: pVaultSetupCard,
+  vaultSetupTokenPaypal: pVaultSetupPaypal,
+  vaultPaymentTokenCard: pVaultPaymentToken,
+  vaultOrderCaptured: pVaultOrder,
+  errorInvalidPaymentSource: pErrorInvalidSource,
 }
 
 export type StripeEventFixture = keyof typeof stripeEventFixtures

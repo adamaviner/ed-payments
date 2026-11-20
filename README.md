@@ -11,8 +11,8 @@ disputes and reconciliation. An app prices things, keeps its own records and dec
 means for them, in callbacks. It never calls Stripe or PayPal itself. The rules an app (and a
 coding agent working in it) follows are in [`AGENTS.md`](AGENTS.md), shipped in the package.
 
-**Status:** v0.2 (v0.2.1: the React package). One-off payments in USD: hosted checkouts (Stripe Checkout, PayPal), saved
-methods charged off-session, on-session retries. Not here: subscriptions, order models, emails.
+**Status:** v0.4: one-off payments in USD: hosted and embedded checkouts (Stripe Checkout, PayPal), saved
+methods charged off-session (Stripe cards and bank accounts, PayPal-vaulted cards and PayPal accounts), on-session retries. Not here: subscriptions, order models, emails.
 The plans it was built from are ed-schedule's `payments_library_plan.md` (v0.1) and the v0.2 plan
 ("own all payment paths, bids included").
 
@@ -101,7 +101,9 @@ const { redirectUrl } = await payments.start(ctx, {
 })
 // a saved card: setupPaymentMethod (client secret for Stripe's Payment Element), verifyMethodOwner, then later from a mutation
 await payments.chargeSaved(ctx, { ref, purpose: 'bid', description, amountCents, payer, owner: { type: 'user', id }, paymentMethodId, idempotencyKey: `bid-${bidId}`, context: { bidId } })
-// after a decline, the buyer pays on your page
+// or in PayPal's vault, when PayPal is cheaper for the amount (cardProcessorFor): setupPaypalMethod, then
+// <PaypalCardFields> / <PaypalSaveButton> in the browser, then savePaypalMethod with the setup token; chargeSaved is the same
+// after a decline, the buyer pays on your page (Stripe's Payment Element, or PayPal's buttons with retryWithPaypal)
 const { clientSecret } = await payments.retryOnSession(ctx, { checkoutId })
 ```
 
@@ -245,6 +247,26 @@ Also exported: `parseRefundAmount(text, leftCents)`, `refundableCents(checkout, 
   `us_bank_account` (Stripe refuses `payment_method_types` since 2026-09-30.endive) and instant bank
   verification. `savedMethods` lists them with a `declined` flag; `verifyMethodOwner` refuses a method
   that isn't the owner's (an id from the browser can't be trusted).
+- **PayPal's vault.** `setupPaypalMethod` makes a setup token (Payment Method Tokens v3) tagged with
+  the owner (`merchant_customer_id` `<app>.<type>.<id>`, so a token from someone else's browser is
+  refused when saved) and, after the first save, their PayPal customer. A card is typed into PayPal's
+  Card Fields and checked when saved: `verification_method: SCA_WHEN_REQUIRED` with an
+  `experience_context` (without one PayPal neither checks nor approves the card; seen in the sandbox) runs
+  a $0 authorization, and 3-D Secure only when the bank asks. A card that fails is refused (422
+  `INVALID_PAYMENT_SOURCE`, or `verification_status: FAILED`, deleted again). A PayPal account is
+  approved on PayPal's page for unscheduled charges after the fact (`UNSCHEDULED_POSTPAID`, `usage_type:
+MERCHANT`). `savePaypalMethod` turns the approved token into a payment token and records it: the
+  component's rows are the list (PayPal's own list of a customer's tokens lags by minutes, both ways).
+  Ids are `paypal:<payment token id>`, beside Stripe's `pm_…`, so `savedMethods`, `verifyMethodOwner`,
+  `removeSavedMethod` and `chargeSaved` take either. `cardProcessorFor(amount)` picks the processor with
+  the lower card fee at the app's rates.
+- **Off-session charges on PayPal.** An order naming the saved method (`vault_id`; a card also
+  `stored_credential` MERCHANT / UNSCHEDULED / SUBSEQUENT), captured at once. Every try sends the same
+  `PayPal-Request-Id` (from the charge key), so PayPal makes one order whatever happens. A decline (422
+  `INSTRUMENT_DECLINED` and the like, or a capture `DECLINED`) fails it with `declined: true`; a `PENDING`
+  capture is `processing` until `PAYMENT.CAPTURE.COMPLETED`; no answer is tried again as for Stripe, then a
+  `charge_unknown` issue. Giving up looks at the order if one is known; otherwise the nightly Transaction
+  Search catches a capture that turns up.
 - **Off-session charges.** `chargeSaved` records the checkout and queues `worker.charge`: a
   PaymentIntent with `off_session`, `confirm` and `error_on_requires_action`, under the app's
   idempotency key. Paid → `paid`; a bank account → `processing`, then the webhook settles it; a decline
@@ -255,6 +277,9 @@ Also exported: `parseRefundAmount(text, leftCents)`, `refundableCents(checkout, 
   found. After five tries, or at once for anything odd, a `charge_unknown` issue asks a person, who
   retries it or gives it up (Stripe is asked first: a charge it shows paid is settled, an open one canceled; otherwise `failed`, and the app decides what next). The sweep leaves charges handed to a person alone. A charge and its on-session retries pay for one thing: a second payment for it is owed back (`refund_needed`), and only one retry can be open at a time. A charge whose queued try died is
   picked up by the sweep after 10 quiet minutes.
+- **On-session retries with PayPal.** `retryWithPaypal` makes an order for PayPal's buttons (a PayPal
+  account or a card), settled like an embedded checkout. One retry is open at a time: asking for the
+  other processor closes the open one (a Stripe PaymentIntent canceled first).
 - **On-session retries.** `retryOnSession` makes a PaymentIntent for the same amount (card or bank,
   the buyer's choice), or hands back the one still waiting, so two tabs can't each pay; one already on
   its way is refused. A decline there only notes the error (the buyer tries again on the page); paid,
@@ -359,23 +384,28 @@ AGENTS.md      the rules for apps that use it (shipped in the package)
 `SITE_URL`), `fees`, `limits`, `brandName`, `fetch` (tests). Wiring: `on` (all seven callbacks),
 `authorize.admin`, `worker`.
 
-| Method                                                                                  | From            | Does                                                                                                                 |
-| --------------------------------------------------------------------------------------- | --------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `start(ctx, args)`                                                                      | action          | A hosted checkout; `{ checkoutId, redirectUrl }`, or with `ui: 'embedded'` `{ checkoutId, embedded }`. Rate-limited. |
-| `cancel(ctx, checkoutId, { limitKey? })`                                                | action          | Closes an unpaid hosted checkout the buyer won't use (Edit); gives their start back. `{ status }`, or null.          |
-| `setupPaymentMethod(ctx, { owner, payer })`                                             | action          | `{ clientSecret, stripeCustomerId }` for the Payment Element. Rate-limited.                                          |
-| `savedMethods(ctx, { owner })`                                                          | action          | `[{ paymentMethodId, kind, label, declined }]`, newest first.                                                        |
-| `verifyMethodOwner(ctx, { owner, paymentMethodId })`                                    | action          | The method, or throws if it isn't the owner's.                                                                       |
-| `chargeSaved(ctx, args)`                                                                | mutation/action | Queues an off-session charge; the checkout id. Same `idempotencyKey`, same checkout.                                 |
-| `retryOnSession(ctx, { checkoutId })`                                                   | action          | `{ checkoutId, clientSecret }` for the buyer to pay after a decline. Rate-limited.                                   |
-| `completeReturn(ctx, { processor, token })`                                             | action          | Settles if the processor says so; `{ checkoutId, ref, purpose, status }` or null.                                    |
-| `status` / `get`, `forRef`, `byPaymentRef`, `list`, `refundable`                        | query           | Checkouts (`refundable` is paged and indexed).                                                                       |
-| `requestRefund`, `approveRefund`, `markRefundedManually`, `dismissRefund`, `sendRefund` | mutation/action | The ledger; `by` is recorded.                                                                                        |
-| `openRefunds`, `refundsFor`, `refund`, `issues`, `openIssueCount`, `resolveIssue`       | query/mutation  | Refunds and issues.                                                                                                  |
-| `registerRoutes(http, { onUnhandledStripeEvent })`, `registerCrons(crons)`              | –               | Routes (when keys exist; start-up checks) and crons.                                                                 |
-| `worker()`, `adminApi({ skipApproval })`, `publicApi()`                                 | –               | Functions for the app to export (see step 4).                                                                        |
-| `sweep`, `reconcile`, `cleanup`, `issuesDigest`                                         | action/mutation | The upkeep the crons run.                                                                                            |
-| `args.paid` … `args.issues`, `paidReturns`                                              | –               | Callback validators with the app's context (also `callbackArgs(validator)`, and untyped `paidArgs`…).                |
+| Method                                                                                  | From            | Does                                                                                                                   |
+| --------------------------------------------------------------------------------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `start(ctx, args)`                                                                      | action          | A hosted checkout; `{ checkoutId, redirectUrl }`, or with `ui: 'embedded'` `{ checkoutId, embedded }`. Rate-limited.   |
+| `cancel(ctx, checkoutId, { limitKey? })`                                                | action          | Closes an unpaid hosted checkout the buyer won't use (Edit); gives their start back. `{ status }`, or null.            |
+| `setupPaymentMethod(ctx, { owner, payer, methods? })`                                   | action          | `{ clientSecret, stripeCustomerId }` for the Payment Element (`methods: ['ach']`: bank accounts only). Rate-limited.   |
+| `setupPaypalMethod(ctx, { owner, payer, kind, description? })`                          | action          | `{ setupTokenId, clientId }` for `PaypalCardFields` (`kind: 'card'`) or `PaypalSaveButton` (`'paypal'`). Rate-limited. |
+| `savePaypalMethod(ctx, { owner, setupTokenId })`                                        | action          | The saved method; refuses another owner's token or a card that failed its check. Rate-limited.                         |
+| `savedMethods(ctx, { owner })`                                                          | action          | `[{ paymentMethodId, processor, kind, label, declined, createdAt }]` at both processors, newest first.                 |
+| `verifyMethodOwner(ctx, { owner, paymentMethodId })`                                    | action          | The method with its `customerId`, or throws if it isn't the owner's.                                                   |
+| `removeSavedMethod(ctx, { owner, paymentMethodId })`                                    | action          | Deleted from PayPal's vault or detached at Stripe; never offered or charged again.                                     |
+| `cardProcessorFor(amountCents)`                                                         | any             | `{ processor, feeCents: { stripe, paypal } }`: where a card for this amount costs less.                                |
+| `retryWithPaypal(ctx, { checkoutId, returnPath })`                                      | action          | `{ checkoutId, embedded }` for `PaypalButtons` after a decline. Rate-limited.                                          |
+| `chargeSaved(ctx, args)`                                                                | mutation/action | Queues an off-session charge; the checkout id. Same `idempotencyKey`, same checkout.                                   |
+| `retryOnSession(ctx, { checkoutId })`                                                   | action          | `{ checkoutId, clientSecret }` for the buyer to pay after a decline. Rate-limited.                                     |
+| `completeReturn(ctx, { processor, token })`                                             | action          | Settles if the processor says so; `{ checkoutId, ref, purpose, status }` or null.                                      |
+| `status` / `get`, `forRef`, `byPaymentRef`, `list`, `refundable`                        | query           | Checkouts (`refundable` is paged and indexed).                                                                         |
+| `requestRefund`, `approveRefund`, `markRefundedManually`, `dismissRefund`, `sendRefund` | mutation/action | The ledger; `by` is recorded.                                                                                          |
+| `openRefunds`, `refundsFor`, `refund`, `issues`, `openIssueCount`, `resolveIssue`       | query/mutation  | Refunds and issues.                                                                                                    |
+| `registerRoutes(http, { onUnhandledStripeEvent })`, `registerCrons(crons)`              | –               | Routes (when keys exist; start-up checks) and crons.                                                                   |
+| `worker()`, `adminApi({ skipApproval })`, `publicApi()`                                 | –               | Functions for the app to export (see step 4).                                                                          |
+| `sweep`, `reconcile`, `cleanup`, `issuesDigest`                                         | action/mutation | The upkeep the crons run.                                                                                              |
+| `args.paid` … `args.issues`, `paidReturns`                                              | –               | Callback validators with the app's context (also `callbackArgs(validator)`, and untyped `paidArgs`…).                  |
 
 `adminApi` functions take an optional `auth` argument, passed to `authorize.admin` as it came (for apps
 with their own session tokens); apps on Convex auth leave it out, as the caller's identity carries
@@ -423,11 +453,14 @@ Per deployment (dev, prod), on the Convex deployment (`npx convex env set`):
 
 - `PAYMENTS_MODE=live` on production only. `SITE_URL` (the return pages).
 - Stripe: `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`. A restricted key needs **write** on Checkout
-  Sessions, PaymentIntents, SetupIntents, Customers and Refunds, **read** on PaymentMethods, Charges,
+  Sessions, PaymentIntents, SetupIntents, Customers and Refunds, **read** on PaymentMethods (**write**
+  for `removeSavedMethod` to detach them; without it they are only hidden), Charges,
   Disputes and Events, and **write** on Webhook Endpoints for the CLI. ACH: switch on "ACH Direct Debit"
   under Payment methods.
 - PayPal: `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_WEBHOOK_ID`, `PAYPAL_API_BASE`. Tick
-  "Transaction search" under the REST app's features (it can take hours to reach tokens).
+  "Transaction search" under the REST app's features (it can take hours to reach tokens). For PayPal's
+  vault: the account approved for Expanded Checkout (advanced card payments) and "Save payment methods"
+  ticked on the REST app (live and sandbox apps each have their own switches).
 - Webhooks, with exactly the library's events:
   `npx ed-payments webhooks --stripe https://<deployment>.convex.site/stripe/webhook --env-file <file>`
   (prints the new `STRIPE_WEBHOOK_SECRET` once) and
@@ -454,6 +487,10 @@ the webhooks registered on the live deployment:
    that will decline (or remove funds), charge it: `failed` with `declined`, the card shown as declined,
    and the buyer's retry page takes a payment on-session. Refund one of them from the admin page.
 9. Check the fees recorded (`processorFeeCents`) against the processor's.
+10. **PayPal's vault:** save a real card through `PaypalCardFields` and a PayPal account through
+    `PaypalSaveButton`; charge each off-session ($1); both settle paid with PayPal's fee recorded (the
+    sandbox kept 2.59% + 49¢ on a saved card). Remove one: gone from the bid form and from PayPal. After a
+    decline, pay on the retry page with PayPal's buttons.
 
 ## Developing
 

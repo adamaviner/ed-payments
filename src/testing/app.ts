@@ -244,6 +244,27 @@ export const defined = app.defineModules({
       args: { checkoutId: v.string() },
       handler: async (ctx, a): Promise<{ checkoutId: string; clientSecret: string }> => await payments.retryOnSession(ctx, a),
     }),
+    retryPaypal: app.action({
+      args: { checkoutId: v.string() },
+      handler: async (ctx, a) => await payments.retryWithPaypal(ctx, { checkoutId: a.checkoutId, returnPath: '/bids/paid' }),
+    }),
+    paypalSetup: app.action({
+      args: { user: v.string(), kind: v.union(v.literal('card'), v.literal('paypal')) },
+      handler: async (ctx, a): Promise<{ setupTokenId: string; clientId: string }> =>
+        await payments.setupPaypalMethod(ctx, { owner: { type: 'user', id: a.user }, payer: { email: `${a.user}@example.org` }, kind: a.kind }),
+    }),
+    paypalSave: app.action({
+      args: { user: v.string(), setupTokenId: v.string() },
+      handler: async (ctx, a) => await payments.savePaypalMethod(ctx, { owner: { type: 'user', id: a.user }, setupTokenId: a.setupTokenId }),
+    }),
+    remove: app.action({
+      args: { user: v.string(), paymentMethodId: v.string() },
+      handler: async (ctx, a): Promise<null> => {
+        await payments.removeSavedMethod(ctx, { owner: { type: 'user', id: a.user }, paymentMethodId: a.paymentMethodId })
+        return null
+      },
+    }),
+    cardProcessor: app.query({ args: { amountCents: v.number() }, handler: async (_ctx, a) => payments.cardProcessorFor(a.amountCents) }),
   },
   payments: { ...payments.adminApi({ skipApproval: true }), ...payments.publicApi() },
   paymentsWorker: payments.worker(),

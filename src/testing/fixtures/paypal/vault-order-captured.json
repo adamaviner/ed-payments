@@ -1,0 +1,108 @@
+{
+  "_source": "PayPal sandbox 2026-11-19: POST /v2/checkout/orders on the saved card (vault_id, stored_credential MERCHANT), return=representation, ids scrubbed",
+  "id": "VAULTORDER1",
+  "intent": "CAPTURE",
+  "status": "COMPLETED",
+  "payment_source": {
+    "card": {
+      "name": "Test Bidder",
+      "last_digits": "0004",
+      "expiry": "2030-12",
+      "brand": "VISA",
+      "available_networks": ["VISA"],
+      "type": "CREDIT",
+      "bin_details": {
+        "bin": "40055192",
+        "bin_country_code": "US"
+      }
+    }
+  },
+  "purchase_units": [
+    {
+      "reference_id": "default",
+      "amount": {
+        "currency_code": "USD",
+        "value": "30.00"
+      },
+      "payee": {
+        "email_address": "seller@example.org",
+        "merchant_id": "TESTMERCHANT"
+      },
+      "description": "Winning bid",
+      "custom_id": "test:checkout1",
+      "soft_descriptor": "TESTFACILIT",
+      "supplementary_data": {
+        "risk": {
+          "risk_level_indicator": "LOW_RISK"
+        }
+      },
+      "payments": {
+        "captures": [
+          {
+            "id": "VAULTCAPTURE1",
+            "status": "COMPLETED",
+            "amount": {
+              "currency_code": "USD",
+              "value": "30.00"
+            },
+            "final_capture": true,
+            "seller_protection": {
+              "status": "NOT_ELIGIBLE"
+            },
+            "seller_receivable_breakdown": {
+              "gross_amount": {
+                "currency_code": "USD",
+                "value": "30.00"
+              },
+              "paypal_fee": {
+                "currency_code": "USD",
+                "value": "1.27"
+              },
+              "net_amount": {
+                "currency_code": "USD",
+                "value": "28.73"
+              }
+            },
+            "custom_id": "test:checkout1",
+            "links": [
+              {
+                "href": "https://api.sandbox.paypal.com/v2/payments/captures/VAULTCAPTURE1",
+                "rel": "self",
+                "method": "GET"
+              },
+              {
+                "href": "https://api.sandbox.paypal.com/v2/payments/captures/VAULTCAPTURE1/refund",
+                "rel": "refund",
+                "method": "POST"
+              },
+              {
+                "href": "https://api.sandbox.paypal.com/v2/checkout/orders/VAULTORDER1",
+                "rel": "up",
+                "method": "GET"
+              }
+            ],
+            "create_time": "2026-11-19T23:39:58Z",
+            "update_time": "2026-11-19T23:39:58Z",
+            "network_transaction_reference": {
+              "id": "000000000000000",
+              "network": "VISA"
+            },
+            "processor_response": {
+              "cvv_code": "M",
+              "response_code": "0000"
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "create_time": "2026-11-19T23:39:58Z",
+  "update_time": "2026-11-19T23:39:58Z",
+  "links": [
+    {
+      "href": "https://api.sandbox.paypal.com/v2/checkout/orders/VAULTORDER1",
+      "rel": "self",
+      "method": "GET"
+    }
+  ]
+}

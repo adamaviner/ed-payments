@@ -111,6 +111,28 @@ describe('fake PayPal answers in PayPal’s shapes', () => {
     const captured = { ...real, purchase_units: [{ ...real.purchase_units[0], payments: { captures: [capture] } }] }
     expect(drift(await json(await pp.fetch(`${B}/v2/checkout/orders/${order.id}/capture`, { method: 'POST' })), captured)).toEqual([])
   })
+
+  test('the vault: setup tokens, a saved card, a charge on it, a card that failed its check', async () => {
+    const pp = fakePaypal()
+    const B = 'https://api-m.sandbox.paypal.com'
+    const send = async (path: string, body: unknown) => await pp.fetch(`${B}${path}`, { method: 'POST', body: JSON.stringify(body) })
+    const card = (await json(await send('/v3/vault/setup-tokens', { customer: { merchant_customer_id: 'a.user.1' }, payment_source: { card: {} } }))) as { id: string }
+    pp.approveSetup(card.id)
+    expect(drift(await json(await pp.fetch(`${B}/v3/vault/setup-tokens/${card.id}`)), fixture(paypalObjectFixtures.vaultSetupTokenCard))).toEqual([])
+    const saved = (await json(await send('/v3/vault/payment-tokens', { payment_source: { token: { id: card.id, type: 'SETUP_TOKEN' } } }))) as { id: string }
+    expect(drift(saved, fixture(paypalObjectFixtures.vaultPaymentTokenCard))).toEqual([])
+    const order = await json(
+      await send('/v2/checkout/orders', { purchase_units: [{ custom_id: 'a:1', amount: { currency_code: 'USD', value: '30.00' } }], payment_source: { card: { vault_id: saved.id } } }),
+    )
+    expect(drift(order, fixture(paypalObjectFixtures.vaultOrderCaptured))).toEqual([])
+    const account = await json(await send('/v3/vault/setup-tokens', { payment_source: { paypal: {} } }))
+    expect(drift(account, fixture(paypalObjectFixtures.vaultSetupTokenPaypal))).toEqual([])
+    const bad = (await json(await send('/v3/vault/setup-tokens', { payment_source: { card: {} } }))) as { id: string }
+    pp.approveSetup(bad.id, { behaviour: 'unverified' })
+    const refused = await send('/v3/vault/payment-tokens', { payment_source: { token: { id: bad.id, type: 'SETUP_TOKEN' } } })
+    expect(refused.status).toBe(422)
+    expect(drift(await json(refused), fixture(paypalObjectFixtures.errorInvalidPaymentSource))).toEqual([])
+  })
 })
 
 describe('the check itself', () => {

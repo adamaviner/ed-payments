@@ -1,0 +1,49 @@
+{
+  "_source": "PayPal sandbox 2026-11-19: POST /v3/vault/payment-tokens from that setup token, ids scrubbed",
+  "id": "paymenttoken1",
+  "customer": {
+    "id": "TESTCUSTOMER",
+    "merchant_customer_id": "test.user.u1"
+  },
+  "payment_source": {
+    "card": {
+      "name": "Test Bidder",
+      "last_digits": "0004",
+      "brand": "VISA",
+      "expiry": "2030-12",
+      "verification_status": "VERIFIED",
+      "verification": {
+        "network_transaction_id": "000000000000000",
+        "time": "2026-11-19T23:39:54.000Z",
+        "amount": {
+          "currency_code": "USD",
+          "value": "0.00"
+        },
+        "processor_response": {
+          "response_code": "0000"
+        }
+      },
+      "network_transaction_reference": {
+        "id": "000000000000000",
+        "network": "VISA",
+        "time": "2026-11-19T23:39:54.000Z"
+      }
+    }
+  },
+  "links": [
+    {
+      "href": "https://api.sandbox.paypal.com/v3/vault/payment-tokens/paymenttoken1",
+      "rel": "self",
+      "method": "GET",
+      "encType": "application/json"
+    },
+    {
+      "href": "https://api.sandbox.paypal.com/v3/vault/payment-tokens/paymenttoken1",
+      "rel": "delete",
+      "method": "DELETE",
+      "encType": "application/json"
+    }
+  ],
+  "create_time": "2026-11-19T23:39:55.284Z",
+  "update_time": "2026-11-19T23:39:55.284Z"
+}

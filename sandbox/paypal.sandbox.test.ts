@@ -4,7 +4,21 @@
 // sandbox webhook removed again). Run by `npm run test:sandbox`, only with sandbox keys.
 import { describe, expect, test } from 'vitest'
 import { paypalWebhook } from '../src/cli/webhooks.js'
-import { PAYPAL_EVENTS, PAYPAL_SANDBOX_API, ProcessorError, approveUrl, paypal, paypalToken, searchTransactions, verifyPaypalWebhook } from '../src/core/index.js'
+import {
+  PAYPAL_EVENTS,
+  PAYPAL_SANDBOX_API,
+  ProcessorError,
+  approveUrl,
+  captureFee,
+  orderCapture,
+  paymentTokenLabel,
+  paypal,
+  paypalCall,
+  paypalToken,
+  searchTransactions,
+  verifyPaypalWebhook,
+  type PaypalSetupToken,
+} from '../src/core/index.js'
 
 const keys = { clientId: process.env.SANDBOX_PAYPAL_CLIENT_ID ?? '', clientSecret: process.env.SANDBOX_PAYPAL_CLIENT_SECRET ?? '', apiBase: PAYPAL_SANDBOX_API }
 if (!keys.clientId || !keys.clientSecret) throw new Error('The sandbox suite needs PayPal sandbox keys.')
@@ -81,4 +95,81 @@ test('the webhook CLI creates the sandbox webhook with the library’s events, l
   } finally {
     expect((await paypalWebhook(keys, { url, fetch: o.fetch, remove: true })).action).toBe('removed')
   }
+})
+
+describe('the vault', () => {
+  test('setup tokens as the library asks for them: a card waits for its details, a PayPal account for the buyer to approve', async () => {
+    const c = await call()
+    const base = { merchantCustomerId: `sandbox.user.${run}`, description: 'Sandbox bids', returnUrl: 'https://example.org/ok', cancelUrl: 'https://example.org/no' }
+    const card = await paypal.createSetupToken(c, { ...base, kind: 'card' }, `sb-setup-card-${run}`)
+    expect(card.customer?.merchant_customer_id).toBe(`sandbox.user.${run}`)
+    expect(card.status).not.toBe('APPROVED')
+    const account = await paypal.createSetupToken(c, { ...base, kind: 'paypal', customerId: card.customer?.id }, `sb-setup-pp-${run}`)
+    expect(account.status).toBe('PAYER_ACTION_REQUIRED')
+    expect(account.customer?.id).toBe(card.customer?.id)
+  })
+
+  test('a card saved (its details sent here as Card Fields would), checked, charged with nobody present, and deleted', async () => {
+    const c = await call()
+    // Card Fields put the card on the setup token in the browser; the test sends it straight away.
+    // Without experience_context PayPal neither checks the card nor approves the token (CREATED).
+    const setup = await paypalCall<PaypalSetupToken>(
+      c.apiBase,
+      c.token,
+      'POST',
+      '/v3/vault/setup-tokens',
+      {
+        customer: { merchant_customer_id: `sandbox.user.${run}` },
+        payment_source: {
+          card: {
+            number: '4005519200000004',
+            expiry: '2030-12',
+            name: 'Sandbox Bidder',
+            security_code: '123',
+            verification_method: 'SCA_WHEN_REQUIRED',
+            experience_context: { return_url: 'https://example.org/ok', cancel_url: 'https://example.org/no' },
+          },
+        },
+      },
+      { ...o, requestId: `sb-setup-${run}` },
+    )
+    expect(setup.status).toBe('APPROVED')
+    const saved = await paypal.createPaymentToken(c, setup.id, `sb-save-${run}`)
+    expect(saved.payment_source?.card?.verification_status).toBe('VERIFIED')
+    expect(paymentTokenLabel(saved)).toEqual({ kind: 'card', label: 'Visa •••• 0004' })
+    const input = { customId: `sandbox:${run}-v`, description: 'Sandbox bid', amountCents: 3000, kind: 'card' as const, vaultId: saved.id }
+    const order = await paypal.chargeVaulted(c, input, `sb-charge-${run}`)
+    expect(order.status).toBe('COMPLETED')
+    const capture = orderCapture(order)!
+    expect(capture.status).toBe('COMPLETED')
+    expect(captureFee(capture)).toBeGreaterThan(0)
+    expect((await paypal.chargeVaulted(c, input, `sb-charge-${run}`)).id).toBe(order.id)
+    await paypal.refundCapture(c, capture.id, { amountCents: 3000, customId: `sandbox:${run}-v` }, `sb-refund-${run}`)
+    await paypal.deletePaymentToken(c, saved.id)
+    await paypal.deletePaymentToken(c, saved.id)
+  })
+
+  test('a card whose check fails is refused when saved', async () => {
+    const c = await call()
+    const refused = paypalCall(
+      c.apiBase,
+      c.token,
+      'POST',
+      '/v3/vault/setup-tokens',
+      {
+        payment_source: {
+          card: {
+            number: '4005519200000004',
+            expiry: '2030-12',
+            name: 'CCREJECT-REFUSED',
+            security_code: '123',
+            verification_method: 'SCA_WHEN_REQUIRED',
+            experience_context: { return_url: 'https://example.org/ok', cancel_url: 'https://example.org/no' },
+          },
+        },
+      },
+      { ...o, requestId: `sb-setup-bad-${run}` },
+    )
+    await expect(refused).rejects.toMatchObject({ status: 422, code: 'INVALID_PAYMENT_SOURCE' })
+  })
 })
