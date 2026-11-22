@@ -24,8 +24,14 @@ const restockQuestion = (checkout: CheckoutSummary, amountCents: number, leftCen
       }
     : null
 
+/**
+ * When the app's authorize.stepUp asks for a second step before a refund is approved or sent: the app
+ * runs its check (a passkey, say), then the page tries once more. This example has none.
+ */
+const confirmAgain = (action: 'approve' | 'send') => Promise.resolve(window.confirm(`Confirm you want to ${action} this refund.`))
+
 export function PaymentsAdmin() {
-  return <PaymentsAdminPage api={api.paymentsAdmin} skipApproval refLink={itemLink} refundQuestion={restockQuestion} />
+  return <PaymentsAdminPage api={api.paymentsAdmin} skipApproval refLink={itemLink} refundQuestion={restockQuestion} onStepUp={confirmAgain} />
 }
 
 /** The sidebar's badge: refunds to do plus open issues. */

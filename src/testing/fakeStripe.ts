@@ -155,8 +155,8 @@ export function fakeStripe({ webhookSecret = FAKE_STRIPE_WEBHOOK_SECRET, fallbac
       pi.last_payment_error = {
         message: String(err.error.message),
         code: String(err.error.code),
-        ...(err.error.decline_code ? { decline_code: String(err.error.decline_code) } : {}),
-        ...(err.error.advice_code ? { advice_code: String(err.error.advice_code) } : {}),
+        ...(typeof err.error.decline_code === 'string' ? { decline_code: err.error.decline_code } : {}),
+        ...(typeof err.error.advice_code === 'string' ? { advice_code: err.error.advice_code } : {}),
       }
       return { status: 402, body: { error: { ...err.error, payment_intent: structuredClone(pi), payment_method: structuredClone(m.pm) } } }
     }

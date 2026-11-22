@@ -195,6 +195,8 @@ export const onPaid = internalMutation({
       await ctx.db.patch(bid._id, { status: 'paid' })
       return null
     }
+    // A membership's monthly payment: membership.ts's onCharged records it.
+    if ('memberId' in a.context) return null
     if (!('itemId' in a.context)) return { refuse: 'Not a sale this shop knows.' }
     const itemId = a.context.itemId
     const sold = await ctx.db

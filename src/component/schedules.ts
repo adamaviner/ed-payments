@@ -367,7 +367,10 @@ export const claim = mutation({
 export async function noteScheduleCheckout(ctx: MutationCtx, scheduleId: Id<'schedules'>, checkoutId: Id<'checkouts'>, period: string, offSession: boolean, now: number) {
   const s = await ctx.db.get(scheduleId)
   if (!s) return
-  if (!offSession) return void (await ctx.db.patch(s._id, { lastCheckoutId: checkoutId, updatedAt: now }))
+  if (!offSession) {
+    await ctx.db.patch(s._id, { lastCheckoutId: checkoutId, updatedAt: now })
+    return
+  }
   if (s.period !== period) return
   // Looked at again in a day if no outcome ever comes back; an outcome sets the real next time.
   await ctx.db.patch(s._id, { lastCheckoutId: checkoutId, periodAttempts: s.periodAttempts + 1, nextChargeAt: now + DAY, updatedAt: now })
@@ -399,7 +402,10 @@ async function failPeriod(ctx: MutationCtx, s: Doc<'schedules'>, f: { period: st
 /** A period was paid or is on its way (a bank debit): the schedule moves to the next period. */
 async function advance(ctx: MutationCtx, s: Doc<'schedules'>, period: string, now: number) {
   const lastPaidPeriod = s.lastPaidPeriod && s.lastPaidPeriod > period ? s.lastPaidPeriod : period
-  if (s.period > period) return void (lastPaidPeriod !== s.lastPaidPeriod && (await ctx.db.patch(s._id, { lastPaidPeriod, updatedAt: now })))
+  if (s.period > period) {
+    if (lastPaidPeriod !== s.lastPaidPeriod) await ctx.db.patch(s._id, { lastPaidPeriod, updatedAt: now })
+    return
+  }
   const next = shiftPeriod(period, 1)
   await ctx.db.patch(s._id, {
     lastPaidPeriod,

@@ -3,6 +3,7 @@
 import { payments } from './payments.js'
 
 export const {
+  access,
   openRefunds,
   refundable,
   issues,
