@@ -23,7 +23,7 @@ The README has the API and the "Adopt in 5 steps" set-up.
 5. **One instance, all callbacks.** `definePayments(...).withCallbacks(...)` once, in `convex/payments.ts`.
    Every callback is required, even if it only logs. Use `payments.args.*` as their `args`.
 6. **Who may do what is the app's.** Gate your own actions (`setupPaymentMethod`, `setupPaypalMethod`,
-   `savePaypalMethod`, `removeSavedMethod`, `chargeSaved`, `retryOnSession`, `retryWithPaypal` callers) with your own login; the admin functions go through `authorize.admin`.
+   `savePaypalMethod`, `removeSavedMethod`, `chargeSaved`, `retryOnSession`, `retryWithPaypal`, and every schedule function) with your own login; the admin functions go through `authorize.admin` (and `authorize.request` for those who may only ask for refunds, `authorize.stepUp` for a second check before a refund is approved or sent).
    A `stripeCustomerId` passed to adopt an existing Customer must come from your own records, never
    from the browser: the library records it as that owner's for good.
 7. **Webhooks with the CLI.** Register them with `npx ed-payments webhooks`, not by hand, and run it
@@ -46,3 +46,11 @@ The README has the API and the "Adopt in 5 steps" set-up.
     store only the returned `paymentMethodId` (`paypal:…`). Pick where a new card goes with
     `cardProcessorFor(amount)`, not by hand. Before `removeSavedMethod`, check nothing of yours (an open
     bid) still relies on the method. Never send card numbers to your server: Card Fields keep them in PayPal's frames.
+12. **Repeating charges are schedules.** Never write your own cron that calls `chargeSaved` every month:
+    `startSchedule` (a saved method) or `startScheduleCheckout` (a first payment that saves it) and the
+    exported `worker().schedules` own the dates, the idempotency keys, the retries (3, 5, 7 days, then
+    lapsed; hard declines at once) and processor-side removal. The processor for a new card is yours to
+    choose (`cardProcessorFor` on the monthly amount) and pass in. Record a period in `scheduleCharged`, send
+    the failed-charge email from `scheduleFailed` on `attempt === 1` (and staff on `final`), and confirmations
+    from `scheduleChanged`. Changes go through `updateSchedule` / `pauseSchedule` / `resumeSchedule` /
+    `cancelSchedule`, after your own check that the caller may (e.g. a signed link).
