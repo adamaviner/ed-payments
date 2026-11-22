@@ -112,6 +112,7 @@ describe('the vault', () => {
   test('a card saved (its details sent here as Card Fields would), checked, charged with nobody present, and deleted', async () => {
     const c = await call()
     // Card Fields put the card on the setup token in the browser; the test sends it straight away.
+    // (4111…: the sandbox started refusing 4005…, used many times on 2026-11-21, with PAYER_CANNOT_PAY.)
     // Without experience_context PayPal neither checks the card nor approves the token (CREATED).
     const setup = await paypalCall<PaypalSetupToken>(
       c.apiBase,
@@ -122,7 +123,7 @@ describe('the vault', () => {
         customer: { merchant_customer_id: `sandbox.user.${run}` },
         payment_source: {
           card: {
-            number: '4005519200000004',
+            number: '4111111111111111',
             expiry: '2030-12',
             name: 'Sandbox Bidder',
             security_code: '123',
@@ -136,7 +137,7 @@ describe('the vault', () => {
     expect(setup.status).toBe('APPROVED')
     const saved = await paypal.createPaymentToken(c, setup.id, `sb-save-${run}`)
     expect(saved.payment_source?.card?.verification_status).toBe('VERIFIED')
-    expect(paymentTokenLabel(saved)).toEqual({ kind: 'card', label: 'Visa •••• 0004' })
+    expect(paymentTokenLabel(saved)).toEqual({ kind: 'card', label: 'Visa •••• 1111' })
     const input = { customId: `sandbox:${run}-v`, description: 'Sandbox bid', amountCents: 3000, kind: 'card' as const, vaultId: saved.id }
     const order = await paypal.chargeVaulted(c, input, `sb-charge-${run}`)
     expect(order.status).toBe('COMPLETED')

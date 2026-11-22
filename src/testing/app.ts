@@ -58,12 +58,18 @@ const wiring: PaymentsWiring<Ctx> = {
   },
 }
 
+/**
+ * The keys the test app uses: fakes, unless the sandbox suite (sandbox/schedules.sandbox.test.ts) puts
+ * test-mode keys here to run the same app against Stripe's test mode and PayPal's sandbox.
+ */
+export const testKeys = { stripe: 'sk_test_fake', paypalClientId: 'fake-client', paypalSecret: 'fake-secret' }
+
 export const payments = definePayments(app.components.payments, {
   app: 'test',
   context,
   siteUrl: () => 'https://app.example.org/',
-  stripe: () => ({ secretKey: 'sk_test_fake', webhookSecret: FAKE_STRIPE_WEBHOOK_SECRET }),
-  paypal: () => ({ clientId: 'fake-client', clientSecret: 'fake-secret', webhookId: 'WH-FAKE', apiBase: PAYPAL_SANDBOX_API }),
+  stripe: () => ({ secretKey: testKeys.stripe, webhookSecret: FAKE_STRIPE_WEBHOOK_SECRET }),
+  paypal: () => ({ clientId: testKeys.paypalClientId, clientSecret: testKeys.paypalSecret, webhookId: 'WH-FAKE', apiBase: PAYPAL_SANDBOX_API }),
   fees: { paypal: { card: { basisPoints: 199, fixedCents: 49, capCents: null } } },
   limits: { perKey: 3, windowMinutes: 10, globalPerMinute: 5 },
   brandName: 'Test shop',
