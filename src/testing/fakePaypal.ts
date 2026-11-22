@@ -38,6 +38,9 @@ interface Order {
   customId: string
   capture?: PaypalCapture
   createdAt: number
+  /** Vault with purchase: what pays it is saved when it is captured (the token's id once saved). */
+  save?: { kind: 'card' | 'paypal'; customerId?: string }
+  vaultId?: string
 }
 
 export interface FakePaypalOptions {
@@ -60,6 +63,8 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
   let tokens = 0
   let captureOutcome: PaypalCapture['status'] = 'COMPLETED'
   let declineNext = false
+  /** How the next method saved with a purchase behaves when charged later. */
+  let nextSavedBehaviour: VaultBehaviour = 'ok'
   let refuse: ((call: { method: string; path: string }) => Response | undefined) | undefined
   let searchEnabled = search
   const activity: { at: number; detail: unknown }[] = []
@@ -89,7 +94,23 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
             { href: `https://www.sandbox.paypal.com/checkoutnow?token=${o.id}`, rel: 'payer-action', method: 'GET' },
           ]
         : [{ href: `${apiBase}/v2/checkout/orders/${o.id}`, rel: 'self', method: 'GET' }]
-    return { ...base, id: o.id, status: o.status, purchase_units: [unit], links }
+    const shown = unit as Record<string, unknown>
+    if (o.save && shown.payee && typeof shown.payee === 'object') {
+      // The sandbox's saved-with-purchase order had no brand to show (display_data).
+      const { display_data: _shown, ...payee } = shown.payee as Record<string, unknown>
+      shown.payee = payee
+    }
+    return { ...base, id: o.id, status: o.status, purchase_units: [unit], links, ...(o.vaultId ? { payment_source: savedSource(o) } : {}) }
+  }
+
+  /** An order's payment_source once vault-with-purchase saved its method, as the sandbox answered (order-vault-card-captured.json). */
+  function savedSource(o: Order): NonNullable<PaypalOrder['payment_source']> {
+    const v = o.vaultId ? vault.get(o.vaultId) : undefined
+    if (!v) return {}
+    const attributes = { vault: { id: v.id, status: 'VAULTED', customer: { id: v.customerId } } }
+    if (v.kind === 'paypal') return { paypal: { email_address: v.source?.paypal?.email_address ?? 'buyer@example.org', attributes } }
+    const card = v.source?.card
+    return { card: { brand: card?.brand ?? 'VISA', last_digits: card?.last_digits ?? '0004', attributes } }
   }
 
   const fetch = async (input: string, init?: RequestInit): Promise<Response> => {
@@ -210,13 +231,18 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
       }
     }
     if (method === 'POST' && url.pathname === '/v2/checkout/orders') {
-      const b = body as { purchase_units: { custom_id: string; amount: { value: string } }[] }
+      type Saving = { attributes?: { vault?: { store_in_vault?: string }; customer?: { id?: string } } }
+      const b = body as { purchase_units: { custom_id: string; amount: { value: string } }[]; payment_source?: { card?: Saving; paypal?: Saving } }
+      const saving = b.payment_source?.card?.attributes?.vault ? 'card' : b.payment_source?.paypal?.attributes?.vault ? 'paypal' : null
+      const customerId = (saving === 'card' ? b.payment_source?.card : b.payment_source?.paypal)?.attributes?.customer?.id
       const o: Order = {
         id: `FAKEORDER${++n}`,
-        status: 'PAYER_ACTION_REQUIRED',
+        // A card order for Card Fields waits for the card (CREATED, as in the sandbox); the rest for the buyer at PayPal.
+        status: saving === 'card' ? 'CREATED' : 'PAYER_ACTION_REQUIRED',
         amountCents: decimalToCents(b.purchase_units[0].amount.value) ?? 0,
         customId: b.purchase_units[0].custom_id,
         createdAt: Date.now(),
+        ...(saving ? { save: { kind: saving, ...(customerId ? { customerId } : {}) } } : {}),
       }
       orders.set(o.id, o)
       return remember(orderJson(o, true), 200)
@@ -239,9 +265,24 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
           amount: { currency_code: 'USD', value: centsToDecimal(o.amountCents) },
           custom_id: o.customId,
           seller_receivable_breakdown: { paypal_fee: { currency_code: 'USD', value: centsToDecimal(fee) } },
-          supplementary_data: { related_ids: { order_id: o.id } },
+          // A capture that saved its card names its order by link, as the sandbox's did (order-vault-card-captured.json).
+          ...(o.save ? { links: [{ href: `${apiBase}/v2/checkout/orders/${o.id}`, rel: 'up', method: 'GET' }] } : { supplementary_data: { related_ids: { order_id: o.id } } }),
+          ...(o.save?.kind === 'card' ? { network_transaction_reference: { id: `FAKENTR${++n}`, network: 'VISA' } } : {}),
         }
         o.status = 'COMPLETED'
+        if (o.save && captureOutcome !== 'DECLINED') {
+          const token = {
+            id: `fakepaytoken${++n}`,
+            customerId: o.save.customerId ?? `FAKECUST${++n}`,
+            merchantCustomerId: '',
+            kind: o.save.kind,
+            behaviour: nextSavedBehaviour,
+            source: o.save.kind === 'paypal' ? { paypal: { email_address: 'buyer@example.org' } } : { card: { brand: 'VISA', last_digits: '0004', expiry: '2030-12' } },
+          }
+          vault.set(token.id, token)
+          o.vaultId = token.id
+          nextSavedBehaviour = 'ok'
+        }
         return remember(orderJson(o))
       }
     }
@@ -400,6 +441,16 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
         t.kind === 'paypal'
           ? { paypal: { email_address: o.paypalEmail ?? 'buyer@example.org' } }
           : { card: { brand: o.card?.brand ?? 'VISA', last_digits: o.card?.last4 ?? '1111', expiry: '2030-12' } }
+    },
+    /** The next method saved with a purchase (vault with purchase) behaves as this when charged later. */
+    savedWithPurchaseBehaves(behaviour: VaultBehaviour) {
+      nextSavedBehaviour = behaviour
+    },
+    /** The payer removes a saved method at PayPal: gone from the vault, and VAULT.PAYMENT-TOKEN.DELETED. */
+    deleteToken(tokenId: string) {
+      const v = vault.get(tokenId)
+      if (v) v.deleted = true
+      return webhook(paypalEvent('VAULT.PAYMENT-TOKEN.DELETED', { id: tokenId, customer: { id: v?.customerId ?? 'FAKECUST' } }))
     },
     /** Methods in the vault (deleted ones marked). */
     vault: () => [...vault.values()],

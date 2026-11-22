@@ -6,10 +6,11 @@
 // only when the bank asks). Charges are orders naming the saved method, captured at once.
 import type { Scheduler } from 'convex/server'
 import { ConvexError } from 'convex/values'
-import { orderCapture, paymentTokenLabel, PAYPAL_DECLINE_ISSUES, paypal, paypalMethodId, paypalTokenOf, type PaypalOrder, type PaypalPaymentToken } from '../core/paypal.js'
+import { orderCapture, paymentTokenLabel, PAYPAL_DECLINE_ISSUES, paypal, paypalMethodId, paypalTokenOf, RECURRING_USAGE_PATTERN, type PaypalOrder, type PaypalPaymentToken } from '../core/paypal.js'
+import { METHOD_REMOVED } from '../core/declines.js'
 import { ProcessorError, tagFor, type Payer, type Ref } from '../core/types.js'
 import type { Checkout, Payments, RunActionCtx } from './index.js'
-import type { SavedMethod } from './saved.js'
+import { declineOf, type SavedMethod } from './saved.js'
 import { errorText } from './util.js'
 
 const UNUSABLE = 'That payment method couldn’t be used. Please enter your details again.'
@@ -47,7 +48,7 @@ const viewOf = (m: { paymentTokenId: string; kind: 'card' | 'paypal'; label: str
 export async function setupPaypalMethod(
   p: Payments,
   ctx: RunActionCtx,
-  a: { owner: Ref; payer: Payer; kind: 'card' | 'paypal'; description?: string },
+  a: { owner: Ref; payer: Payer; kind: 'card' | 'paypal'; description?: string; recurring?: boolean },
 ): Promise<{ setupTokenId: string; clientId: string }> {
   const keys = p.paypalKeys()
   await p.takeLimits(ctx, 'setup', a.payer.email)
@@ -65,6 +66,7 @@ export async function setupPaypalMethod(
           returnUrl: site,
           cancelUrl: site,
           brandName: p.options.brandName,
+          ...(a.recurring ? { usagePattern: RECURRING_USAGE_PATTERN } : {}),
         },
         `setup-${crypto.randomUUID()}`,
       ),
@@ -81,7 +83,7 @@ export async function setupPaypalMethod(
  * owner's tag (it came from the browser, and anyone could send someone else's). A card whose $0
  * check failed is deleted from PayPal's vault again and refused.
  */
-export async function savePaypalMethod(p: Payments, ctx: RunActionCtx, a: { owner: Ref; setupTokenId: string; payerEmail?: string }): Promise<SavedMethod> {
+export async function savePaypalMethod(p: Payments, ctx: RunActionCtx, a: { owner: Ref; setupTokenId: string; payerEmail?: string; recurring?: boolean }): Promise<SavedMethod> {
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(a.setupTokenId)) throw new ConvexError(UNUSABLE)
   await p.takeLimits(ctx, 'save', a.payerEmail)
   const tag = await paypalOwnerTag(p.app, a.owner)
@@ -122,6 +124,8 @@ export async function savePaypalMethod(p: Payments, ctx: RunActionCtx, a: { owne
     paymentTokenId: token.id,
     kind: what.kind,
     label: what.label,
+    // A PayPal account's agreement, said again with each recurring charge.
+    usagePattern: what.kind === 'paypal' ? (a.recurring ? RECURRING_USAGE_PATTERN : 'UNSCHEDULED_POSTPAID') : undefined,
     now: Date.now(),
   })
   // The same setup token saved again after the method was removed: PayPal has deleted it.
@@ -170,6 +174,8 @@ async function settleCharge(p: Payments, ctx: RunActionCtx, c: Checkout, order: 
       id: c.id,
       reason: `PayPal ${capture.status.toLowerCase()} the charge.`,
       declined: true,
+      declineCode: capture.status,
+      declineKind: 'soft',
       processorCheckoutId: order.id,
       now: Date.now(),
     })
@@ -189,7 +195,14 @@ export async function chargePaypalNow(p: Payments, ctx: RunActionCtx & { schedul
   if (!tokenId || !c.chargeKey) return await note('The charge is missing its PayPal payment method.', false)
   const saved = await ctx.runQuery(p.component.customers.paypalMethod, { paymentTokenId: tokenId })
   if (saved?.method.removed) {
-    await ctx.runMutation(p.component.checkouts.settleFailed, { id: c.id, reason: 'The payer removed this payment method.', declined: true, now: Date.now() })
+    await ctx.runMutation(p.component.checkouts.settleFailed, {
+      id: c.id,
+      reason: 'The payer removed this payment method.',
+      declined: true,
+      declineCode: METHOD_REMOVED,
+      declineKind: 'hard',
+      now: Date.now(),
+    })
     return
   }
   let order: PaypalOrder
@@ -198,7 +211,15 @@ export async function chargePaypalNow(p: Payments, ctx: RunActionCtx & { schedul
     order = await p.withPaypal(ctx, (call) =>
       paypal.chargeVaulted(
         call,
-        { customId: tagFor(p.app, c.id), description: c.description, amountCents: c.amountCents, kind: c.method === 'paypal' ? 'paypal' : 'card', vaultId: tokenId },
+        {
+          customId: tagFor(p.app, c.id),
+          description: c.description,
+          amountCents: c.amountCents,
+          kind: c.method === 'paypal' ? 'paypal' : 'card',
+          vaultId: tokenId,
+          // A schedule's charge is a recurring one, said so with the agreement or the card's first payment.
+          ...(c.scheduleId ? { recurring: { usagePattern: saved?.method.usagePattern ?? undefined, networkRef: saved?.method.networkRef ?? undefined } } : {}),
+        },
         requestId,
       ),
     )
@@ -207,7 +228,7 @@ export async function chargePaypalNow(p: Payments, ctx: RunActionCtx & { schedul
     if (err instanceof ProcessorError && err.code === 'DUPLICATE_INVOICE_ID')
       return await note('PayPal already has a payment for this charge (duplicate invoice id); look it up in PayPal before doing anything.', false)
     if (declinedIssue(err)) {
-      await ctx.runMutation(p.component.checkouts.settleFailed, { id: c.id, reason: err.message, declined: true, now: Date.now() })
+      await ctx.runMutation(p.component.checkouts.settleFailed, { id: c.id, reason: err.message, declined: true, ...declineOf({ processor: 'paypal', code: err.code }), now: Date.now() })
       return
     }
     const retry = err instanceof ProcessorError && err.retryable

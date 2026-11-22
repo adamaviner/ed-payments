@@ -4,7 +4,7 @@ import { ConvexError, v, type Infer } from 'convex/values'
 import type { FunctionHandle } from 'convex/server'
 import type { Doc, Id } from './_generated/dataModel.js'
 import type { MutationCtx } from './_generated/server.js'
-import { checkoutKind, checkoutStatus, hostData, issueKind, method, payer, processor, ref, refundOrigin, refundStatus } from './schema.js'
+import { checkoutKind, checkoutStatus, declineKind, hostData, issueKind, method, payer, processor, ref, refundOrigin, refundStatus } from './schema.js'
 
 export const checkoutView = v.object({
   id: v.string(),
@@ -21,6 +21,10 @@ export const checkoutView = v.object({
   stripeCustomerId: v.union(v.string(), v.null()),
   paymentMethodId: v.union(v.string(), v.null()),
   retryOf: v.union(v.string(), v.null()),
+  scheduleId: v.union(v.string(), v.null()),
+  schedulePeriod: v.union(v.string(), v.null()),
+  declineCode: v.union(v.string(), v.null()),
+  declineKind: v.union(declineKind, v.null()),
   chargeKey: v.union(v.string(), v.null()),
   chargeAttempts: v.number(),
   lastTriedAt: v.union(v.number(), v.null()),
@@ -56,6 +60,10 @@ export function view(c: Doc<'checkouts'>): CheckoutView {
     stripeCustomerId: c.stripeCustomerId ?? null,
     paymentMethodId: c.paymentMethodId ?? null,
     retryOf: c.retryOf ?? null,
+    scheduleId: c.scheduleId ?? null,
+    schedulePeriod: c.schedulePeriod ?? null,
+    declineCode: c.declineCode ?? null,
+    declineKind: c.declineKind ?? null,
     chargeKey: c.chargeKey ?? null,
     chargeAttempts: c.chargeAttempts ?? 0,
     lastTriedAt: c.lastTriedAt ?? null,

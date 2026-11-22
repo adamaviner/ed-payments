@@ -35,6 +35,15 @@ export function worker<C extends GenericValidator>(p: Payments<C>) {
     }),
     cleanup: internalMutationGeneric({ args: {}, returns: v.object({ deleted: v.number(), more: v.boolean() }), handler: async (ctx) => await p.cleanup(ctx) }),
     issuesDigest: internalMutationGeneric({ args: {}, returns: v.number(), handler: async (ctx): Promise<number> => await p.issuesDigest(ctx) }),
+    /** The hourly run of schedules (registerCrons), or one schedule's due charge. */
+    schedules: internalActionGeneric({
+      args: { scheduleId: v.optional(v.string()) },
+      returns: v.null(),
+      handler: async (ctx, { scheduleId }): Promise<null> => {
+        await p.runSchedules(ctx, { scheduleId })
+        return null
+      },
+    }),
     /** An off-session charge (chargeSaved queues it; it queues its own retries). */
     charge: internalActionGeneric({
       args: { checkoutId: v.string(), manual: v.optional(v.boolean()) },
@@ -59,6 +68,30 @@ async function admin<C extends GenericValidator>(p: Payments<C>, ctx: RunQueryCt
   return who
 }
 
+/** What the caller may do on the payments page: everything (admin), see and ask for refunds (request), or nothing (null). */
+async function accessOf<C extends GenericValidator>(p: Payments<C>, ctx: RunQueryCtx, a: unknown): Promise<{ level: 'admin' | 'request'; name: string } | null> {
+  const args = a === undefined ? {} : { auth: a }
+  const boss = await ctx.runQuery(p.wiring.authorize.admin, args)
+  if (boss) return { level: 'admin', name: boss.name }
+  const asker = p.wiring.authorize.request ? await ctx.runQuery(p.wiring.authorize.request, args) : null
+  return asker ? { level: 'request', name: asker.name } : null
+}
+
+/** An admin, or someone the app's authorize.request lets see payments and ask for refunds; throws otherwise. */
+async function requester<C extends GenericValidator>(p: Payments<C>, ctx: RunQueryCtx, a: unknown): Promise<Who> {
+  const who = await accessOf(p, ctx, a)
+  if (!who) throw new ConvexError('Only an admin may do this.')
+  return { name: who.name }
+}
+
+/** The app's second step before money moves (authorize.stepUp): refuses with code 'step_up' and the app's sentence. */
+async function stepUp<C extends GenericValidator>(p: Payments<C>, ctx: RunQueryCtx, a: unknown, action: 'approve' | 'send', refundId: string) {
+  const check = p.wiring.authorize.stepUp
+  if (!check) return
+  const refusal = await ctx.runQuery(check, { ...(a === undefined ? {} : { auth: a }), action, refundId })
+  if (refusal !== null) throw new ConvexError({ code: 'step_up', message: refusal })
+}
+
 export function adminApi<C extends GenericValidator>(p: Payments<C>, o: AdminApiOptions) {
   const c = p.component
   const summary = (x: NonNullable<Awaited<ReturnType<typeof p.status>>>) => ({
@@ -79,11 +112,20 @@ export function adminApi<C extends GenericValidator>(p: Payments<C>, o: AdminApi
   })
 
   return {
+    /** What the caller may do: { level: 'admin' | 'request', name }, or null. For the page to show only what they may use. */
+    access: queryGeneric({
+      args: { auth },
+      handler: async (ctx, a): Promise<{ level: 'admin' | 'request'; name: string; skipApproval: boolean } | null> => {
+        const who = await accessOf(p, ctx, a.auth)
+        return who && { ...who, skipApproval: o.skipApproval ?? false }
+      },
+    }),
+
     /** Refunds waiting on someone (requested, approved, sending, failed), oldest first, each with its payment. */
     openRefunds: queryGeneric({
       args: { auth },
       handler: async (ctx, a) => {
-        await admin(p, ctx, a.auth)
+        await requester(p, ctx, a.auth)
         const refunds = await ctx.runQuery(c.refunds.listOpen, {})
         return await Promise.all(
           refunds.map(async (r) => {
@@ -98,7 +140,7 @@ export function adminApi<C extends GenericValidator>(p: Payments<C>, o: AdminApi
     refundable: queryGeneric({
       args: { auth, ref: v.optional(ref), paginationOpts: paginationOptsValidator },
       handler: async (ctx, a) => {
-        await admin(p, ctx, a.auth)
+        await requester(p, ctx, a.auth)
         const page = await ctx.runQuery(c.checkouts.refundable, { ref: a.ref, paginationOpts: a.paginationOpts })
         return { ...page, page: page.page.map(summary) }
       },
@@ -108,7 +150,7 @@ export function adminApi<C extends GenericValidator>(p: Payments<C>, o: AdminApi
     issues: queryGeneric({
       args: { auth, open: v.optional(v.boolean()), paginationOpts: paginationOptsValidator },
       handler: async (ctx, a) => {
-        await admin(p, ctx, a.auth)
+        await requester(p, ctx, a.auth)
         return await ctx.runQuery(c.issues.list, { open: a.open ?? true, paginationOpts: a.paginationOpts })
       },
     }),
@@ -117,7 +159,7 @@ export function adminApi<C extends GenericValidator>(p: Payments<C>, o: AdminApi
     openCount: queryGeneric({
       args: { auth },
       handler: async (ctx, a): Promise<number> => {
-        await admin(p, ctx, a.auth)
+        await requester(p, ctx, a.auth)
         return (await ctx.runQuery(c.refunds.listOpen, {})).length + (await ctx.runQuery(c.issues.openCount, {}))
       },
     }),
@@ -126,7 +168,7 @@ export function adminApi<C extends GenericValidator>(p: Payments<C>, o: AdminApi
     checkout: queryGeneric({
       args: { auth, checkoutId: v.string() },
       handler: async (ctx, a) => {
-        await admin(p, ctx, a.auth)
+        await requester(p, ctx, a.auth)
         const x = await ctx.runQuery(c.checkouts.get, { id: a.checkoutId })
         return x && x.app === p.app ? { checkout: summary(x), lastError: x.lastError, refunds: await ctx.runQuery(c.refunds.forCheckout, { checkoutId: x.id }) } : null
       },
@@ -136,7 +178,7 @@ export function adminApi<C extends GenericValidator>(p: Payments<C>, o: AdminApi
     requestRefund: mutationGeneric({
       args: { auth, checkoutId: v.string(), amountCents: v.optional(v.number()), reason: v.string(), hostData: v.optional(v.record(v.string(), v.string())) },
       handler: async (ctx, { auth: token, ...a }): Promise<string> => {
-        const who = await admin(p, ctx, token)
+        const who = await requester(p, ctx, token)
         return await p.requestRefund(ctx, { ...a, by: who.name })
       },
     }),
@@ -145,6 +187,7 @@ export function adminApi<C extends GenericValidator>(p: Payments<C>, o: AdminApi
       args: { auth, refundId: v.string() },
       handler: async (ctx, a): Promise<null> => {
         const who = await admin(p, ctx, a.auth)
+        await stepUp(p, ctx, a.auth, 'approve', a.refundId)
         await p.approveRefund(ctx, { refundId: a.refundId, by: who.name })
         return null
       },
@@ -155,6 +198,7 @@ export function adminApi<C extends GenericValidator>(p: Payments<C>, o: AdminApi
       args: { auth, refundId: v.string() },
       handler: async (ctx, a): Promise<{ status: string; error: string | null } | null> => {
         const who = await admin(p, ctx, a.auth)
+        await stepUp(p, ctx, a.auth, 'send', a.refundId)
         const r = await p.sendRefund(ctx, a.refundId, { skipApproval: o.skipApproval ?? false, by: who.name })
         return r && { status: r.status, error: r.error }
       },

@@ -17,6 +17,7 @@ import type * as lib from "../lib.js";
 import type * as limits from "../limits.js";
 import type * as maintenance from "../maintenance.js";
 import type * as refunds from "../refunds.js";
+import type * as schedules from "../schedules.js";
 import type * as settings from "../settings.js";
 
 import type {
@@ -36,6 +37,7 @@ const fullApi: ApiFromModules<{
   limits: typeof limits;
   maintenance: typeof maintenance;
   refunds: typeof refunds;
+  schedules: typeof schedules;
   settings: typeof settings;
 }> = anyApi as any;
 

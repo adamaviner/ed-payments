@@ -45,8 +45,16 @@ export class ProcessorError extends Error {
   readonly declineCode: string | undefined
   /** The PaymentIntent Stripe attached to a failed confirm, so its id and status are known even when the charge was refused. */
   readonly paymentIntent: { id: string; status: string } | undefined
+  /** Stripe's advice on a card error (do_not_try_again, try_again_later, confirm_card_data). */
+  readonly adviceCode: string | undefined
 
-  constructor(processor: Processor, status: number, message: string, code?: string, extra: { type?: string; declineCode?: string; paymentIntent?: { id: string; status: string } } = {}) {
+  constructor(
+    processor: Processor,
+    status: number,
+    message: string,
+    code?: string,
+    extra: { type?: string; declineCode?: string; adviceCode?: string; paymentIntent?: { id: string; status: string } } = {},
+  ) {
     super(message)
     this.name = 'ProcessorError'
     this.processor = processor
@@ -55,6 +63,7 @@ export class ProcessorError extends Error {
     this.type = extra.type
     this.declineCode = extra.declineCode
     this.paymentIntent = extra.paymentIntent
+    this.adviceCode = extra.adviceCode
   }
 
   /** Worth trying again later: the processor was down, slow or rate-limiting. */

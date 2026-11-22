@@ -26,14 +26,19 @@ interface Session {
   method: string
   /** The fee Stripe would keep once paid. */
   fee: number
+  /** The Customer it was made for, and whether it saves what pays it (setup_future_usage). */
+  customer: string | null
+  saves: boolean
 }
 
 /**
  * How a saved method behaves when charged with nobody present, like Stripe's test methods:
  * ok (pm_card_visa), decline (pm_card_chargeCustomerFail), auth (pm_card_authenticationRequired),
- * bank (pm_usBankAccount_success: processing, then paid when settleBank says).
+ * bank (pm_usBankAccount_success: processing, then paid when settleBank says), and two declines that
+ * test mode can't attach: insufficient (decline_code insufficient_funds) and lost (lost_card,
+ * advice do_not_try_again), shaped like the real decline.
  */
-export type FakeMethodBehaviour = 'ok' | 'decline' | 'auth' | 'bank'
+export type FakeMethodBehaviour = 'ok' | 'decline' | 'auth' | 'bank' | 'insufficient' | 'lost'
 
 export interface FakeStripeOptions {
   webhookSecret?: string
@@ -142,10 +147,17 @@ export function fakeStripe({ webhookSecret = FAKE_STRIPE_WEBHOOK_SECRET, fallbac
     const m = methods.get(pmId)
     if (!m) return { status: 400, body: { error: { type: 'invalid_request_error', code: 'resource_missing', message: `No such PaymentMethod: '${pmId}'` } } }
     pi.payment_method = pmId
-    if (m.behaviour === 'decline' || m.behaviour === 'auth') {
-      const err = fixture(m.behaviour === 'decline' ? stripeObjectFixtures.errorCardDeclined : stripeObjectFixtures.errorAuthenticationRequired) as unknown as { error: Record<string, unknown> }
+    if (m.behaviour === 'decline' || m.behaviour === 'auth' || m.behaviour === 'insufficient' || m.behaviour === 'lost') {
+      const err = fixture(m.behaviour === 'auth' ? stripeObjectFixtures.errorAuthenticationRequired : stripeObjectFixtures.errorCardDeclined) as unknown as { error: Record<string, unknown> }
+      if (m.behaviour === 'insufficient') Object.assign(err.error, { decline_code: 'insufficient_funds', message: 'Your card has insufficient funds.' })
+      if (m.behaviour === 'lost') Object.assign(err.error, { decline_code: 'lost_card', advice_code: 'do_not_try_again', message: 'Your card has been declined.' })
       pi.status = 'requires_payment_method'
-      pi.last_payment_error = { message: String(err.error.message), code: String(err.error.code) }
+      pi.last_payment_error = {
+        message: String(err.error.message),
+        code: String(err.error.code),
+        ...(err.error.decline_code ? { decline_code: String(err.error.decline_code) } : {}),
+        ...(err.error.advice_code ? { advice_code: String(err.error.advice_code) } : {}),
+      }
       return { status: 402, body: { error: { ...err.error, payment_intent: structuredClone(pi), payment_method: structuredClone(m.pm) } } }
     }
     if (m.behaviour === 'bank') pi.status = 'processing'
@@ -211,7 +223,11 @@ export function fakeStripe({ webhookSecret = FAKE_STRIPE_WEBHOOK_SECRET, fallbac
       }
       const amount = s.amount_total ?? 0
       const m = params.get('allowed_payment_method_types[0]') ?? 'card'
-      sessions.set(id, { s, method: m, fee: m === 'us_bank_account' ? bankFee(amount) : cardFee(amount) })
+      const customer = params.get('customer')
+      if (customer && params.has('customer_email')) return fail(400, { error: { type: 'invalid_request_error', message: 'You may only specify one of these parameters: customer, customer_email.' } })
+      const saves = params.get('payment_intent_data[setup_future_usage]') === 'off_session'
+      if (saves && !customer) return fail(400, { error: { type: 'invalid_request_error', message: 'setup_future_usage needs a customer here.' } })
+      sessions.set(id, { s, method: m, fee: m === 'us_bank_account' ? bankFee(amount) : cardFee(amount), customer, saves })
       return remember(s)
     }
     if (path[1] === 'checkout' && path[2] === 'sessions' && path[3]) {
@@ -425,7 +441,7 @@ export function fakeStripe({ webhookSecret = FAKE_STRIPE_WEBHOOK_SECRET, fallbac
         metadata: { app },
         created: nowSec(),
       }
-      sessions.set(id, { s, method: 'card', fee: 0 })
+      sessions.set(id, { s, method: 'card', fee: 0, customer: null, saves: false })
       intents.set(pi, { amount, fee: 0, metadata: { app } })
       return s
     },
@@ -448,29 +464,47 @@ export function fakeStripe({ webhookSecret = FAKE_STRIPE_WEBHOOK_SECRET, fallbac
      * The buyer pays. A card is paid at once (checkout.session.completed, paid); a bank account is
      * accepted now and paid days later (completed unpaid, then async_payment_succeeded). Returns the webhook.
      */
-    async pay(id: string, o: { eventId?: string } = {}) {
+    async pay(id: string, o: { eventId?: string; /** How the method a saving session keeps behaves when charged later. */ behaviour?: FakeMethodBehaviour } = {}) {
       const x = session(id)
-      const pi = `pi_fake${++n}`
-      x.s.status = 'complete'
-      x.s.payment_intent = pi
       const ach = x.method === 'us_bank_account'
+      x.s.status = 'complete'
       x.s.payment_status = ach ? 'unpaid' : 'paid'
-      intents.set(pi, { amount: x.s.amount_total ?? 0, fee: x.fee, metadata: x.s.metadata ?? {} })
+      if (x.saves && x.customer) {
+        // What setup_future_usage leaves behind: the method on the Customer, and a PaymentIntent paid with it.
+        const pm = makeMethod(x.customer, ach ? 'bank' : 'ok')
+        const pi = newIntent(
+          new URLSearchParams({ amount: String(x.s.amount_total ?? 0), customer: x.customer, 'metadata[app]': x.s.metadata?.app ?? '', 'metadata[checkoutId]': x.s.metadata?.checkoutId ?? '' }),
+        )
+        pi.payment_method = pm.id
+        if (ach) pi.status = 'processing'
+        else paid(pi)
+        paymentIntents.set(pi.id, pi)
+        const m = methods.get(pm.id)
+        if (m && o.behaviour) m.behaviour = o.behaviour
+        x.s.payment_intent = pi.id
+      } else {
+        const pi = `pi_fake${++n}`
+        x.s.payment_intent = pi
+        intents.set(pi, { amount: x.s.amount_total ?? 0, fee: x.fee, metadata: x.s.metadata ?? {} })
+      }
       return await webhook(stripeEvent(ach ? 'checkout.session.completed-ach' : 'checkout.session.completed', { ...x.s }, o.eventId))
     },
     /** The bank payment arrived (or bounced): a hosted session's, or a PaymentIntent's (returns its webhook). */
-    async settleBank(id: string, succeeded: boolean) {
+    async settleBank(id: string, succeeded: boolean, code = 'payment_method_provider_decline') {
       const pi = paymentIntents.get(id)
       if (pi) {
         if (succeeded) paid(pi)
         else {
           pi.status = 'requires_payment_method'
-          pi.last_payment_error = { message: 'The customer’s bank account could not be debited.', code: 'payment_method_provider_decline' }
+          // A bounced debit carries its reason in code (insufficient_funds, account_closed...), decline_code generic (seen in test mode).
+          pi.last_payment_error = { message: 'The customer’s bank account could not be debited.', code, decline_code: 'generic_decline' }
         }
         return await intentEvent(pi)
       }
       const x = session(id)
       x.s.payment_status = succeeded ? 'paid' : 'unpaid'
+      const saved = typeof x.s.payment_intent === 'string' ? paymentIntents.get(x.s.payment_intent) : undefined
+      if (saved && succeeded) paid(saved)
       return await webhook(stripeEvent(succeeded ? 'checkout.session.async_payment_succeeded' : 'checkout.session.async_payment_failed', { ...x.s }))
     },
     /** The session ran out at Stripe. */
@@ -486,6 +520,19 @@ export function fakeStripe({ webhookSecret = FAKE_STRIPE_WEBHOOK_SECRET, fallbac
     saveMethod(customer: string, behaviour: FakeMethodBehaviour = 'ok'): string {
       if (!customers.has(customer)) throw new Error(`fakeStripe: no customer ${customer}`)
       return makeMethod(customer, behaviour).id
+    },
+    /** The payer (or someone in the dashboard) detaches a saved method at Stripe: the payment_method.detached webhook. */
+    async detach(pmId: string) {
+      const m = methods.get(pmId)
+      if (!m) throw new Error(`fakeStripe: no PaymentMethod ${pmId}`)
+      m.pm.customer = null
+      return await webhook(stripeEvent('payment_method.detached', structuredClone(m.pm) as unknown as Record<string, unknown>))
+    },
+    /** Makes a saved method behave differently when charged from now on. */
+    setBehaviour(pmId: string, behaviour: FakeMethodBehaviour) {
+      const m = methods.get(pmId)
+      if (!m) throw new Error(`fakeStripe: no PaymentMethod ${pmId}`)
+      m.behaviour = behaviour
     },
     /** A method saved to nobody (or to someone else), for refusals. */
     strayMethod(behaviour: FakeMethodBehaviour = 'ok', customer: string | null = null): string {

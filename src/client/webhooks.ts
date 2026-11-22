@@ -3,7 +3,7 @@
 // the component doesn't know, are answered 200 and counted as foreign, never retried forever (fix c).
 // A real failure after the signature check answers 500, so the processor tries again later.
 import type { PaypalCapture, PaypalDispute, PaypalEvent, PaypalOrder, PaypalRefund } from '../core/paypal.js'
-import { captureOrderId, moneyCents, orderCustomId, parsePaypalEvent, refundCaptureId, verifyPaypalWebhook } from '../core/paypal.js'
+import { captureOrderId, moneyCents, orderCustomId, parsePaypalEvent, paypalMethodId, paypalTokenOf, refundCaptureId, verifyPaypalWebhook } from '../core/paypal.js'
 import type { StripeCharge, StripeDispute, StripeEvent, StripeRefund, StripeSession } from '../core/stripe.js'
 import { STRIPE_EVENTS, parseStripeEvent, paymentIntentId, stripe, verifyStripeSignature, type StripePaymentIntent } from '../core/stripe.js'
 import { parseTag } from '../core/types.js'
@@ -67,6 +67,8 @@ async function actOnStripe(p: Payments, ctx: RunActionCtx, event: StripeEvent): 
     case 'charge.dispute.created':
     case 'charge.dispute.closed':
       return await onStripeDispute(p, ctx, event.type, object as unknown as StripeDispute)
+    case 'payment_method.detached':
+      return await onMethodGone(p, ctx, object.id, 'The card or bank account was removed at Stripe.')
     default:
       return 'ignored'
   }
@@ -143,6 +145,21 @@ async function onStripeDispute(p: Payments, ctx: RunActionCtx, type: string, d: 
   return res === 'foreign' ? 'foreign' : 'handled'
 }
 
+/**
+ * A saved method was removed at the processor (detached at Stripe; at PayPal, the payer cancelled the
+ * agreement or the token was deleted): marked removed, and the schedules using it cancelled. A
+ * method this library never saved isn't its business.
+ */
+async function onMethodGone(p: Payments, ctx: RunActionCtx, paymentMethodId: string, reason: string): Promise<Outcome> {
+  const tokenId = paypalTokenOf(paymentMethodId)
+  const known = tokenId
+    ? (await ctx.runQuery(p.component.customers.paypalMethod, { paymentTokenId: tokenId }))?.app === p.app
+    : !!(await ctx.runQuery(p.component.customers.method, { stripePaymentMethodId: paymentMethodId }))
+  if (!known) return 'foreign'
+  await ctx.runMutation(p.component.schedules.methodRemoved, { paymentMethodId, reason, now: Date.now() })
+  return 'handled'
+}
+
 // ── PayPal ───────────────────────────────────────────────────────────────────────────────────────
 
 export async function handlePaypalWebhook(p: Payments, ctx: RunActionCtx, request: Request): Promise<Response> {
@@ -213,6 +230,10 @@ async function actOnPaypal(p: Payments, ctx: RunActionCtx, event: PaypalEvent): 
         now: Date.now(),
       })
       return res === 'foreign' ? 'foreign' : 'handled'
+    }
+    case 'VAULT.PAYMENT-TOKEN.DELETED': {
+      const id = typeof event.resource.id === 'string' ? event.resource.id : null
+      return id ? await onMethodGone(p, ctx, paypalMethodId(id), 'The payer removed this payment method at PayPal.') : 'foreign'
     }
     case 'CUSTOMER.DISPUTE.CREATED':
     case 'CUSTOMER.DISPUTE.RESOLVED': {

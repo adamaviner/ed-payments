@@ -1,0 +1,17 @@
+{
+  "_source": "Built 2026-11-21: PayPal lists VAULT.PAYMENT-TOKEN.DELETED (https://developer.paypal.com/api/rest/webhooks/event-names/) but publishes no sample; shaped like its other webhook events (CUSTOMER.DISPUTE.CREATED.json), the resource a payment token as Payment Method Tokens v3 returns it (vault-payment-token-card.json). The library reads only resource.id.",
+  "id": "WH-TEST-VAULT-DELETED",
+  "event_version": "1.0",
+  "create_time": "2026-11-21T12:00:00.000Z",
+  "resource_type": "payment_token",
+  "resource_version": "3.0",
+  "event_type": "VAULT.PAYMENT-TOKEN.DELETED",
+  "summary": "A payment token has been deleted",
+  "resource": {
+    "id": "fakepaytoken1",
+    "customer": {
+      "id": "FAKECUST1"
+    }
+  },
+  "links": []
+}

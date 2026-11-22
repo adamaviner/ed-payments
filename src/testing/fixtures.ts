@@ -18,6 +18,7 @@ import sDisputeClosed from './fixtures/stripe/charge.dispute.closed.json' with {
 import sPiSucceeded from './fixtures/stripe/payment_intent.succeeded.json' with { type: 'json' }
 import sPiProcessing from './fixtures/stripe/payment_intent.processing.json' with { type: 'json' }
 import sPiFailed from './fixtures/stripe/payment_intent.payment_failed.json' with { type: 'json' }
+import sPmDetached from './fixtures/stripe/payment_method.detached.json' with { type: 'json' }
 import sCustomer from './fixtures/stripe/customer.json' with { type: 'json' }
 import sPmCard from './fixtures/stripe/payment-method-card.json' with { type: 'json' }
 import sPmBank from './fixtures/stripe/payment-method-bank.json' with { type: 'json' }
@@ -64,6 +65,9 @@ import pVaultSetupPaypal from './fixtures/paypal/vault-setup-token-paypal.json' 
 import pVaultPaymentToken from './fixtures/paypal/vault-payment-token-card.json' with { type: 'json' }
 import pVaultOrder from './fixtures/paypal/vault-order-captured.json' with { type: 'json' }
 import pErrorInvalidSource from './fixtures/paypal/error-invalid-payment-source.json' with { type: 'json' }
+import pVaultDeleted from './fixtures/paypal/VAULT.PAYMENT-TOKEN.DELETED.json' with { type: 'json' }
+import pOrderVaultCard from './fixtures/paypal/order-vault-card-captured.json' with { type: 'json' }
+import pVaultOrderRecurring from './fixtures/paypal/vault-order-recurring.json' with { type: 'json' }
 
 export const stripeEventFixtures = {
   'checkout.session.completed': sCompleted,
@@ -81,6 +85,7 @@ export const stripeEventFixtures = {
   'payment_intent.succeeded': sPiSucceeded,
   'payment_intent.processing': sPiProcessing,
   'payment_intent.payment_failed': sPiFailed,
+  'payment_method.detached': sPmDetached,
 }
 
 export const stripeObjectFixtures = {
@@ -120,6 +125,7 @@ export const paypalEventFixtures = {
   'PAYMENT.CAPTURE.REVERSED': pReversed,
   'CUSTOMER.DISPUTE.CREATED': pDisputeCreated,
   'CUSTOMER.DISPUTE.RESOLVED': pDisputeResolved,
+  'VAULT.PAYMENT-TOKEN.DELETED': pVaultDeleted,
 }
 
 export const paypalObjectFixtures = {
@@ -136,6 +142,8 @@ export const paypalObjectFixtures = {
   vaultPaymentTokenCard: pVaultPaymentToken,
   vaultOrderCaptured: pVaultOrder,
   errorInvalidPaymentSource: pErrorInvalidSource,
+  orderVaultCardCaptured: pOrderVaultCard,
+  vaultOrderRecurring: pVaultOrderRecurring,
 }
 
 export type StripeEventFixture = keyof typeof stripeEventFixtures

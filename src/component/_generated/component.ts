@@ -72,6 +72,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           chargeKey: string | null;
           context: any;
           createdAt: number;
+          declineCode: string | null;
+          declineKind: "hard" | "soft" | "insufficient_funds" | null;
           description: string;
           disputed: boolean;
           expiresAt: number;
@@ -92,6 +94,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           refundedCents: number;
           retryOf: string | null;
           returnUrl: string;
+          scheduleId: string | null;
+          schedulePeriod: string | null;
           settledAt: number | null;
           status:
             | "created"
@@ -117,6 +121,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           chargeKey: string | null;
           context: any;
           createdAt: number;
+          declineCode: string | null;
+          declineKind: "hard" | "soft" | "insufficient_funds" | null;
           description: string;
           disputed: boolean;
           expiresAt: number;
@@ -137,6 +143,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           refundedCents: number;
           retryOf: string | null;
           returnUrl: string;
+          scheduleId: string | null;
+          schedulePeriod: string | null;
           settledAt: number | null;
           status:
             | "created"
@@ -162,6 +170,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           chargeKey: string | null;
           context: any;
           createdAt: number;
+          declineCode: string | null;
+          declineKind: "hard" | "soft" | "insufficient_funds" | null;
           description: string;
           disputed: boolean;
           expiresAt: number;
@@ -182,6 +192,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           refundedCents: number;
           retryOf: string | null;
           returnUrl: string;
+          scheduleId: string | null;
+          schedulePeriod: string | null;
           settledAt: number | null;
           status:
             | "created"
@@ -207,6 +219,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           chargeKey: string | null;
           context: any;
           createdAt: number;
+          declineCode: string | null;
+          declineKind: "hard" | "soft" | "insufficient_funds" | null;
           description: string;
           disputed: boolean;
           expiresAt: number;
@@ -227,6 +241,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           refundedCents: number;
           retryOf: string | null;
           returnUrl: string;
+          scheduleId: string | null;
+          schedulePeriod: string | null;
           settledAt: number | null;
           status:
             | "created"
@@ -297,6 +313,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           ref: { id: string; type: string };
           retryOf?: string;
           returnUrl: string;
+          scheduleId?: string;
+          schedulePeriod?: string;
           stripeCustomerId?: string;
         },
         string,
@@ -314,6 +332,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           chargeKey: string | null;
           context: any;
           createdAt: number;
+          declineCode: string | null;
+          declineKind: "hard" | "soft" | "insufficient_funds" | null;
           description: string;
           disputed: boolean;
           expiresAt: number;
@@ -334,6 +354,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           refundedCents: number;
           retryOf: string | null;
           returnUrl: string;
+          scheduleId: string | null;
+          schedulePeriod: string | null;
           settledAt: number | null;
           status:
             | "created"
@@ -359,6 +381,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           chargeKey: string | null;
           context: any;
           createdAt: number;
+          declineCode: string | null;
+          declineKind: "hard" | "soft" | "insufficient_funds" | null;
           description: string;
           disputed: boolean;
           expiresAt: number;
@@ -379,6 +403,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           refundedCents: number;
           retryOf: string | null;
           returnUrl: string;
+          scheduleId: string | null;
+          schedulePeriod: string | null;
           settledAt: number | null;
           status:
             | "created"
@@ -411,6 +437,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           chargeKey: string | null;
           context: any;
           createdAt: number;
+          declineCode: string | null;
+          declineKind: "hard" | "soft" | "insufficient_funds" | null;
           description: string;
           disputed: boolean;
           expiresAt: number;
@@ -431,6 +459,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           refundedCents: number;
           retryOf: string | null;
           returnUrl: string;
+          scheduleId: string | null;
+          schedulePeriod: string | null;
           settledAt: number | null;
           status:
             | "created"
@@ -468,6 +498,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             chargeKey: string | null;
             context: any;
             createdAt: number;
+            declineCode: string | null;
+            declineKind: "hard" | "soft" | "insufficient_funds" | null;
             description: string;
             disputed: boolean;
             expiresAt: number;
@@ -488,6 +520,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             refundedCents: number;
             retryOf: string | null;
             returnUrl: string;
+            scheduleId: string | null;
+            schedulePeriod: string | null;
             settledAt: number | null;
             status:
               | "created"
@@ -592,6 +626,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             chargeKey: string | null;
             context: any;
             createdAt: number;
+            declineCode: string | null;
+            declineKind: "hard" | "soft" | "insufficient_funds" | null;
             description: string;
             disputed: boolean;
             expiresAt: number;
@@ -612,6 +648,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             refundedCents: number;
             retryOf: string | null;
             returnUrl: string;
+            scheduleId: string | null;
+            schedulePeriod: string | null;
             settledAt: number | null;
             status:
               | "created"
@@ -647,6 +685,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           chargeKey: string | null;
           context: any;
           createdAt: number;
+          declineCode: string | null;
+          declineKind: "hard" | "soft" | "insufficient_funds" | null;
           description: string;
           disputed: boolean;
           expiresAt: number;
@@ -667,6 +707,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           refundedCents: number;
           retryOf: string | null;
           returnUrl: string;
+          scheduleId: string | null;
+          schedulePeriod: string | null;
           settledAt: number | null;
           status:
             | "created"
@@ -684,6 +726,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         "mutation",
         "internal",
         {
+          declineCode?: string;
+          declineKind?: "hard" | "soft" | "insufficient_funds";
           declined?: boolean;
           id: string;
           now: number;
@@ -773,8 +817,10 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             declined: boolean;
             kind: "card" | "paypal";
             label: string;
+            networkRef: { date?: string; id: string; network?: string } | null;
             paymentTokenId: string;
             removed: boolean;
+            usagePattern: string | null;
           };
           owner: { id: string; type: string };
           paypalCustomerId: string;
@@ -791,8 +837,10 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           declined: boolean;
           kind: "card" | "paypal";
           label: string;
+          networkRef: { date?: string; id: string; network?: string } | null;
           paymentTokenId: string;
           removed: boolean;
+          usagePattern: string | null;
         }>,
         Name
       >;
@@ -856,6 +904,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           owner: { id: string; type: string };
           paymentTokenId: string;
           paypalCustomerId: string;
+          usagePattern?: string;
         },
         {
           createdAt: number;
@@ -863,8 +912,10 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           declined: boolean;
           kind: "card" | "paypal";
           label: string;
+          networkRef: { date?: string; id: string; network?: string } | null;
           paymentTokenId: string;
           removed: boolean;
+          usagePattern: string | null;
         },
         Name
       >;
@@ -1291,6 +1342,414 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             | "dismissed";
           updatedAt: number;
         }>,
+        Name
+      >;
+    };
+    schedules: {
+      attachMethod: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          id: string;
+          now: number;
+          paypal?: {
+            kind: "card" | "paypal";
+            label: string;
+            networkRef?: { date?: string; id: string; network?: string };
+            paymentTokenId: string;
+            paypalCustomerId: string;
+            usagePattern?: string;
+          };
+          stripe?: {
+            kind: "card" | "ach";
+            label: string;
+            stripeCustomerId: string;
+            stripePaymentMethodId: string;
+          };
+        },
+        null,
+        Name
+      >;
+      cancel: FunctionReference<
+        "mutation",
+        "internal",
+        { app: string; by?: string; id: string; now: number; reason: string },
+        {
+          amountCents: number;
+          anchorDay: number;
+          app: string;
+          context: any;
+          createdAt: number;
+          description: string;
+          endReason: string | null;
+          endedAt: number | null;
+          endedBy: string | null;
+          failures: number;
+          hourUTC: number;
+          id: string;
+          interval: "month";
+          lastCheckoutId: string | null;
+          lastError: string | null;
+          lastPaidPeriod: string | null;
+          method: "card" | "ach" | "paypal";
+          nextChargeAt: number | null;
+          owner: { id: string; type: string };
+          pausedUntil: number | null;
+          payer: { email: string; name?: string };
+          paymentMethodId: string | null;
+          period: string;
+          processor: "stripe" | "paypal";
+          purpose: string;
+          ref: { id: string; type: string };
+          status:
+            | "starting"
+            | "active"
+            | "paused"
+            | "past_due"
+            | "lapsed"
+            | "cancelled";
+          updatedAt: number;
+        },
+        Name
+      >;
+      claim: FunctionReference<
+        "mutation",
+        "internal",
+        { app: string; id: string; now: number },
+        | {
+            action: "charge";
+            amountCents: number;
+            context: any;
+            description: string;
+            key: string;
+            owner: { id: string; type: string };
+            payer: { email: string; name?: string };
+            paymentMethodId: string;
+            period: string;
+            purpose: string;
+            ref: { id: string; type: string };
+          }
+        | { action: "wait"; reason: string },
+        Name
+      >;
+      create: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          amountCents: number;
+          anchorDay: number;
+          app: string;
+          callbacks: {
+            onChanged?: string;
+            onCharged?: string;
+            onFailed?: string;
+          };
+          context?: any;
+          description: string;
+          firstChargeAt: number;
+          hourUTC: number;
+          method: "card" | "ach" | "paypal";
+          now: number;
+          owner: { id: string; type: string };
+          payer: { email: string; name?: string };
+          paymentMethodId?: string;
+          processor: "stripe" | "paypal";
+          purpose: string;
+          ref: { id: string; type: string };
+          retryDays: Array<number>;
+        },
+        string,
+        Name
+      >;
+      discard: FunctionReference<
+        "mutation",
+        "internal",
+        { id: string },
+        null,
+        Name
+      >;
+      due: FunctionReference<
+        "query",
+        "internal",
+        { limit: number; now: number },
+        Array<{ app: string; id: string }>,
+        Name
+      >;
+      forOwner: FunctionReference<
+        "query",
+        "internal",
+        { app: string; owner: { id: string; type: string } },
+        Array<{
+          amountCents: number;
+          anchorDay: number;
+          app: string;
+          context: any;
+          createdAt: number;
+          description: string;
+          endReason: string | null;
+          endedAt: number | null;
+          endedBy: string | null;
+          failures: number;
+          hourUTC: number;
+          id: string;
+          interval: "month";
+          lastCheckoutId: string | null;
+          lastError: string | null;
+          lastPaidPeriod: string | null;
+          method: "card" | "ach" | "paypal";
+          nextChargeAt: number | null;
+          owner: { id: string; type: string };
+          pausedUntil: number | null;
+          payer: { email: string; name?: string };
+          paymentMethodId: string | null;
+          period: string;
+          processor: "stripe" | "paypal";
+          purpose: string;
+          ref: { id: string; type: string };
+          status:
+            | "starting"
+            | "active"
+            | "paused"
+            | "past_due"
+            | "lapsed"
+            | "cancelled";
+          updatedAt: number;
+        }>,
+        Name
+      >;
+      forRef: FunctionReference<
+        "query",
+        "internal",
+        { ref: { id: string; type: string } },
+        Array<{
+          amountCents: number;
+          anchorDay: number;
+          app: string;
+          context: any;
+          createdAt: number;
+          description: string;
+          endReason: string | null;
+          endedAt: number | null;
+          endedBy: string | null;
+          failures: number;
+          hourUTC: number;
+          id: string;
+          interval: "month";
+          lastCheckoutId: string | null;
+          lastError: string | null;
+          lastPaidPeriod: string | null;
+          method: "card" | "ach" | "paypal";
+          nextChargeAt: number | null;
+          owner: { id: string; type: string };
+          pausedUntil: number | null;
+          payer: { email: string; name?: string };
+          paymentMethodId: string | null;
+          period: string;
+          processor: "stripe" | "paypal";
+          purpose: string;
+          ref: { id: string; type: string };
+          status:
+            | "starting"
+            | "active"
+            | "paused"
+            | "past_due"
+            | "lapsed"
+            | "cancelled";
+          updatedAt: number;
+        }>,
+        Name
+      >;
+      get: FunctionReference<
+        "query",
+        "internal",
+        { id: string },
+        {
+          amountCents: number;
+          anchorDay: number;
+          app: string;
+          context: any;
+          createdAt: number;
+          description: string;
+          endReason: string | null;
+          endedAt: number | null;
+          endedBy: string | null;
+          failures: number;
+          hourUTC: number;
+          id: string;
+          interval: "month";
+          lastCheckoutId: string | null;
+          lastError: string | null;
+          lastPaidPeriod: string | null;
+          method: "card" | "ach" | "paypal";
+          nextChargeAt: number | null;
+          owner: { id: string; type: string };
+          pausedUntil: number | null;
+          payer: { email: string; name?: string };
+          paymentMethodId: string | null;
+          period: string;
+          processor: "stripe" | "paypal";
+          purpose: string;
+          ref: { id: string; type: string };
+          status:
+            | "starting"
+            | "active"
+            | "paused"
+            | "past_due"
+            | "lapsed"
+            | "cancelled";
+          updatedAt: number;
+        } | null,
+        Name
+      >;
+      methodRemoved: FunctionReference<
+        "mutation",
+        "internal",
+        { now: number; paymentMethodId: string; reason: string },
+        number,
+        Name
+      >;
+      pause: FunctionReference<
+        "mutation",
+        "internal",
+        { app: string; by?: string; id: string; now: number; until: number },
+        {
+          amountCents: number;
+          anchorDay: number;
+          app: string;
+          context: any;
+          createdAt: number;
+          description: string;
+          endReason: string | null;
+          endedAt: number | null;
+          endedBy: string | null;
+          failures: number;
+          hourUTC: number;
+          id: string;
+          interval: "month";
+          lastCheckoutId: string | null;
+          lastError: string | null;
+          lastPaidPeriod: string | null;
+          method: "card" | "ach" | "paypal";
+          nextChargeAt: number | null;
+          owner: { id: string; type: string };
+          pausedUntil: number | null;
+          payer: { email: string; name?: string };
+          paymentMethodId: string | null;
+          period: string;
+          processor: "stripe" | "paypal";
+          purpose: string;
+          ref: { id: string; type: string };
+          status:
+            | "starting"
+            | "active"
+            | "paused"
+            | "past_due"
+            | "lapsed"
+            | "cancelled";
+          updatedAt: number;
+        },
+        Name
+      >;
+      resume: FunctionReference<
+        "mutation",
+        "internal",
+        { app: string; at?: number; by?: string; id: string; now: number },
+        {
+          amountCents: number;
+          anchorDay: number;
+          app: string;
+          context: any;
+          createdAt: number;
+          description: string;
+          endReason: string | null;
+          endedAt: number | null;
+          endedBy: string | null;
+          failures: number;
+          hourUTC: number;
+          id: string;
+          interval: "month";
+          lastCheckoutId: string | null;
+          lastError: string | null;
+          lastPaidPeriod: string | null;
+          method: "card" | "ach" | "paypal";
+          nextChargeAt: number | null;
+          owner: { id: string; type: string };
+          pausedUntil: number | null;
+          payer: { email: string; name?: string };
+          paymentMethodId: string | null;
+          period: string;
+          processor: "stripe" | "paypal";
+          purpose: string;
+          ref: { id: string; type: string };
+          status:
+            | "starting"
+            | "active"
+            | "paused"
+            | "past_due"
+            | "lapsed"
+            | "cancelled";
+          updatedAt: number;
+        },
+        Name
+      >;
+      update: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          amountCents?: number;
+          anchorDay?: number;
+          app: string;
+          by?: string;
+          description?: string;
+          id: string;
+          method?: "card" | "ach" | "paypal";
+          now: number;
+          paymentMethodId?: string;
+          processor?: "stripe" | "paypal";
+        },
+        {
+          amountCents: number;
+          anchorDay: number;
+          app: string;
+          context: any;
+          createdAt: number;
+          description: string;
+          endReason: string | null;
+          endedAt: number | null;
+          endedBy: string | null;
+          failures: number;
+          hourUTC: number;
+          id: string;
+          interval: "month";
+          lastCheckoutId: string | null;
+          lastError: string | null;
+          lastPaidPeriod: string | null;
+          method: "card" | "ach" | "paypal";
+          nextChargeAt: number | null;
+          owner: { id: string; type: string };
+          pausedUntil: number | null;
+          payer: { email: string; name?: string };
+          paymentMethodId: string | null;
+          period: string;
+          processor: "stripe" | "paypal";
+          purpose: string;
+          ref: { id: string; type: string };
+          status:
+            | "starting"
+            | "active"
+            | "paused"
+            | "past_due"
+            | "lapsed"
+            | "cancelled";
+          updatedAt: number;
+        },
+        Name
+      >;
+      usingMethod: FunctionReference<
+        "query",
+        "internal",
+        { paymentMethodId: string },
+        number,
         Name
       >;
     };

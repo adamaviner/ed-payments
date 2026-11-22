@@ -27,8 +27,22 @@ import {
 import { ConvexError, v, type GenericValidator, type Infer } from 'convex/values'
 import type { ComponentApi } from '../component/_generated/component.js'
 import { cheaperCardProcessor, DEFAULT_FEE_RATES, feeRates, feeSchedule, type CardProcessorChoice, type FeeRates, type FeeRatesInput, type FeeSchedule } from '../core/fees.js'
-import { PAYPAL_LIVE_API, PAYPAL_SANDBOX_API, approveUrl, captureFee, moneyCents, orderCapture, paypal, paypalToken, paypalTokenOf, type PaypalKeys, type PaypalOrder } from '../core/paypal.js'
-import { sessionState, stripe, stripeFee, paymentIntentId, type StripeKeys, type StripeSession } from '../core/stripe.js'
+import {
+  PAYPAL_LIVE_API,
+  PAYPAL_SANDBOX_API,
+  RECURRING_USAGE_PATTERN,
+  approveUrl,
+  captureFee,
+  moneyCents,
+  orderCapture,
+  orderVault,
+  paypal,
+  paypalToken,
+  paypalTokenOf,
+  type PaypalKeys,
+  type PaypalOrder,
+} from '../core/paypal.js'
+import { savedMethodKind, savedMethodLabel, sessionState, stripe, stripeFee, paymentIntentId, type StripeKeys, type StripeSession } from '../core/stripe.js'
 import { accountFingerprint, decryptToken, encryptToken } from '../core/tokenCrypt.js'
 import { ProcessorError, isMethodFor, tagFor, type Fetch, type Method, type Payer, type Processor, type Ref } from '../core/types.js'
 import { adminApi, publicApi, worker, type AdminApiOptions } from './api.js'
@@ -49,11 +63,39 @@ import {
   type VerifiedMethod,
 } from './saved.js'
 import { savePaypalMethod, setupPaypalMethod } from './paypalVault.js'
+import { runSchedules, startSchedule, startScheduleCheckout, updateSchedule, type ScheduleView, type StartScheduleArgs, type StartScheduleCheckoutArgs } from './schedules.js'
 import { errorText, paypalRefundState, stripeRefundState } from './util.js'
-import { callbackArgs, paidReturns, type Dispute, type Failed, type IssuesDigest, type Paid, type PaidResult, type Processing, type RefundNeeded, type Refunded } from './validators.js'
+import {
+  callbackArgs,
+  paidReturns,
+  type Dispute,
+  type Failed,
+  type IssuesDigest,
+  type Paid,
+  type PaidResult,
+  type Processing,
+  type RefundNeeded,
+  type Refunded,
+  type ScheduleChanged,
+  type ScheduleCharged,
+  type ScheduleFailed,
+} from './validators.js'
 import { handlePaypalWebhook, handleStripeWebhook, type UnhandledStripeEvent } from './webhooks.js'
 
-export type { ComponentApi, PaypalHistory, PaypalHistoryArgs, PaypalHistoryLine, ReconcileResult, UnhandledStripeEvent, SavedMethod, VerifiedMethod, AdminApiOptions }
+export type {
+  ComponentApi,
+  PaypalHistory,
+  PaypalHistoryArgs,
+  PaypalHistoryLine,
+  ReconcileResult,
+  UnhandledStripeEvent,
+  SavedMethod,
+  VerifiedMethod,
+  AdminApiOptions,
+  ScheduleView,
+  StartScheduleArgs,
+  StartScheduleCheckoutArgs,
+}
 export * from './validators.js'
 export { fromEnv, isLive, stripeProblems, paypalProblems, type KeySource, type Problem } from './env.js'
 export { PAYPAL_LIVE_API, PAYPAL_SANDBOX_API }
@@ -97,6 +139,12 @@ export interface PaymentsOptions<C extends GenericValidator> {
   brandName?: string
   /** For tests: the fetch the processor calls go through (default: the global fetch, looked up at each call). */
   fetch?: Fetch
+  /**
+   * Schedules (monthly charges): the hour (UTC) charges are made, default 15 (10 or 11 in the morning
+   * in New York), and the days after a period's first refusal it is tried again, default [3, 5, 7];
+   * after the last, the schedule lapses. Hard declines aren't retried.
+   */
+  schedules?: { hourUTC?: number; retryDays?: number[] }
 }
 
 type Internal<Args extends Record<string, unknown>, R = unknown> = FunctionReference<'mutation', 'internal', Args, R>
@@ -111,6 +159,12 @@ export interface PaymentCallbacks<T> {
   processing: Internal<Processing<T>>
   /** The nightly digest of new issues (send it to a person). */
   issues: Internal<IssuesDigest>
+  /** Only for schedules (all three, then): a period's charge was paid. */
+  scheduleCharged?: Internal<ScheduleCharged<T>>
+  /** A schedule's charge was refused: retried later, or (final) the schedule lapsed. */
+  scheduleFailed?: Internal<ScheduleFailed<T>>
+  /** A schedule started, never started, or was changed (amount, method, day, pause, resume, cancel), by the app or the processor. */
+  scheduleChanged?: Internal<ScheduleChanged<T>>
 }
 
 /** Who is asking, as the app's check sees it; recorded on refunds. */
@@ -125,6 +179,8 @@ export interface WorkerRefs {
   cleanup: FunctionReference<'mutation', 'internal', Record<string, never>, { deleted: number; more: boolean }>
   issuesDigest: FunctionReference<'mutation', 'internal', Record<string, never>, number>
   charge: FunctionReference<'action', 'internal', { checkoutId: string; manual?: boolean }, null>
+  /** Only for schedules: the hourly run (registerCrons adds it when exported). */
+  schedules?: FunctionReference<'action', 'internal', { scheduleId?: string }, null>
 }
 
 export interface PaymentsWiring<T> {
@@ -134,7 +190,21 @@ export interface PaymentsWiring<T> {
    * `auth` is whatever the caller passed to the generated function (ed-schedule: its session token);
    * apps that use Convex auth ignore it, as the caller's identity carries through.
    */
-  authorize: { admin: FunctionReference<'query', 'internal', { auth?: unknown }, Who | null> }
+  authorize: {
+    /** May approve, send and record refunds, resolve issues, retry charges: { name } or null. */
+    admin: FunctionReference<'query', 'internal', { auth?: unknown }, Who | null>
+    /**
+     * May see the payments and ask for a refund, nothing more (e.g. staff, beside admins who approve
+     * and send). Without it only admins may ask.
+     */
+    request?: FunctionReference<'query', 'internal', { auth?: unknown }, Who | null>
+    /**
+     * Asked right before a refund is approved or sent: null to go ahead, or a sentence saying why not
+     * (e.g. "Confirm with your passkey first."), which refuses it with code 'step_up' so the page can
+     * ask for the check and try again. For a fresh passkey check, or any second step.
+     */
+    stepUp?: FunctionReference<'query', 'internal', { auth?: unknown; action: 'approve' | 'send'; refundId: string }, string | null>
+  }
   /** Where the app exported payments.worker(), for scheduled charges and registerCrons. */
   worker: WorkerRefs
 }
@@ -177,7 +247,17 @@ export type EmbeddedPayment =
    * For PayPal's buttons: the order the buttons pay, the REST app's client id (public; it also says
    * sandbox or live), and where to go once paid (returnPath with PayPal's token, as a redirect would).
    */
-  | { processor: 'paypal'; orderId: string; clientId: string; returnUrl: string }
+  | {
+      processor: 'paypal'
+      orderId: string
+      clientId: string
+      returnUrl: string
+      /**
+       * An order that saves its method for a schedule can only be paid one way: 'paypal' with
+       * PaypalButtons (the PayPal button alone), 'card' with PaypalCardPayment (PayPal's Card Fields).
+       */
+      only?: 'card' | 'paypal'
+    }
 
 export interface StartedRedirect {
   checkoutId: string
@@ -371,6 +451,18 @@ export class Payments<C extends GenericValidator = GenericValidator> {
   async start(ctx: RunActionCtx, a: StartArgs<Infer<C>> & { ui?: 'redirect' }): Promise<StartedRedirect>
   async start(ctx: RunActionCtx, a: StartArgs<Infer<C>>): Promise<StartedRedirect | StartedEmbedded>
   async start(ctx: RunActionCtx, a: StartArgs<Infer<C>>): Promise<StartedRedirect | StartedEmbedded> {
+    return await this.begin(ctx, a)
+  }
+
+  /**
+   * @internal start, and for a schedule's first payment (startScheduleCheckout) the schedule it
+   * starts and the payer's customer at the processor, so the method that pays is saved with it.
+   */
+  async begin(
+    ctx: RunActionCtx,
+    a: StartArgs<Infer<C>>,
+    save?: { scheduleId: string; schedulePeriod: string; stripeCustomerId?: string; paypalCustomerId?: string },
+  ): Promise<StartedRedirect | StartedEmbedded> {
     if (!isMethodFor(a.processor, a.method)) throw new ConvexError(`${a.processor === 'stripe' ? 'Stripe' : 'PayPal'} doesn’t take ${a.method} payments here.`)
     if (!Number.isInteger(a.amountCents) || a.amountCents < 1) throw new ConvexError('A checkout needs an amount of at least one cent.')
     this.checkContext(a.context)
@@ -396,10 +488,11 @@ export class Payments<C extends GenericValidator = GenericValidator> {
       context: a.context,
       callbacks: await this.handles(),
       limits: await this.limits(ctx, 'start', a.limitKey ?? a.payer.email),
+      ...(save ? { scheduleId: save.scheduleId, schedulePeriod: save.schedulePeriod, stripeCustomerId: save.stripeCustomerId } : {}),
       now,
     })
     try {
-      const made = a.processor === 'stripe' ? await this.startStripe(checkoutId, a, returnUrl, cancelUrl, expiresAt, now) : await this.startPaypal(ctx, checkoutId, a, returnUrl, cancelUrl)
+      const made = a.processor === 'stripe' ? await this.startStripe(checkoutId, a, returnUrl, cancelUrl, expiresAt, now, save) : await this.startPaypal(ctx, checkoutId, a, returnUrl, cancelUrl, save)
       await ctx.runMutation(this.component.checkouts.attach, { id: checkoutId, processorCheckoutId: made.id })
       return made.embedded ? { checkoutId, embedded: made.embedded } : { checkoutId, redirectUrl: made.url }
     } catch (err) {
@@ -409,7 +502,7 @@ export class Payments<C extends GenericValidator = GenericValidator> {
     }
   }
 
-  private async startStripe(checkoutId: string, a: StartArgs<Infer<C>>, returnUrl: string, cancelUrl: string, expiresAt: number, now: number) {
+  private async startStripe(checkoutId: string, a: StartArgs<Infer<C>>, returnUrl: string, cancelUrl: string, expiresAt: number, now: number, save?: { stripeCustomerId?: string }) {
     const successUrl = withParam(returnUrl, 'session_id', '{CHECKOUT_SESSION_ID}')
     const embedded = a.ui === 'embedded'
     const s = await stripe.createSession(
@@ -426,6 +519,7 @@ export class Payments<C extends GenericValidator = GenericValidator> {
         expiresAt,
         now,
         embedded,
+        ...(save?.stripeCustomerId ? { customer: save.stripeCustomerId, saveForLater: true } : {}),
       },
       { fetch: this.fetch },
     )
@@ -437,17 +531,29 @@ export class Payments<C extends GenericValidator = GenericValidator> {
     return { id: s.id, url: s.url }
   }
 
-  private async startPaypal(ctx: RunActionCtx, checkoutId: string, a: StartArgs<Infer<C>>, returnUrl: string, cancelUrl: string) {
+  private async startPaypal(ctx: RunActionCtx, checkoutId: string, a: StartArgs<Infer<C>>, returnUrl: string, cancelUrl: string, save?: { paypalCustomerId?: string }) {
     const embedded = a.ui === 'embedded'
+    const kind = a.method === 'card' ? ('card' as const) : ('paypal' as const)
     const order = await this.withPaypal(ctx, (call) =>
       paypal.createOrder(
         call,
-        { customId: tagFor(this.app, checkoutId), description: a.description, amountCents: a.amountCents, returnUrl, cancelUrl, brandName: this.options.brandName, embedded },
+        {
+          customId: tagFor(this.app, checkoutId),
+          description: a.description,
+          amountCents: a.amountCents,
+          returnUrl,
+          cancelUrl,
+          brandName: this.options.brandName,
+          embedded,
+          ...(save ? { save: { kind, customerId: save.paypalCustomerId, description: a.description } } : {}),
+        },
         `checkout-${checkoutId}`,
       ),
     )
     if (embedded) {
-      return { id: order.id, embedded: { processor: 'paypal', orderId: order.id, clientId: this.paypalKeys().clientId, returnUrl: withParam(returnUrl, 'token', order.id) } satisfies EmbeddedPayment }
+      const payment = { processor: 'paypal', orderId: order.id, clientId: this.paypalKeys().clientId, returnUrl: withParam(returnUrl, 'token', order.id) } satisfies EmbeddedPayment
+      // An order that saves its method names it, so only that kind of button can pay it.
+      return { id: order.id, embedded: save ? { ...payment, only: kind } : payment }
     }
     const url = approveUrl(order)
     if (!url) throw new Error('PayPal returned no approval address.')
@@ -458,6 +564,7 @@ export class Payments<C extends GenericValidator = GenericValidator> {
   async settleStripeSession(ctx: RunActionCtx, checkoutId: string, s: StripeSession) {
     const state = sessionState(s)
     const pi = paymentIntentId(s)
+    if (pi && (state === 'paid' || state === 'processing')) await this.saveForSchedule(ctx, checkoutId, { stripePaymentIntent: pi })
     if (state === 'processing') return await ctx.runMutation(this.component.checkouts.markProcessing, { id: checkoutId, paymentRef: pi ?? undefined, now: Date.now() })
     if (state !== 'paid') return null
     // Without an amount there is nothing safe to record; throwing makes the webhook answer 500 and Stripe retry.
@@ -487,6 +594,7 @@ export class Payments<C extends GenericValidator = GenericValidator> {
   async settlePaypalOrder(ctx: RunActionCtx, checkoutId: string, order: PaypalOrder) {
     const capture = orderCapture(order)
     if (!capture) return null
+    if (capture.status !== 'DECLINED' && capture.status !== 'FAILED') await this.saveForSchedule(ctx, checkoutId, { paypalOrder: order })
     if (capture.status === 'COMPLETED' || capture.status === 'PARTIALLY_REFUNDED' || capture.status === 'REFUNDED') {
       const paidCents = moneyCents(capture.amount)
       if (paidCents === null) throw new Error(`PayPal capture ${capture.id} has no USD amount.`)
@@ -508,6 +616,53 @@ export class Payments<C extends GenericValidator = GenericValidator> {
       declined: c?.kind === 'offSession' || undefined,
       now: Date.now(),
     })
+  }
+
+  /**
+   * @internal Before a schedule's first payment is settled: the method it saved (Stripe's
+   * setup_future_usage, PayPal's vault with purchase) becomes the schedule's, so settling starts it
+   * with something to charge. A webhook's PayPal capture carries no payment_source, so the order is
+   * read again. Best effort: a schedule left without a method fails its next charge, and the app's
+   * scheduleFailed asks the payer for another.
+   */
+  async saveForSchedule(ctx: RunActionCtx, checkoutId: string, from: { stripePaymentIntent?: string; paypalOrder?: PaypalOrder }) {
+    const c = await ctx.runQuery(this.component.checkouts.get, { id: checkoutId })
+    if (!c?.scheduleId || c.kind !== 'hosted') return
+    const s = await ctx.runQuery(this.component.schedules.get, { id: c.scheduleId })
+    if (!s || s.status !== 'starting' || s.paymentMethodId) return
+    try {
+      if (c.processor === 'stripe' && from.stripePaymentIntent) {
+        const pi = await stripe.paymentIntentWithMethod(this.stripeKeys(), from.stripePaymentIntent, { fetch: this.fetch })
+        const pm = typeof pi.payment_method === 'object' ? pi.payment_method : null
+        const kind = pm ? savedMethodKind(pm.type) : null
+        const label = pm ? savedMethodLabel(pm) : null
+        if (!pm || !kind || !label || !c.stripeCustomerId) throw new Error(`Stripe's PaymentIntent ${pi.id} has no saved card or bank account.`)
+        await ctx.runMutation(this.component.schedules.attachMethod, {
+          id: s.id,
+          stripe: { stripeCustomerId: c.stripeCustomerId, stripePaymentMethodId: pm.id, kind, label },
+          now: Date.now(),
+        })
+      } else if (c.processor === 'paypal' && from.paypalOrder) {
+        const orderId = from.paypalOrder.id || c.processorCheckoutId
+        const order = from.paypalOrder.payment_source || !orderId ? from.paypalOrder : await this.withPaypal(ctx, (call) => paypal.getOrder(call, orderId))
+        const saved = orderVault(order)
+        if (!saved) throw new Error(`PayPal's order ${order.id} saved nothing in the vault (yet).`)
+        await ctx.runMutation(this.component.schedules.attachMethod, {
+          id: s.id,
+          paypal: {
+            paypalCustomerId: saved.customerId,
+            paymentTokenId: saved.paymentTokenId,
+            kind: saved.kind,
+            label: saved.label,
+            usagePattern: saved.kind === 'paypal' ? RECURRING_USAGE_PATTERN : undefined,
+            networkRef: saved.networkRef,
+          },
+          now: Date.now(),
+        })
+      }
+    } catch (err) {
+      console.warn(`payments: schedule ${s.id} starts without a saved method: ${errorText(err)}`)
+    }
   }
 
   /**
@@ -636,7 +791,10 @@ export class Payments<C extends GenericValidator = GenericValidator> {
    * REST app's client id. A card is checked when saved ($0 authorization; 3-D Secure only if the bank
    * asks). `description` is what a PayPal account holder agrees to. Rate-limited.
    */
-  async setupPaypalMethod(ctx: RunActionCtx, a: { owner: Ref; payer: Payer; kind: 'card' | 'paypal'; description?: string }): Promise<{ setupTokenId: string; clientId: string }> {
+  async setupPaypalMethod(
+    ctx: RunActionCtx,
+    a: { owner: Ref; payer: Payer; kind: 'card' | 'paypal'; description?: string; /** For a schedule: a PayPal account agrees to recurring charges. */ recurring?: boolean },
+  ): Promise<{ setupTokenId: string; clientId: string }> {
     return await setupPaypalMethod(this, ctx, a)
   }
 
@@ -645,7 +803,7 @@ export class Payments<C extends GenericValidator = GenericValidator> {
    * refusing a token made for someone else or a card whose check failed. Returns the saved method,
    * charged later with chargeSaved like a Stripe one. Rate-limited.
    */
-  async savePaypalMethod(ctx: RunActionCtx, a: { owner: Ref; setupTokenId: string; payerEmail?: string }): Promise<SavedMethod> {
+  async savePaypalMethod(ctx: RunActionCtx, a: { owner: Ref; setupTokenId: string; payerEmail?: string; /** As given to setupPaypalMethod. */ recurring?: boolean }): Promise<SavedMethod> {
     return await savePaypalMethod(this, ctx, a)
   }
 
@@ -681,6 +839,11 @@ export class Payments<C extends GenericValidator = GenericValidator> {
    * charge_unknown issue. Same idempotencyKey, same checkout. Returns the checkout id.
    */
   async chargeSaved(ctx: SchedulerCtx, a: ChargeArgs<Infer<C>>): Promise<string> {
+    return await this.chargeOffSession(ctx, a)
+  }
+
+  /** @internal chargeSaved, and a schedule's charge (tagged with the schedule and the period it pays). */
+  async chargeOffSession(ctx: SchedulerCtx, a: ChargeArgs<Infer<C>>, schedule?: { scheduleId: string; schedulePeriod: string }): Promise<string> {
     if (!Number.isInteger(a.amountCents) || a.amountCents < 1) throw new ConvexError('A charge needs an amount of at least one cent.')
     if (!a.idempotencyKey || a.idempotencyKey.length > 200) throw new ConvexError('A charge needs an idempotency key of at most 200 characters.')
     this.checkContext(a.context)
@@ -708,6 +871,7 @@ export class Payments<C extends GenericValidator = GenericValidator> {
       stripeCustomerId: target.stripeCustomerId,
       paymentMethodId: a.paymentMethodId,
       chargeKey: `${this.app}:${a.idempotencyKey}`,
+      ...(schedule ?? {}),
       now,
     })
     await ctx.scheduler.runAfter(0, this.wiring.worker.charge, { checkoutId })
@@ -715,7 +879,7 @@ export class Payments<C extends GenericValidator = GenericValidator> {
   }
 
   /** @internal Which processor charges a saved method: PayPal's must be the owner's, recorded here; Stripe's need the owner's Customer. */
-  private async chargeTarget(ctx: RunQueryCtx, a: ChargeArgs<Infer<C>>): Promise<{ processor: Processor; method: Method; stripeCustomerId?: string }> {
+  async chargeTarget(ctx: RunQueryCtx, a: { owner: Ref; paymentMethodId: string; stripeCustomerId?: string }): Promise<{ processor: Processor; method: Method; stripeCustomerId?: string }> {
     const tokenId = paypalTokenOf(a.paymentMethodId)
     if (tokenId) {
       const found = await ctx.runQuery(this.component.customers.paypalMethod, { paymentTokenId: tokenId })
@@ -755,6 +919,80 @@ export class Payments<C extends GenericValidator = GenericValidator> {
     a: { checkoutId: string; returnPath: string; expiresAt?: number },
   ): Promise<{ checkoutId: string; embedded: Extract<EmbeddedPayment, { processor: 'paypal' }> }> {
     return await retryWithPaypal(this, ctx, a)
+  }
+
+  // ── Schedules ─────────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Charges a saved method every month: the first charge now (or at firstChargeAt), then on the
+   * anchor day, each an off-session checkout keyed `schedule-<id>-<period>` with the usual callbacks
+   * plus scheduleCharged / scheduleFailed. Refusals are retried (retryDays, default 3, 5 and 7 days
+   * after the first), then the schedule lapses; hard declines lapse it at once. From a mutation or
+   * action. Returns the schedule id and the first charge's checkout id when it was made now.
+   */
+  async startSchedule(ctx: SchedulerCtx, a: StartScheduleArgs<Infer<C>>): Promise<{ scheduleId: string; checkoutId: string | null }> {
+    return await startSchedule(this, ctx, a)
+  }
+
+  /**
+   * A schedule for a new payer, its first payment saving the method: Stripe's embedded Checkout
+   * (card or bank account, saved with setup_future_usage; Checkout tells the payer, and shows a
+   * bank account's mandate) or PayPal (a PayPal account agreeing to recurring charges with
+   * PaypalButtons, or a card in PaypalCardPayment, saved with vault-with-purchase). The app picks the
+   * processor (e.g. the cheaper for the monthly amount). The schedule starts when that payment is
+   * paid (or on its way, for a bank account); if it never is, scheduleChanged says not_started.
+   * Rate-limited like start.
+   */
+  async startScheduleCheckout(ctx: RunActionCtx, a: StartScheduleCheckoutArgs<Infer<C>>): Promise<(StartedRedirect | StartedEmbedded) & { scheduleId: string }> {
+    return await startScheduleCheckout(this, ctx, a)
+  }
+
+  /**
+   * Changes a schedule: the amount (from the next charge), the saved method (one of the owner's,
+   * checked as for chargeSaved), the day of the month, the description. A new method on a schedule
+   * being retried charges the refused period at once; on a lapsed one it starts again.
+   */
+  async updateSchedule(
+    ctx: RunMutationCtx,
+    a: { scheduleId: string; amountCents?: number; paymentMethodId?: string; stripeCustomerId?: string; anchorDay?: number; description?: string; by?: string },
+  ): Promise<ScheduleView> {
+    return await updateSchedule(this, ctx, a)
+  }
+
+  /** Skips charges until `until` (ms); the first charge date after that charges again, by itself. */
+  async pauseSchedule(ctx: RunMutationCtx, a: { scheduleId: string; until: number; by?: string }): Promise<ScheduleView> {
+    return await ctx.runMutation(this.component.schedules.pause, { id: a.scheduleId, app: this.app, until: a.until, by: a.by, now: Date.now() })
+  }
+
+  /** A paused or lapsed schedule charges again, from `at` (default now) on its next charge date. */
+  async resumeSchedule(ctx: RunMutationCtx, a: { scheduleId: string; at?: number; by?: string }): Promise<ScheduleView> {
+    return await ctx.runMutation(this.component.schedules.resume, { id: a.scheduleId, app: this.app, at: a.at, by: a.by, now: Date.now() })
+  }
+
+  /** Ends a schedule for good (a charge already on its way still settles). */
+  async cancelSchedule(ctx: RunMutationCtx, a: { scheduleId: string; reason: string; by?: string }): Promise<ScheduleView> {
+    return await ctx.runMutation(this.component.schedules.cancel, { id: a.scheduleId, app: this.app, reason: a.reason, by: a.by, now: Date.now() })
+  }
+
+  /** An owner's schedules, newest first, ended ones included. */
+  async schedulesFor(ctx: RunQueryCtx, owner: Ref): Promise<ScheduleView[]> {
+    return await ctx.runQuery(this.component.schedules.forOwner, { app: this.app, owner })
+  }
+
+  /** The schedules for one thing in the app, newest first. */
+  async schedulesForRef(ctx: RunQueryCtx, ref: Ref): Promise<ScheduleView[]> {
+    return (await ctx.runQuery(this.component.schedules.forRef, { ref })).filter((s) => s.app === this.app)
+  }
+
+  /** One schedule, or null (also for another app's). */
+  async getSchedule(ctx: RunQueryCtx, scheduleId: string) {
+    const s = await ctx.runQuery(this.component.schedules.get, { id: scheduleId })
+    return s && s.app === this.app ? s : null
+  }
+
+  /** @internal The hourly run; payments.worker().schedules runs this. */
+  async runSchedules(ctx: SchedulerCtx, o: { scheduleId?: string } = {}) {
+    return await runSchedules(this, ctx, o)
   }
 
   // ── Queries ───────────────────────────────────────────────────────────────────────────────────
@@ -1103,6 +1341,7 @@ export class Payments<C extends GenericValidator = GenericValidator> {
     crons.daily('payments reconcile', { hourUTC: h, minuteUTC: 0 }, w.reconcile, {})
     crons.daily('payments issues digest', { hourUTC: h, minuteUTC: 30 }, w.issuesDigest, {})
     crons.daily('payments cleanup', { hourUTC: o.cleanupHourUTC ?? (h + 1) % 24, minuteUTC: 0 }, w.cleanup, {})
+    if (w.schedules) crons.hourly('payments schedules', { minuteUTC: 5 }, w.schedules, {})
   }
 }
 
@@ -1121,4 +1360,4 @@ const withParam = (url: string, name: string, value: string) => `${url}${url.inc
 export const refundKey = (refundId: string, attempts: number) => (attempts ? `refund-${refundId}-${attempts}` : `refund-${refundId}`)
 
 /** For the validators of the app's worker functions. */
-export const workerArgs = { charge: { checkoutId: v.string(), manual: v.optional(v.boolean()) } }
+export const workerArgs = { charge: { checkoutId: v.string(), manual: v.optional(v.boolean()) }, schedules: { scheduleId: v.optional(v.string()) } }

@@ -240,7 +240,7 @@ describe('PayPal', () => {
   test('an order uses experience_context (not application_context), cents as a decimal, and the tag as custom_id', () => {
     const body = orderBody({ customId: 'market:k1', description: 'x'.repeat(200), amountCents: 2529, returnUrl: 'https://r', cancelUrl: 'https://c' })
     expect(body.purchase_units[0]).toEqual({ custom_id: 'market:k1', description: 'x'.repeat(127), amount: { currency_code: 'USD', value: '25.29' } })
-    expect(body.payment_source?.paypal.experience_context).toMatchObject({ return_url: 'https://r', cancel_url: 'https://c', user_action: 'PAY_NOW', shipping_preference: 'NO_SHIPPING' })
+    expect(body.payment_source?.paypal?.experience_context).toMatchObject({ return_url: 'https://r', cancel_url: 'https://c', user_action: 'PAY_NOW', shipping_preference: 'NO_SHIPPING' })
     expect(JSON.stringify(body)).not.toContain('application_context')
   })
 
