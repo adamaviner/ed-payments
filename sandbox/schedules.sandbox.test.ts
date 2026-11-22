@@ -145,9 +145,13 @@ describe.runIf(paypalOn)('PayPal', () => {
       })
     ).json()) as { access_token: string }
     const pp = (method: string, path: string, body?: unknown) =>
-      fetch(`https://api-m.sandbox.paypal.com${path}`, { method, headers: { Authorization: `Bearer ${tok.access_token}`, 'Content-Type': 'application/json' }, body: body && JSON.stringify(body) })
+      fetch(`https://api-m.sandbox.paypal.com${path}`, {
+        method,
+        headers: { Authorization: `Bearer ${tok.access_token}`, 'Content-Type': 'application/json' },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      })
     const confirmed = await pp('POST', `/v2/checkout/orders/${started.embedded.orderId}/confirm-payment-source`, {
-      // A fresh test card number each run: the sandbox refuses one card used too often (PAYER_CANNOT_PAY).
+      // One of the test cards the sandbox takes (it refuses one used too often: PAYER_CANNOT_PAY).
       payment_source: { card: { number: CARDS[Math.floor(Math.random() * CARDS.length)], expiry: '2030-12', name: `Sandbox Donor ${run}`, security_code: '123' } },
     })
     expect(confirmed.status).toBe(200)
