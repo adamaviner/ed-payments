@@ -116,6 +116,7 @@ describe('Stripe requests', () => {
     expect(sessionExpiry(now + 2 * 60 * MIN, now)).toBe((now + 2 * 60 * MIN) / 1000)
     expect(p).toMatchObject({ success_url: 's', cancel_url: 'c' })
     expect(p).not.toHaveProperty('ui_mode')
+    expect(p).not.toHaveProperty('wallet_options')
   })
 
   test('an embedded session is embedded_page with a return_url, and has no success or cancel page', () => {
@@ -132,7 +133,7 @@ describe('Stripe requests', () => {
       now,
       embedded: true,
     })
-    expect(p).toMatchObject({ ui_mode: 'embedded_page', return_url: 's', client_reference_id: 'k1', allowed_payment_method_types: ['card'] })
+    expect(p).toMatchObject({ ui_mode: 'embedded_page', return_url: 's', client_reference_id: 'k1', allowed_payment_method_types: ['card'], wallet_options: { link: { display: 'never' } } })
     expect(p).not.toHaveProperty('success_url')
     expect(p).not.toHaveProperty('cancel_url')
   })

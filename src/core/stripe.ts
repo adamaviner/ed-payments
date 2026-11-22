@@ -265,6 +265,9 @@ export function sessionParams(i: SessionInput): FormParams {
   return {
     mode: 'payment',
     allowed_payment_method_types: [i.method === 'ach' ? 'us_bank_account' : 'card'],
+    // Link would offer its own bank payment inside a card checkout, priced as the card the app chose
+    // the processor and fee for. The app offers bank itself (method 'ach'), so a card session is card only.
+    ...(i.method === 'ach' ? {} : { wallet_options: { link: { display: 'never' } } }),
     // Stripe takes one or the other: a Customer brings their own email.
     ...(i.customer ? { customer: i.customer } : { customer_email: i.email }),
     client_reference_id: i.checkoutId,
