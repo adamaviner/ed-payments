@@ -70,9 +70,11 @@ type Name = keyof typeof calls
 
 /** What the page's access query answers: an admin unless a test says otherwise. */
 let level: 'admin' | 'request' | null = 'admin'
+/** What the page's openRefunds query answers. */
+let openRefunds: OpenRefund[] = [openRefund]
 
 vi.mock('convex/react', () => ({
-  useQuery: (fn: string) => (fn === 'openRefunds' ? [openRefund] : fn === 'access' ? level && { level, name: 'Bo', skipApproval: false } : undefined),
+  useQuery: (fn: string) => (fn === 'openRefunds' ? openRefunds : fn === 'access' ? level && { level, name: 'Bo', skipApproval: false } : undefined),
   usePaginatedQuery: (fn: string) => ({ results: fn === 'refundable' ? [checkout] : [issue], status: 'Exhausted', loadMore: () => {} }),
   useMutation: (fn: Name) => calls[fn],
   useAction: (fn: Name) => calls[fn],
@@ -82,6 +84,7 @@ const api = Object.fromEntries(['access', 'openRefunds', 'refundable', 'issues',
 
 beforeEach(() => {
   level = 'admin'
+  openRefunds = [openRefund]
   for (const fn of Object.values(calls)) fn.mockClear()
 })
 afterEach(cleanup)
@@ -114,6 +117,16 @@ test('what is left counts the open refund; more than that is refused in place', 
   expect(amountError(row)).toBe('Enter an amount in dollars, like 12.50.')
   // Not an alert: a screen reader would read it out on every keystroke.
   expect(within(row).queryByRole('alert')).toBeNull()
+})
+
+test('a payment whose open refunds hold all that is left offers no refund', () => {
+  // $100 paid, $10 refunded, $90 asked for and not sent.
+  openRefunds = [{ ...openRefund, amountCents: 9000 }]
+  render(<PaymentsAdminPage api={api} auth={{ token: 't' }} skipApproval />)
+  const row = rowOf(screen.getByText('the rest is in Refunds to do'))
+  expect(within(row).queryByText(/left$/)).toBeNull()
+  expect(within(row).queryByLabelText('Amount ($)')).toBeNull()
+  expect(within(row).queryByRole('button', { name: /^Refund/ })).toBeNull()
 })
 
 test('a refund asks twice, then requests the typed amount in cents and sends it', async () => {

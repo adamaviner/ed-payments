@@ -325,6 +325,8 @@ function CheckoutRow({ shared, checkout, refunds }: { shared: Shared; checkout: 
   const answered = question && answer?.key === question.key && question.options.some((o) => o.value === answer.value) ? answer.value : null
   const hostData = question && answered !== null ? { [question.key]: answered } : undefined
   const answerLabel = question?.options.find((o) => o.value === answered)?.label
+  // Open refunds hold all that is left: they are sent (or dropped) in Refunds to do, so this row offers nothing.
+  const allHeld = refunds !== undefined && left < 1
 
   // Two steps, and the form clears as soon as the refund is recorded: if sending then fails, the refund
   // is already in Refunds to do, and a form still filled in would invite a second refund of the same money.
@@ -351,48 +353,52 @@ function CheckoutRow({ shared, checkout, refunds }: { shared: Shared; checkout: 
         <div className="w-36">
           <span className="block">{dollars(checkout.paidCents ?? 0)} paid</span>
           {checkout.refundedCents > 0 && <Muted>{dollars(checkout.refundedCents)} refunded</Muted>}
-          {refunds && <Muted>{dollars(left)} left</Muted>}
+          {refunds && <Muted>{allHeld ? 'the rest is in Refunds to do' : `${dollars(left)} left`}</Muted>}
         </div>
-        <Field label="Amount ($)" htmlFor={amountId}>
-          <Input
-            id={amountId}
-            className="w-28"
-            inputMode="decimal"
-            placeholder={left > 0 ? centsToDecimal(left) : ''}
-            value={amount}
-            disabled={busy || left < 1}
-            aria-invalid={amount.trim() !== '' && !parsed.ok}
-            aria-describedby={amountErrorId}
-            onChange={(e) => setAmount(e.target.value)}
-          />
-        </Field>
-        <Field label="Reason" htmlFor={reasonId} className="min-w-48 flex-1">
-          <Input id={reasonId} value={reason} disabled={busy || left < 1} placeholder="Refunded by an admin" onChange={(e) => setReason(e.target.value)} />
-        </Field>
-        {question && (
-          // Before the button, so the button an answer unlocks is the next thing to tab to.
-          <fieldset className="flex basis-full flex-wrap items-center gap-x-4 gap-y-1" disabled={busy}>
-            <legend className="mb-1 basis-full">{question.label}</legend>
-            {question.options.map((o) => (
-              <label key={o.value} className="flex items-center gap-1.5">
-                <input type="radio" name={questionName} value={o.value} checked={answered === o.value} onChange={() => setAnswer({ key: question.key, value: o.value })} />
-                {o.label}
-              </label>
-            ))}
-          </fieldset>
-        )}
-        {parsed.ok && (!question || answered !== null) ? (
-          <ConfirmButton
-            disabled={busy}
-            confirmLabel={`${skipApproval ? `Send ${dollars(parsed.cents)} back via ${processor}?` : `Ask to refund ${dollars(parsed.cents)}?`}${answerLabel ? ` (${answerLabel})` : ''}`}
-            onConfirm={() => refund(parsed.cents)}
-          >
-            Refund {dollars(parsed.cents)}
-          </ConfirmButton>
-        ) : (
-          <Button disabled aria-describedby={question ? questionHintId : undefined}>
-            {parsed.ok ? `Refund ${dollars(parsed.cents)}` : 'Refund'}
-          </Button>
+        {!allHeld && (
+          <>
+            <Field label="Amount ($)" htmlFor={amountId}>
+              <Input
+                id={amountId}
+                className="w-28"
+                inputMode="decimal"
+                placeholder={left > 0 ? centsToDecimal(left) : ''}
+                value={amount}
+                disabled={busy || left < 1}
+                aria-invalid={amount.trim() !== '' && !parsed.ok}
+                aria-describedby={amountErrorId}
+                onChange={(e) => setAmount(e.target.value)}
+              />
+            </Field>
+            <Field label="Reason" htmlFor={reasonId} className="min-w-48 flex-1">
+              <Input id={reasonId} value={reason} disabled={busy || left < 1} placeholder="Refunded by an admin" onChange={(e) => setReason(e.target.value)} />
+            </Field>
+            {question && (
+              // Before the button, so the button an answer unlocks is the next thing to tab to.
+              <fieldset className="flex basis-full flex-wrap items-center gap-x-4 gap-y-1" disabled={busy}>
+                <legend className="mb-1 basis-full">{question.label}</legend>
+                {question.options.map((o) => (
+                  <label key={o.value} className="flex items-center gap-1.5">
+                    <input type="radio" name={questionName} value={o.value} checked={answered === o.value} onChange={() => setAnswer({ key: question.key, value: o.value })} />
+                    {o.label}
+                  </label>
+                ))}
+              </fieldset>
+            )}
+            {parsed.ok && (!question || answered !== null) ? (
+              <ConfirmButton
+                disabled={busy}
+                confirmLabel={`${skipApproval ? `Send ${dollars(parsed.cents)} back via ${processor}?` : `Ask to refund ${dollars(parsed.cents)}?`}${answerLabel ? ` (${answerLabel})` : ''}`}
+                onConfirm={() => refund(parsed.cents)}
+              >
+                Refund {dollars(parsed.cents)}
+              </ConfirmButton>
+            ) : (
+              <Button disabled aria-describedby={question ? questionHintId : undefined}>
+                {parsed.ok ? `Refund ${dollars(parsed.cents)}` : 'Refund'}
+              </Button>
+            )}
+          </>
         )}
       </div>
       {question && answered === null && <Hint id={questionHintId}>Answer the question above to refund.</Hint>}
