@@ -3,7 +3,7 @@
   "description": "Payments for Earthdance's Convex apps: Stripe and PayPal checkouts, webhooks, a refund ledger and a nightly comparison with the processors.",
   "repository": "github:adamaviner/ed-payments",
   "homepage": "https://github.com/adamaviner/ed-payments#readme",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "license": "Apache-2.0",
   "private": true,
   "keywords": [
