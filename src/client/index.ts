@@ -44,7 +44,7 @@ import {
 } from '../core/paypal.js'
 import { savedMethodKind, savedMethodLabel, sessionState, stripe, stripeFee, paymentIntentId, type StripeKeys, type StripeSession } from '../core/stripe.js'
 import { accountFingerprint, decryptToken, encryptToken } from '../core/tokenCrypt.js'
-import { ProcessorError, isMethodFor, tagFor, type Fetch, type Method, type Payer, type Processor, type Ref } from '../core/types.js'
+import { ProcessorError, isMethodFor, tagFor, type Fetch, type Method, type Payer, type Processor, type Ref, type SavedMethodKind } from '../core/types.js'
 import { adminApi, publicApi, worker, type AdminApiOptions } from './api.js'
 import { mismatch } from './context.js'
 import { paypalHistory, type PaypalHistory, type PaypalHistoryArgs, type PaypalHistoryLine } from './paypalHistory.js'
@@ -776,11 +776,12 @@ export class Payments<C extends GenericValidator = GenericValidator> {
   /**
    * Starts saving a card or bank account for `owner` (e.g. { type: 'user', id }): makes their Stripe
    * Customer if needed and a SetupIntent for charging later with nobody present (bank accounts
-   * verified at once). Returns its client secret for Stripe's Payment Element. Rate-limited.
+   * verified at once). Returns its client secret for Stripe's Payment Element. Rate-limited, so call
+   * it when the payer submits the form (`<StripeSaveMethod createSetupIntent>`), never when it opens.
    */
   async setupPaymentMethod(
     ctx: RunActionCtx,
-    a: { owner: Ref; payer: Payer; stripeCustomerId?: string; methods?: readonly ('card' | 'ach')[] },
+    a: { owner: Ref; payer: Payer; stripeCustomerId?: string; methods?: readonly SavedMethodKind[] },
   ): Promise<{ clientSecret: string; stripeCustomerId: string }> {
     return await setupPaymentMethod(this, ctx, a)
   }
@@ -902,7 +903,8 @@ export class Payments<C extends GenericValidator = GenericValidator> {
    * For the buyer to pay on the app's page after an off-session charge failed: a PaymentIntent
    * (card or bank account, theirs to choose in the Payment Element) for the same amount, its outcome
    * coming back through the same callbacks with kind 'onSession'. One that is still waiting is
-   * reused, so two tabs can't each take a payment; one already on its way is refused. Rate-limited.
+   * reused, so two tabs can't each take a payment; one already on its way is refused. Rate-limited, so
+   * call it when the buyer presses Pay (`<StripeRetryPayment createPayment>`), not when the page opens.
    */
   async retryOnSession(ctx: RunActionCtx, a: { checkoutId: string; expiresAt?: number }): Promise<{ checkoutId: string; clientSecret: string }> {
     return await retryOnSession(this, ctx, a)

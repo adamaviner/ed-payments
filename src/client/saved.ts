@@ -5,9 +5,9 @@
 // webhooks, refunds, disputes and the nightly comparison treat them the same way.
 import type { Scheduler } from 'convex/server'
 import { ConvexError } from 'convex/values'
-import { customerOf, intentState, savedMethodKind, savedMethodLabel, stripe, stripeFee, type StripePaymentIntent, type StripePaymentMethod } from '../core/stripe.js'
+import { customerOf, intentState, savedMethodKind, savedMethodLabel, stripe, stripeFee, stripeMethodType, type StripePaymentIntent, type StripePaymentMethod } from '../core/stripe.js'
 import { paypal, paypalTokenOf } from '../core/paypal.js'
-import { ProcessorError, tagFor, type Payer, type Processor, type Ref } from '../core/types.js'
+import { ProcessorError, tagFor, type Payer, type Processor, type Ref, type SavedMethodKind } from '../core/types.js'
 import { declineCodeOf, declineKind, type DeclineInfo } from '../core/declines.js'
 import { PAYPAL_DECLINED, type Checkout, type Payments, type RunActionCtx } from './index.js'
 import { chargePaypalNow, paypalMethods, removePaypalMethod, verifyPaypalOwner } from './paypalVault.js'
@@ -54,12 +54,12 @@ export async function ensureCustomer(p: Payments, ctx: RunActionCtx, owner: Ref,
   return await ctx.runMutation(p.component.customers.save, { app: p.app, owner, stripeCustomerId: made.id, email: payer.email.trim(), now })
 }
 
-export async function setupPaymentMethod(p: Payments, ctx: RunActionCtx, a: { owner: Ref; payer: Payer; stripeCustomerId?: string; methods?: readonly ('card' | 'ach')[] }) {
+export async function setupPaymentMethod(p: Payments, ctx: RunActionCtx, a: { owner: Ref; payer: Payer; stripeCustomerId?: string; methods?: readonly SavedMethodKind[] }) {
   await p.takeLimits(ctx, 'setup', a.payer.email)
   const customer = await ensureCustomer(p, ctx, a.owner, a.payer, a.stripeCustomerId)
   if (!customer) throw new ConvexError('Couldn’t set up a payer here.')
   // Only a bank account, when the app takes cards through PayPal: the Payment Element then shows no card tab.
-  const types = a.methods?.length ? a.methods.map((m) => (m === 'ach' ? ('us_bank_account' as const) : ('card' as const))) : undefined
+  const types = a.methods?.length ? a.methods.map(stripeMethodType) : undefined
   const si = await stripe.createSetupIntent(p.stripeKeys(), { customer: customer.stripeCustomerId, app: p.app, owner: ownerTag(a.owner), types }, { fetch: p.fetch })
   if (!si.client_secret) throw new ConvexError('Stripe didn’t return what the card form needs. Please try again.')
   return { clientSecret: si.client_secret, stripeCustomerId: customer.stripeCustomerId }
