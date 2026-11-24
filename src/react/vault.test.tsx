@@ -106,7 +106,7 @@ test('card fields: the four fields render, and the button gets a setup token, ha
   expect(screen.getByText('Only charged if you win.')).toBeTruthy()
 })
 
-test('card fields: a card PayPal won’t save, or the app refusing it, is said under the fields and can be tried again', async () => {
+test('card fields: the app refusing a card is said in its words, PayPal refusing one in plain words, and it can be tried again', async () => {
   const onSaved = vi.fn(() => Promise.reject(new Error('That card couldn’t be verified. Please check the details, or use another card.')))
   render(<PaypalCardFields clientId="client-1" createSetupToken={() => Promise.resolve('S1')} onSaved={onSaved} submitLabel="Place bid" />)
   await finishScript(paypalVaultSdkUrl('client-1'))
@@ -116,11 +116,22 @@ test('card fields: a card PayPal won’t save, or the app refusing it, is said u
     fireEvent.click(button)
   })
   expect(screen.getByRole('alert').textContent).toMatch(/couldn’t be verified/)
-  submitImpl = () => Promise.reject(new Error('INVALID_NUMBER'))
+  vi.spyOn(console, 'warn').mockImplementation(() => {})
+  submitImpl = () => Promise.reject(new Error('UPDATE_VAULT_SETUP_TOKEN_CONTINGENCY'))
   await act(async () => {
     fireEvent.click(button)
   })
-  expect(screen.getByRole('alert').textContent).toBe('INVALID_NUMBER')
+  expect(screen.getByRole('alert').textContent).toMatch(/^PayPal couldn’t check that card/)
+  submitImpl = (o) => o.createVaultSetupToken().then(() => undefined)
+  const refuse = vi.fn(() => Promise.reject(new Error('Too many attempts. Try again in a minute.')))
+  cleanup()
+  render(<PaypalCardFields clientId="client-1" createSetupToken={refuse} onSaved={onSaved} submitLabel="Place bid" />)
+  const again = await screen.findByRole('button', { name: 'Place bid' })
+  await waitFor(() => expect(again.hasAttribute('disabled')).toBe(false))
+  await act(async () => {
+    fireEvent.click(again)
+  })
+  expect(screen.getByRole('alert').textContent).toBe('Too many attempts. Try again in a minute.')
 })
 
 test('card fields: not eligible (card fields off on the account) or the script failing says so and leaves the button off', async () => {

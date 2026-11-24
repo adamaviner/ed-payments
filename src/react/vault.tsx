@@ -53,6 +53,9 @@ const loadVaultSdk = (clientId: string) => loadScript(paypalVaultSdkUrl(clientId
 
 const messageOf = (err: unknown) => (err instanceof Error ? err.message : typeof err === 'string' ? err : null)
 
+/** PayPal's own errors are codes (INVALID_NUMBER, UPDATE_VAULT_SETUP_TOKEN_CONTINGENCY, …), not words for a payer. */
+const CARD_REFUSED = 'PayPal couldn’t check that card. Check the number, expiry date and security code, or use another card.'
+
 /**
  * Styling inside PayPal's frames: a selector ('input', '.invalid', ':focus', …) to CSS properties, in
  * PayPal's Card Fields style format. The frames can't see the page's CSS or its theme, so colors are literal.
@@ -101,7 +104,7 @@ export function PaypalCardFields({ clientId, createSetupToken, onSaved, submitLa
   const expiryBox = useRef<HTMLDivElement>(null)
   const cvvBox = useRef<HTMLDivElement>(null)
   const fields = useRef<CardFieldsInstance | null>(null)
-  // What onSaved threw, in case PayPal reports it to onError instead of rejecting submit().
+  // What the app's createSetupToken or onSaved threw (said as it is), in case PayPal reports it to onError instead of rejecting submit().
   const saveError = useRef<unknown>(null)
   const [load, setLoad] = useState<Load>('loading')
   const [busy, setBusy] = useState(false)
@@ -125,7 +128,14 @@ export function PaypalCardFields({ clientId, createSetupToken, onSaved, submitLa
         if (!sdk) return setLoad('failed')
         const cf = sdk.CardFields({
           style: JSON.parse(styleKey) as PaypalFieldStyle,
-          createVaultSetupToken: () => latest.current.createSetupToken(),
+          createVaultSetupToken: async () => {
+            try {
+              return await latest.current.createSetupToken()
+            } catch (err) {
+              saveError.current = err
+              throw err
+            }
+          },
           onApprove: async ({ vaultSetupToken }) => {
             try {
               await latest.current.onSaved(vaultSetupToken)
@@ -176,7 +186,9 @@ export function PaypalCardFields({ clientId, createSetupToken, onSaved, submitLa
       await fields.current.submit()
       if (saveError.current) setError(messageOf(saveError.current) ?? 'The card couldn’t be saved. Please try again.')
     } catch (err) {
-      setError(messageOf(saveError.current ?? err) ?? 'The card couldn’t be saved. Check the details and try again.')
+      // The app's words when it was the app; PayPal's codes mean nothing to a payer, so they go to the console.
+      if (!saveError.current) console.warn('payments: PayPal card fields refused the card:', err)
+      setError(saveError.current ? (messageOf(saveError.current) ?? CARD_REFUSED) : CARD_REFUSED)
     } finally {
       setBusy(false)
     }
