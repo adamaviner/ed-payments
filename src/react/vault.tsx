@@ -53,11 +53,21 @@ const loadVaultSdk = (clientId: string) => loadScript(paypalVaultSdkUrl(clientId
 
 const messageOf = (err: unknown) => (err instanceof Error ? err.message : typeof err === 'string' ? err : null)
 
+/**
+ * Styling inside PayPal's frames: a selector ('input', '.invalid', ':focus', …) to CSS properties, in
+ * PayPal's Card Fields style format. The frames can't see the page's CSS or its theme, so colors are literal.
+ */
+export type PaypalFieldStyle = Record<string, Record<string, string>>
+
 /** Field styling inside PayPal's frames, close to the package's own inputs. */
-const FIELD_STYLE = {
+const FIELD_STYLE: PaypalFieldStyle = {
   input: { 'font-size': '14px', padding: '6px 8px' },
   '.invalid': { color: '#dc2626' },
 }
+
+/** The app's style over the defaults, selector by selector. */
+const withFieldStyle = (style: PaypalFieldStyle): PaypalFieldStyle =>
+  Object.fromEntries([...new Set([...Object.keys(FIELD_STYLE), ...Object.keys(style)])].map((k) => [k, { ...FIELD_STYLE[k], ...style[k] }]))
 
 export interface PaypalCardFieldsProps {
   /** The REST app's client id (payments.setupPaypalMethod returns it; public, and it says sandbox or live). */
@@ -75,11 +85,17 @@ export interface PaypalCardFieldsProps {
   disabled?: boolean
   /** Said under the fields, e.g. "You're only charged if you win." */
   note?: string
+  /**
+   * Colors and fonts inside PayPal's frames, merged over the defaults; pass the dark theme's colors when
+   * the page is dark (e.g. `{ input: { color: '#fafafa', background: 'transparent' } }`). Changing it renders
+   * the fields again, so what the buyer typed is cleared.
+   */
+  style?: PaypalFieldStyle
   className?: string
 }
 
 /** PayPal's card fields (name, number, expiry, CVV) and one button that saves the card, then calls onSaved. */
-export function PaypalCardFields({ clientId, createSetupToken, onSaved, submitLabel, disabled, note, className }: PaypalCardFieldsProps) {
+export function PaypalCardFields({ clientId, createSetupToken, onSaved, submitLabel, disabled, note, style, className }: PaypalCardFieldsProps) {
   const nameBox = useRef<HTMLDivElement>(null)
   const numberBox = useRef<HTMLDivElement>(null)
   const expiryBox = useRef<HTMLDivElement>(null)
@@ -96,6 +112,9 @@ export function PaypalCardFields({ clientId, createSetupToken, onSaved, submitLa
     latest.current = { createSetupToken, onSaved }
   }, [createSetupToken, onSaved])
 
+  // A string, so a style object made fresh on every render doesn't render the fields again.
+  const styleKey = JSON.stringify(withFieldStyle(style ?? {}))
+
   useEffect(() => {
     let live = true
     const rendered: Rendered[] = []
@@ -105,7 +124,7 @@ export function PaypalCardFields({ clientId, createSetupToken, onSaved, submitLa
         if (!live) return
         if (!sdk) return setLoad('failed')
         const cf = sdk.CardFields({
-          style: FIELD_STYLE,
+          style: JSON.parse(styleKey) as PaypalFieldStyle,
           createVaultSetupToken: () => latest.current.createSetupToken(),
           onApprove: async ({ vaultSetupToken }) => {
             try {
@@ -144,7 +163,7 @@ export function PaypalCardFields({ clientId, createSetupToken, onSaved, submitLa
       fields.current = null
       for (const f of rendered) void f.close?.().catch(() => {})
     }
-  }, [clientId])
+  }, [clientId, styleKey])
 
   const submit = async () => {
     if (!fields.current || busy) return
@@ -164,16 +183,19 @@ export function PaypalCardFields({ clientId, createSetupToken, onSaved, submitLa
   }
 
   const box = 'min-h-9 rounded-md border border-input'
+  // The frames' pages don't declare a color scheme, so on a dark page (color-scheme: dark) the browser
+  // would paint an opaque light backdrop behind them; matching their scheme keeps them see-through.
+  const frameScheme = { colorScheme: 'light' } as const
   return (
     <div className={cn('flex flex-col gap-2', className)}>
       {load !== 'ready' && load !== 'failed' && <p className="text-sm text-muted-foreground">Loading the card form…</p>}
       {load === 'failed' && <ErrorNote error="The card form didn’t load. Reload the page, or use another way to pay." />}
       <div className={cn('flex flex-col gap-2', load !== 'ready' && 'hidden')}>
-        <div ref={nameBox} className={box} />
-        <div ref={numberBox} className={box} />
+        <div ref={nameBox} className={box} style={frameScheme} />
+        <div ref={numberBox} className={box} style={frameScheme} />
         <div className="grid grid-cols-2 gap-2">
-          <div ref={expiryBox} className={box} />
-          <div ref={cvvBox} className={box} />
+          <div ref={expiryBox} className={box} style={frameScheme} />
+          <div ref={cvvBox} className={box} style={frameScheme} />
         </div>
       </div>
       {note && <p className="text-xs text-muted-foreground">{note}</p>}

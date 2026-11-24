@@ -5,7 +5,7 @@ import { forgetScripts } from './embedded.js'
 import { PAYPAL_VAULT_NAMESPACE, PaypalCardFields, PaypalSaveButton, paypalVaultSdkUrl } from './vault.js'
 
 type Approve = (data: { vaultSetupToken: string }) => Promise<void>
-type CardFieldsOptions = { createVaultSetupToken: () => Promise<string>; onApprove: Approve; onError: (err: unknown) => void }
+type CardFieldsOptions = { createVaultSetupToken: () => Promise<string>; onApprove: Approve; onError: (err: unknown) => void; style?: Record<string, Record<string, string>> }
 type ButtonsOptions = CardFieldsOptions & { fundingSource?: string; onCancel: () => void }
 
 let cardFields: CardFieldsOptions[]
@@ -75,6 +75,19 @@ test('the SDK is loaded for saving under its own namespace, so the checkout butt
   expect(paypalVaultSdkUrl('client-1')).toBe('https://www.paypal.com/sdk/js?client-id=client-1&currency=USD&components=card-fields,buttons&disable-funding=venmo,paylater')
   const el = await finishScript(paypalVaultSdkUrl('client-1'))
   expect(el.getAttribute('data-namespace')).toBe(PAYPAL_VAULT_NAMESPACE)
+})
+
+test('card fields: the app’s style goes into PayPal’s frames over the defaults, and a new one renders the fields again', async () => {
+  const props = { clientId: 'client-1', createSetupToken: () => Promise.resolve('S1'), onSaved: () => Promise.resolve(), submitLabel: 'Place bid' }
+  const { rerender } = render(<PaypalCardFields {...props} style={{ input: { color: '#fafafa' } }} />)
+  await finishScript(paypalVaultSdkUrl('client-1'))
+  await waitFor(() => expect(cardFields).toHaveLength(1))
+  expect(cardFields[0].style).toEqual({ input: { 'font-size': '14px', padding: '6px 8px', color: '#fafafa' }, '.invalid': { color: '#dc2626' } })
+
+  rerender(<PaypalCardFields {...props} style={{ input: { color: '#fafafa' } }} />)
+  rerender(<PaypalCardFields {...props} style={{ input: { color: '#0a0a0a' } }} />)
+  await waitFor(() => expect(cardFields).toHaveLength(2))
+  expect(cardFields[1].style?.input.color).toBe('#0a0a0a')
 })
 
 test('card fields: the four fields render, and the button gets a setup token, has PayPal check the card, then calls onSaved with it', async () => {
