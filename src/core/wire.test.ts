@@ -116,6 +116,7 @@ describe('Stripe requests', () => {
     expect(sessionExpiry(now + 2 * 60 * MIN, now)).toBe((now + 2 * 60 * MIN) / 1000)
     expect(p).toMatchObject({ success_url: 's', cancel_url: 'c' })
     expect(p).not.toHaveProperty('ui_mode')
+    expect(p).not.toHaveProperty('wallet_options')
   })
 
   test('an embedded session is embedded_page with a return_url, and has no success or cancel page', () => {
@@ -132,7 +133,7 @@ describe('Stripe requests', () => {
       now,
       embedded: true,
     })
-    expect(p).toMatchObject({ ui_mode: 'embedded_page', return_url: 's', client_reference_id: 'k1', allowed_payment_method_types: ['card'] })
+    expect(p).toMatchObject({ ui_mode: 'embedded_page', return_url: 's', client_reference_id: 'k1', allowed_payment_method_types: ['card'], wallet_options: { link: { display: 'never' } } })
     expect(p).not.toHaveProperty('success_url')
     expect(p).not.toHaveProperty('cancel_url')
   })
@@ -240,7 +241,7 @@ describe('PayPal', () => {
   test('an order uses experience_context (not application_context), cents as a decimal, and the tag as custom_id', () => {
     const body = orderBody({ customId: 'market:k1', description: 'x'.repeat(200), amountCents: 2529, returnUrl: 'https://r', cancelUrl: 'https://c' })
     expect(body.purchase_units[0]).toEqual({ custom_id: 'market:k1', description: 'x'.repeat(127), amount: { currency_code: 'USD', value: '25.29' } })
-    expect(body.payment_source?.paypal.experience_context).toMatchObject({ return_url: 'https://r', cancel_url: 'https://c', user_action: 'PAY_NOW', shipping_preference: 'NO_SHIPPING' })
+    expect(body.payment_source?.paypal?.experience_context).toMatchObject({ return_url: 'https://r', cancel_url: 'https://c', user_action: 'PAY_NOW', shipping_preference: 'NO_SHIPPING' })
     expect(JSON.stringify(body)).not.toContain('application_context')
   })
 

@@ -8,6 +8,9 @@
 // buttons' SDK (window.paypal, loaded with intent=capture) on a page that shows both.
 import { useEffect, useRef, useState } from 'react'
 import { loadScript, useSlow, type Load } from './embedded.js'
+import { useAction } from 'convex/react'
+import type { EmbeddedPayment } from '../client/index.js'
+import type { CompleteReturnRef } from './types.js'
 import { Button, cn, ErrorNote } from './ui.js'
 
 export const PAYPAL_VAULT_NAMESPACE = 'paypalVault'
@@ -21,6 +24,9 @@ export function paypalVaultSdkUrl(clientId: string): string {
 interface Rendered {
   render(el: HTMLElement): Promise<void>
   close?(): Promise<void>
+}
+interface CardPaySdk {
+  CardFields(o: { createOrder: () => Promise<string>; onApprove: (data: { orderID: string }) => Promise<void>; onError: (err: unknown) => void; style?: Record<string, unknown> }): CardFieldsInstance
 }
 interface CardFieldsInstance {
   isEligible(): boolean
@@ -284,6 +290,136 @@ export function PaypalSaveButton({ clientId, createSetupToken, onSaved, disabled
       {load === 'failed' && <ErrorNote error="PayPal didn’t load. Reload the page, or use a card." />}
       <div ref={box} />
       <ErrorNote error={error} />
+    </div>
+  )
+}
+
+export const PAYPAL_CARD_PAY_NAMESPACE = 'paypalCardPay'
+
+/** PayPal's JS SDK for paying with Card Fields (an order captured at once), under its own namespace beside the buttons' and the vault's. */
+export function paypalCardPaySdkUrl(clientId: string): string {
+  return `https://www.paypal.com/sdk/js?client-id=${encodeURIComponent(clientId)}&currency=USD&intent=capture&components=card-fields`
+}
+
+export interface PaypalCardPaymentProps {
+  /** An embedded PayPal checkout with `only: 'card'` (payments.startScheduleCheckout with processor paypal, method card). */
+  payment: Extract<EmbeddedPayment, { processor: 'paypal' }>
+  /** The app's `completeReturn` (from payments.publicApi()): captures the payment, which saves the card for the schedule. */
+  completeReturn: CompleteReturnRef
+  /** The button's words, e.g. "Give $25 monthly". */
+  submitLabel: string
+  /** Goes to the return page once paid. Default: a full page load. */
+  navigate?: (url: string) => void
+  /** Said under the fields, e.g. "Charged on the 21st of every month until you cancel." */
+  note?: string
+  disabled?: boolean
+  className?: string
+}
+
+/**
+ * PayPal's card fields paying an order that also saves the card (vault with purchase), for a
+ * schedule's first payment: the card stays in PayPal's frames, PayPal checks it (3-D Secure only when
+ * the bank asks), the payment is captured, and the buyer goes to the return page. A declined card is
+ * said under the fields, and the buyer can try another.
+ */
+export function PaypalCardPayment({ payment, completeReturn, submitLabel, navigate, note, disabled, className }: PaypalCardPaymentProps) {
+  const capture = useAction(completeReturn)
+  const nameBox = useRef<HTMLDivElement>(null)
+  const numberBox = useRef<HTMLDivElement>(null)
+  const expiryBox = useRef<HTMLDivElement>(null)
+  const cvvBox = useRef<HTMLDivElement>(null)
+  const fields = useRef<CardFieldsInstance | null>(null)
+  const outcome = useRef<'paid' | 'declined' | null>(null)
+  const [load, setLoad] = useState<Load>('loading')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  useSlow(load, setLoad)
+  const latest = useRef({ capture })
+  useEffect(() => {
+    latest.current = { capture }
+  }, [capture])
+  const { orderId, clientId, returnUrl } = payment
+
+  useEffect(() => {
+    let live = true
+    const rendered: Rendered[] = []
+    loadScript(paypalCardPaySdkUrl(clientId), { 'data-namespace': PAYPAL_CARD_PAY_NAMESPACE }).then(
+      async () => {
+        const sdk = (window as unknown as Record<string, CardPaySdk | undefined>)[PAYPAL_CARD_PAY_NAMESPACE]
+        if (!live) return
+        if (!sdk) return setLoad('failed')
+        const cf = sdk.CardFields({
+          style: FIELD_STYLE,
+          createOrder: () => Promise.resolve(orderId),
+          onApprove: async ({ orderID }) => {
+            const r = await latest.current.capture({ processor: 'paypal', token: orderID })
+            outcome.current = r?.declined ? 'declined' : 'paid'
+          },
+          onError: (err) => console.error('payments: PayPal card fields:', err),
+        })
+        if (!cf.isEligible()) return setLoad('failed')
+        const parts: [Rendered, HTMLDivElement | null][] = [
+          [cf.NameField(), nameBox.current],
+          [cf.NumberField(), numberBox.current],
+          [cf.ExpiryField(), expiryBox.current],
+          [cf.CVVField(), cvvBox.current],
+        ]
+        try {
+          for (const [f, el] of parts) {
+            if (!el) return
+            rendered.push(f)
+            await f.render(el)
+          }
+          if (!live) return
+          fields.current = cf
+          setLoad('ready')
+        } catch {
+          if (live) setLoad('failed')
+        }
+      },
+      () => live && setLoad('failed'),
+    )
+    return () => {
+      live = false
+      fields.current = null
+      for (const f of rendered) void f.close?.().catch(() => {})
+    }
+  }, [clientId, orderId])
+
+  const submit = async () => {
+    if (!fields.current || busy) return
+    setBusy(true)
+    setError(null)
+    outcome.current = null
+    try {
+      await fields.current.submit()
+      if (outcome.current === 'paid') return (navigate ?? ((u: string) => window.location.assign(u)))(returnUrl)
+      setError(outcome.current === 'declined' ? 'The card was declined. Try another card.' : 'The card couldn’t be charged. Check the details and try again.')
+    } catch (err) {
+      setError(messageOf(err) ?? 'The card couldn’t be charged. Check the details and try again.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const box = 'min-h-9 rounded-md border border-input'
+  return (
+    <div className={cn('flex flex-col gap-2', className)}>
+      {load !== 'ready' && load !== 'failed' && <p className="text-sm text-muted-foreground">Loading the card form…</p>}
+      {load === 'failed' && <ErrorNote error="The card form didn’t load. Reload the page, or use another way to pay." />}
+      <div className={cn('flex flex-col gap-2', load !== 'ready' && 'hidden')}>
+        <div ref={nameBox} className={box} />
+        <div ref={numberBox} className={box} />
+        <div className="grid grid-cols-2 gap-2">
+          <div ref={expiryBox} className={box} />
+          <div ref={cvvBox} className={box} />
+        </div>
+      </div>
+      {note && <p className="text-xs text-muted-foreground">{note}</p>}
+      <ErrorNote error={error} />
+      <Button variant="default" className="h-9" disabled={disabled || busy || load !== 'ready'} onClick={() => void submit()}>
+        {busy ? 'Paying…' : submitLabel}
+      </Button>
     </div>
   )
 }

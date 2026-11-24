@@ -6,8 +6,9 @@ import { paginationOptsValidator, paginationResultValidator } from 'convex/serve
 import type { Doc, Id } from './_generated/dataModel.js'
 import { mutation, query, type MutationCtx } from './_generated/server.js'
 import { callHost, callbackBase, checkoutView, notifyHost, openIssue, resolveIssue, view } from './lib.js'
-import { callbacks, checkoutKind, checkoutStatus, method, payer, processor, ref } from './schema.js'
+import { callbacks, checkoutKind, checkoutStatus, declineKind, method, payer, processor, ref } from './schema.js'
 import { giveBackOne, limitsArg, takeAll } from './limits.js'
+import { noteScheduleCheckout, scheduleAbandoned, scheduleFailed, schedulePaid, scheduleProcessing } from './schedules.js'
 
 const already = v.object({ outcome: v.literal('already_handled'), status: checkoutStatus })
 const dollarsOf = (cents: number) => `$${(cents / 100).toFixed(2)}`
@@ -40,11 +41,14 @@ export const create = mutation({
     paymentMethodId: v.optional(v.string()),
     chargeKey: v.optional(v.string()),
     retryOf: v.optional(v.string()),
+    /** A schedule's charge or first payment, and the period it pays. */
+    scheduleId: v.optional(v.string()),
+    schedulePeriod: v.optional(v.string()),
     limits: v.optional(limitsArg),
     now: v.number(),
   },
   returns: v.string(),
-  handler: async (ctx, { limits, now, retryOf, ...a }) => {
+  handler: async (ctx, { limits, now, retryOf, scheduleId, ...a }) => {
     if (!Number.isInteger(a.amountCents) || a.amountCents < 1) throw new ConvexError('A checkout needs an amount of at least one cent.')
     // The same charge key is the same charge: two calls at once make one row.
     if (a.chargeKey) {
@@ -66,7 +70,18 @@ export const create = mutation({
         .first()
       if (open) throw new ConvexError('A payment for this is already open. Reload the page to continue it.')
     }
-    return await ctx.db.insert('checkouts', { ...a, ...(original ? { retryOf: original } : {}), status: 'created', refundedCents: 0, createdAt: now })
+    const schedule = scheduleId ? ctx.db.normalizeId('schedules', scheduleId) : null
+    if (scheduleId && (!schedule || !a.schedulePeriod)) throw new ConvexError(`No schedule ${scheduleId}.`)
+    const id = await ctx.db.insert('checkouts', {
+      ...a,
+      ...(original ? { retryOf: original } : {}),
+      ...(schedule ? { scheduleId: schedule } : {}),
+      status: 'created',
+      refundedCents: 0,
+      createdAt: now,
+    })
+    if (schedule && a.schedulePeriod) await noteScheduleCheckout(ctx, schedule, id, a.schedulePeriod, a.kind === 'offSession', now)
+    return id
   },
 })
 
@@ -88,7 +103,9 @@ export const failStart = mutation({
   returns: v.null(),
   handler: async (ctx, { id, error, now }) => {
     const c = await load(ctx, id)
-    if (c.status === 'created') await ctx.db.patch(c._id, { status: 'failed', lastError: error, settledAt: now })
+    if (c.status !== 'created') return null
+    await ctx.db.patch(c._id, { status: 'failed', lastError: error, settledAt: now })
+    await scheduleAbandoned(ctx, c, now)
     return null
   },
 })
@@ -103,6 +120,7 @@ export const markProcessing = mutation({
     const patch = { status: 'processing' as const, paymentRef: paymentRef ?? c.paymentRef, method: method ?? c.method, lastError: undefined }
     await ctx.db.patch(c._id, patch)
     await resolveIssue(ctx, c._id, 'charge_unknown', now ?? Date.now())
+    await scheduleProcessing(ctx, { ...c, ...patch }, now ?? Date.now())
     await notifyHost(ctx, { ...c, ...patch }, 'onProcessing', { paymentRef: patch.paymentRef ?? null }, now ?? Date.now())
     return { outcome: 'processing' as const }
   },
@@ -146,6 +164,7 @@ export const settlePaid = mutation({
     }
     if (refusal === null) {
       await ctx.db.patch(c._id, { status: 'paid' })
+      await schedulePaid(ctx, { ...c, status: 'paid' }, { paidCents, paymentRef }, now)
       return { outcome: 'paid' as const }
     }
     console.warn(`payments: ${c.processor} payment ${paymentRef} for checkout ${c._id} needs a refund: ${refusal}`)
@@ -153,6 +172,8 @@ export const settlePaid = mutation({
     const refundId = await ctx.db.insert('refunds', { checkoutId: c._id, amountCents: paidCents, reason: refusal, origin: 'needed', status: 'requested', createdAt: now, updatedAt: now })
     const updated = (await ctx.db.get(c._id)) ?? c
     await notifyHost(ctx, updated, 'onRefundNeeded', { amountCents: c.amountCents, paidCents, paymentRef, refundId, reason: refusal }, now)
+    // Money the app turned away doesn't pay the period, and charging again would only be turned away too.
+    await scheduleFailed(ctx, updated, { reason: refusal, kind: 'hard', wasProcessing: loaded.status === 'processing' }, now)
     return { outcome: 'refund_needed' as const, reason: refusal, refundId }
   },
 })
@@ -163,16 +184,27 @@ export const settlePaid = mutation({
  * saved method the charge used, so it isn't offered again.
  */
 export const settleFailed = mutation({
-  args: { id: v.string(), reason: v.string(), declined: v.optional(v.boolean()), processorCheckoutId: v.optional(v.string()), now: v.number() },
+  args: {
+    id: v.string(),
+    reason: v.string(),
+    declined: v.optional(v.boolean()),
+    /** The processor's code for the refusal and how bad it is (core/declines.ts), when known. */
+    declineCode: v.optional(v.string()),
+    declineKind: v.optional(declineKind),
+    processorCheckoutId: v.optional(v.string()),
+    now: v.number(),
+  },
   returns: v.union(v.object({ outcome: v.literal('failed') }), already),
-  handler: async (ctx, { id, reason, declined, processorCheckoutId, now }) => {
+  handler: async (ctx, { id, reason, declined, declineCode, declineKind, processorCheckoutId, now }) => {
     const c = await load(ctx, id)
     if (c.status !== 'created' && c.status !== 'pending' && c.status !== 'processing') return { outcome: 'already_handled' as const, status: c.status }
     const wasProcessing = c.status === 'processing'
-    await ctx.db.patch(c._id, { status: 'failed', lastError: reason, settledAt: now, processorCheckoutId: c.processorCheckoutId ?? processorCheckoutId })
+    const patch = { status: 'failed' as const, lastError: reason, settledAt: now, processorCheckoutId: c.processorCheckoutId ?? processorCheckoutId, declineCode, declineKind }
+    await ctx.db.patch(c._id, patch)
     if (declined && c.paymentMethodId) await markDeclined(ctx, c.paymentMethodId, reason, now)
     await resolveIssue(ctx, c._id, 'charge_unknown', now)
-    await notifyHost(ctx, { ...c, status: 'failed' }, 'onFailed', { reason, declined: declined ?? false, wasProcessing }, now)
+    await notifyHost(ctx, { ...c, ...patch }, 'onFailed', { reason, declined: declined ?? false, wasProcessing, declineCode: declineCode ?? null }, now)
+    await scheduleFailed(ctx, { ...c, ...patch }, { reason, declineCode, kind: declineKind, wasProcessing }, now)
     return { outcome: 'failed' as const }
   },
 })
@@ -242,6 +274,7 @@ export const abandon = mutation({
     const c = await load(ctx, id)
     if (c.status !== 'created' && c.status !== 'pending') return { outcome: 'already_handled' as const, status: c.status }
     await ctx.db.patch(c._id, { status: 'abandoned', settledAt: now })
+    await scheduleAbandoned(ctx, c, now)
     return { outcome: 'abandoned' as const }
   },
 })
@@ -260,6 +293,7 @@ export const cancel = mutation({
     if (c.status !== 'created' && c.status !== 'pending') return { outcome: 'already_handled' as const, status: c.status }
     await ctx.db.patch(c._id, { status: 'abandoned', settledAt: now })
     if (giveBack && c.createdAt > now - giveBack.windowMs) await giveBackOne(ctx, giveBack.key, now, giveBack.windowMs)
+    await scheduleAbandoned(ctx, c, now)
     return { outcome: 'abandoned' as const }
   },
 })

@@ -68,6 +68,7 @@ export async function stripeCall<T>(keys: Pick<StripeKeys, 'secretKey'>, method:
     throw new ProcessorError('stripe', res.status, error?.message ?? `Stripe answered ${res.status}.`, error?.code, {
       type: error?.type,
       declineCode: error?.decline_code,
+      adviceCode: error?.advice_code,
       paymentIntent: pi && typeof pi.id === 'string' ? { id: pi.id, status: String(pi.status) } : undefined,
     })
   }
@@ -79,6 +80,7 @@ interface StripeErrorBody {
   type?: string
   code?: string
   decline_code?: string
+  advice_code?: string
   message?: string
   payment_intent?: { id?: string; status?: string }
 }
@@ -117,7 +119,7 @@ export interface StripePaymentIntent {
   client_secret?: string | null
   customer?: string | { id: string } | null
   payment_method?: string | StripePaymentMethod | null
-  last_payment_error?: { message?: string; code?: string; decline_code?: string } | null
+  last_payment_error?: { message?: string; code?: string; decline_code?: string; advice_code?: string } | null
   created: number
 }
 
@@ -242,6 +244,14 @@ export interface SessionInput {
    * session has no cancel page (the buyer is still on the app's) and sends the buyer to successUrl when paid.
    */
   embedded?: boolean
+  /** The payer's Customer: the session is theirs (and its email theirs), and a method saved goes to them. */
+  customer?: string
+  /**
+   * Save the card or bank account for charging later with nobody present (setup_future_usage
+   * off_session; needs customer). Checkout shows the payer that it will be saved, and for a bank
+   * account the debit mandate; the payment and the saving are one step.
+   */
+  saveForLater?: boolean
 }
 
 const MIN_EXPIRY_MS = 31 * 60_000
@@ -258,10 +268,16 @@ export function sessionParams(i: SessionInput): FormParams {
   return {
     mode: 'payment',
     allowed_payment_method_types: [i.method === 'ach' ? 'us_bank_account' : 'card'],
-    customer_email: i.email,
+    // Link would offer its own bank payment inside a card checkout, priced as the card the app chose
+    // the processor and fee for. The app offers bank itself (method 'ach'), so a card session is card only.
+    ...(i.method === 'ach' ? {} : { wallet_options: { link: { display: 'never' } } }),
+    // Stripe takes one or the other: a Customer brings their own email.
+    ...(i.customer ? { customer: i.customer } : { customer_email: i.email }),
     client_reference_id: i.checkoutId,
     metadata,
-    payment_intent_data: { metadata, description: i.description.slice(0, 1000) },
+    payment_intent_data: { metadata, description: i.description.slice(0, 1000), ...(i.saveForLater ? { setup_future_usage: 'off_session' } : {}) },
+    // Saved bank accounts are verified at once, as SetupIntents do (SAVED_METHOD_OPTIONS).
+    ...(i.saveForLater && i.method === 'ach' ? { payment_method_options: { us_bank_account: { verification_method: 'instant', financial_connections: { permissions: ['payment_method'] } } } } : {}),
     line_items: [{ quantity: 1, price_data: { currency: 'usd', unit_amount: i.amountCents, product_data: { name: i.description.slice(0, 250) || 'Payment' } } }],
     expires_at: sessionExpiry(i.expiresAt, i.now),
     // Since 2026-10-28.endive the embedded value is `embedded_page` (`embedded` answers 400).
@@ -395,6 +411,7 @@ export const STRIPE_EVENTS = [
   'refund.failed',
   'charge.dispute.created',
   'charge.dispute.closed',
+  'payment_method.detached',
 ] as const
 
 /** The fee Stripe kept, when the session or PaymentIntent was fetched with its balance transaction expanded. */

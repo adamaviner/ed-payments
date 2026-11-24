@@ -8,7 +8,17 @@
 export { PaymentsAdminPage, type PaymentsAdminPageProps, type RefundQuestion } from './PaymentsAdminPage.js'
 export { useCheckoutReturn, type CheckoutReturn, type CheckoutReturnState } from './useCheckoutReturn.js'
 export { PaypalButtons, StripeEmbeddedCheckout, type PaypalButtonsProps, type StripeEmbeddedCheckoutProps } from './embedded.js'
-export { PaypalCardFields, PaypalSaveButton, paypalVaultSdkUrl, type PaypalCardFieldsProps, type PaypalFieldStyle, type PaypalSaveButtonProps } from './vault.js'
+export {
+  PaypalCardFields,
+  PaypalCardPayment,
+  PaypalSaveButton,
+  paypalCardPaySdkUrl,
+  paypalVaultSdkUrl,
+  type PaypalCardFieldsProps,
+  type PaypalCardPaymentProps,
+  type PaypalFieldStyle,
+  type PaypalSaveButtonProps,
+} from './vault.js'
 export {
   StripeRetryPayment,
   StripeSaveMethod,

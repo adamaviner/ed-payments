@@ -38,14 +38,27 @@ export interface PaypalCapture {
   amount?: PaypalMoney
   custom_id?: string
   seller_receivable_breakdown?: { paypal_fee?: PaypalMoney; gross_amount?: PaypalMoney; net_amount?: PaypalMoney }
+  /** A card payment's reference at the card network, sent with later merchant-initiated charges of the saved card. */
+  network_transaction_reference?: { id?: string; network?: string; date?: string }
   supplementary_data?: { related_ids?: { order_id?: string } }
   links?: PaypalLink[]
+}
+
+/** What a payment saved with it (vault with purchase): the payment token, VAULTED once saved. */
+export interface PaypalVaultAttribute {
+  id?: string
+  status?: string
+  customer?: { id?: string }
 }
 
 export interface PaypalOrder {
   id: string
   status: 'CREATED' | 'SAVED' | 'APPROVED' | 'VOIDED' | 'COMPLETED' | 'PAYER_ACTION_REQUIRED'
   links?: PaypalLink[]
+  payment_source?: {
+    card?: { brand?: string; last_digits?: string; attributes?: { vault?: PaypalVaultAttribute } }
+    paypal?: { email_address?: string; attributes?: { vault?: PaypalVaultAttribute } }
+  }
   purchase_units?: { custom_id?: string; reference_id?: string; amount?: PaypalMoney; payments?: { captures?: PaypalCapture[] } }[]
 }
 
@@ -143,10 +156,58 @@ export interface OrderInput {
    * which the buttons still read: no shipping address asked, "Pay Now", the brand name.
    */
   embedded?: boolean
+  /**
+   * Save what pays it in PayPal's vault, for a schedule's later charges (vault with purchase). A PayPal
+   * account agrees on PayPal's page to recurring charges (RECURRING_PREPAID: the amount may change);
+   * a card, typed into Card Fields, is checked (3-D Secure only when the bank asks) and its first
+   * payment marked the first of a recurring series, as the card networks ask. The order then names
+   * its payment_source, so only that kind of button can pay it.
+   */
+  save?: { kind: 'card' | 'paypal'; customerId?: string; description: string }
 }
+
+/** The agreement a PayPal account saved for a schedule is made under: recurring, prepaid, the amount free to change. */
+export const RECURRING_USAGE_PATTERN = 'RECURRING_PREPAID'
 
 export function orderBody(i: OrderInput) {
   const unit = { custom_id: i.customId, description: i.description.slice(0, 127) || 'Payment', amount: { currency_code: 'USD', value: centsToDecimal(i.amountCents) } }
+  if (i.save) {
+    const experience = { return_url: i.returnUrl, cancel_url: i.cancelUrl, ...(i.brandName ? { brand_name: i.brandName.slice(0, 127) } : {}) }
+    const customer = i.save.customerId ? { customer: { id: i.save.customerId } } : {}
+    if (i.save.kind === 'card') {
+      return {
+        intent: 'CAPTURE',
+        purchase_units: [unit],
+        payment_source: {
+          card: {
+            attributes: { vault: { store_in_vault: 'ON_SUCCESS' }, verification: { method: 'SCA_WHEN_REQUIRED' }, ...customer },
+            stored_credential: { payment_initiator: 'CUSTOMER', payment_type: 'RECURRING', usage: 'FIRST' },
+            experience_context: experience,
+          },
+        },
+      }
+    }
+    return {
+      intent: 'CAPTURE',
+      purchase_units: [unit],
+      payment_source: {
+        paypal: {
+          attributes: {
+            vault: {
+              store_in_vault: 'ON_SUCCESS',
+              usage_type: 'MERCHANT',
+              customer_type: 'CONSUMER',
+              usage_pattern: RECURRING_USAGE_PATTERN,
+              permit_multiple_payment_tokens: true,
+              description: i.save.description.slice(0, 128) || 'Recurring payments',
+            },
+            ...customer,
+          },
+          experience_context: { ...experience, user_action: 'PAY_NOW', shipping_preference: 'NO_SHIPPING' },
+        },
+      },
+    }
+  }
   if (i.embedded) {
     return {
       intent: 'CAPTURE',
@@ -209,6 +270,8 @@ export interface SetupTokenInput {
   returnUrl: string
   cancelUrl: string
   brandName?: string
+  /** A PayPal account's agreement; default UNSCHEDULED_POSTPAID (charged when something is owed), RECURRING_USAGE_PATTERN for a schedule. */
+  usagePattern?: string
 }
 
 /**
@@ -226,7 +289,7 @@ export function setupTokenBody(i: SetupTokenInput) {
     payment_source: {
       paypal: {
         description: i.description.slice(0, 128) || 'Payments',
-        usage_pattern: 'UNSCHEDULED_POSTPAID',
+        usage_pattern: i.usagePattern ?? 'UNSCHEDULED_POSTPAID',
         usage_type: 'MERCHANT',
         customer_type: 'CONSUMER',
         permit_multiple_payment_tokens: true,
@@ -243,6 +306,11 @@ export interface VaultChargeInput {
   kind: 'card' | 'paypal'
   /** The saved method's payment token id. */
   vaultId: string
+  /**
+   * A schedule's charge: a card is marked RECURRING (not UNSCHEDULED), with its first payment's
+   * network reference when known; a PayPal account saved under a usage pattern says it again.
+   */
+  recurring?: { usagePattern?: string; networkRef?: { id: string; network?: string; date?: string } }
 }
 
 /**
@@ -258,8 +326,26 @@ export function vaultChargeBody(i: VaultChargeInput) {
     description: i.description.slice(0, 127) || 'Payment',
     amount: { currency_code: 'USD', value: centsToDecimal(i.amountCents) },
   }
+  const ref = i.recurring?.networkRef
   const payment_source =
-    i.kind === 'card' ? { card: { vault_id: i.vaultId, stored_credential: { payment_initiator: 'MERCHANT', payment_type: 'UNSCHEDULED', usage: 'SUBSEQUENT' } } } : { paypal: { vault_id: i.vaultId } }
+    i.kind === 'card'
+      ? {
+          card: {
+            vault_id: i.vaultId,
+            stored_credential: {
+              payment_initiator: 'MERCHANT',
+              payment_type: i.recurring ? 'RECURRING' : 'UNSCHEDULED',
+              usage: 'SUBSEQUENT',
+              ...(ref ? { previous_network_transaction_reference: { id: ref.id, ...(ref.network ? { network: ref.network } : {}), ...(ref.date ? { date: ref.date } : {}) } } : {}),
+            },
+          },
+        }
+      : {
+          paypal: {
+            vault_id: i.vaultId,
+            ...(i.recurring?.usagePattern ? { stored_credential: { payment_initiator: 'MERCHANT', usage: 'SUBSEQUENT', usage_pattern: i.recurring.usagePattern } } : {}),
+          },
+        }
   return { intent: 'CAPTURE', purchase_units: [unit], payment_source }
 }
 
@@ -368,11 +454,39 @@ export const PAYPAL_EVENTS = [
   'PAYMENT.CAPTURE.REVERSED',
   'CUSTOMER.DISPUTE.CREATED',
   'CUSTOMER.DISPUTE.RESOLVED',
+  'VAULT.PAYMENT-TOKEN.DELETED',
 ] as const
 
 /** The capture of a captured order (the first unit's first capture). */
 export function orderCapture(order: PaypalOrder): PaypalCapture | null {
   return order.purchase_units?.[0]?.payments?.captures?.[0] ?? null
+}
+
+/**
+ * What an order paid with vault-with-purchase saved: the payment token (once VAULTED), its customer,
+ * a label, and a card's network reference from the capture. Null when nothing was saved (yet).
+ */
+export function orderVault(order: PaypalOrder): {
+  paymentTokenId: string
+  customerId: string
+  kind: 'card' | 'paypal'
+  label: string
+  networkRef?: { id: string; network?: string; date?: string }
+} | null {
+  const card = order.payment_source?.card
+  const pp = order.payment_source?.paypal
+  const vault = card?.attributes?.vault ?? pp?.attributes?.vault
+  if (!vault?.id || !vault.customer?.id || vault.status !== 'VAULTED') return null
+  const what = paymentTokenLabel({ payment_source: card ? { card } : { paypal: pp } })
+  if (!what) return null
+  const ntr = orderCapture(order)?.network_transaction_reference
+  return {
+    paymentTokenId: vault.id,
+    customerId: vault.customer.id,
+    kind: what.kind,
+    label: what.label,
+    ...(card && ntr?.id ? { networkRef: { id: ntr.id, ...(ntr.network ? { network: ntr.network } : {}), ...(ntr.date ? { date: ntr.date } : {}) } } : {}),
+  }
 }
 
 export function orderCustomId(order: PaypalOrder): string | null {

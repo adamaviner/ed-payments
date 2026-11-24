@@ -34,6 +34,7 @@ export const issueArg = v.object({
 export function callbackArgs<C extends GenericValidator>(context: C) {
   const b = base(context)
   return {
+    ...scheduleCallbackArgs(context),
     /** paid: the money arrived. Record the sale; return null, or { refuse } to have it refunded instead (throwing does the same). */
     paid: { ...b, amountCents: v.number(), paidCents: v.number(), paymentRef: v.string() },
     /**
@@ -41,7 +42,14 @@ export function callbackArgs<C extends GenericValidator>(context: C) {
      * up on a charge. declined: the bank refused the method. wasProcessing: a bank payment that had been
      * accepted bounced.
      */
-    failed: { ...b, reason: v.string(), declined: v.boolean(), wasProcessing: v.boolean() },
+    failed: {
+      ...b,
+      reason: v.string(),
+      declined: v.boolean(),
+      wasProcessing: v.boolean(),
+      /** The processor's code for the refusal (insufficient_funds, lost_card, INSTRUMENT_DECLINED...), when it gave one. */
+      declineCode: v.optional(v.union(v.string(), v.null())),
+    },
     /**
      * refunded: a refund went back to the buyer (sent, done by hand, or made at the processor). May come
      * twice for one refundId (a refund the processor failed after sending, then sent again): act on it
@@ -76,6 +84,76 @@ export function callbackArgs<C extends GenericValidator>(context: C) {
   }
 }
 
+const scheduleStatus = v.union(v.literal('starting'), v.literal('active'), v.literal('paused'), v.literal('past_due'), v.literal('lapsed'), v.literal('cancelled'))
+const scheduleChange = v.union(
+  v.literal('started'),
+  v.literal('not_started'),
+  v.literal('amount'),
+  v.literal('method'),
+  v.literal('anchor'),
+  v.literal('paused'),
+  v.literal('resumed'),
+  v.literal('cancelled'),
+)
+
+function scheduleBase<C extends GenericValidator>(context: C) {
+  return {
+    scheduleId: v.string(),
+    ref: v.object({ type: v.string(), id: v.string() }),
+    purpose: v.string(),
+    owner: v.object({ type: v.string(), id: v.string() }),
+    payer: v.object({ name: v.optional(v.string()), email: v.string() }),
+    processor,
+    method,
+    paymentMethodId: v.union(v.string(), v.null()),
+    /** The schedule's amount now (a charge's own amount is on its checkout). */
+    amountCents: v.number(),
+    /** Where the schedule stands after this. */
+    status: scheduleStatus,
+    /** The next charge (or retry); null once lapsed or cancelled. */
+    nextChargeAt: v.union(v.number(), v.null()),
+    context,
+  }
+}
+
+/** The arguments of the schedule callbacks, for an app whose context is `context`. */
+export function scheduleCallbackArgs<C extends GenericValidator>(context: C) {
+  const b = scheduleBase(context)
+  return {
+    /** scheduleCharged: one period's charge was paid (paid is called for its checkout too). first: the payment that started the schedule. */
+    scheduleCharged: { ...b, checkoutId: v.string(), period: v.string(), paidCents: v.number(), paymentRef: v.string(), first: v.boolean() },
+    /**
+     * scheduleFailed: a charge was refused (or the saved method is gone: checkoutId null, declineCode
+     * METHOD_REMOVED). attempt: refusals in this period so far. final: no more retries, the schedule
+     * lapsed (hard declines are final at once). nextRetryAt: when it is tried again.
+     */
+    scheduleFailed: {
+      ...b,
+      checkoutId: v.union(v.string(), v.null()),
+      period: v.string(),
+      attempt: v.number(),
+      final: v.boolean(),
+      reason: v.string(),
+      declineCode: v.union(v.string(), v.null()),
+      declineKind: v.union(v.literal('hard'), v.literal('soft'), v.literal('insufficient_funds')),
+      nextRetryAt: v.union(v.number(), v.null()),
+    },
+    /**
+     * scheduleChanged: started (its first payment came), not_started (that payment never came), or the
+     * app or the processor changed it. by: who the app named; 'processor' when the payer removed the
+     * method at PayPal or Stripe.
+     */
+    scheduleChanged: {
+      ...b,
+      changes: v.array(scheduleChange),
+      previousStatus: scheduleStatus,
+      previousAmountCents: v.number(),
+      reason: v.union(v.string(), v.null()),
+      by: v.union(v.string(), v.null()),
+    },
+  }
+}
+
 /** With any context, for code that doesn't care about it. */
 const anyArgs = callbackArgs(v.any())
 export const paidArgs = anyArgs.paid
@@ -98,4 +176,7 @@ export type RefundNeeded<T = unknown> = Args<T, 'refundNeeded'>
 export type Dispute<T = unknown> = Args<T, 'dispute'>
 export type Processing<T = unknown> = Args<T, 'processing'>
 export type IssuesDigest = ObjectType<typeof issuesArgs>
+export type ScheduleCharged<T = unknown> = Args<T, 'scheduleCharged'>
+export type ScheduleFailed<T = unknown> = Args<T, 'scheduleFailed'>
+export type ScheduleChanged<T = unknown> = Args<T, 'scheduleChanged'>
 export type IssueSummary = Infer<typeof issueArg>

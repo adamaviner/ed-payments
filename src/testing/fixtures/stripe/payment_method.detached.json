@@ -1,0 +1,70 @@
+{
+  "_source": "Built 2026-11-21 from payment-method-card.json (a real test-mode PaymentMethod) as Stripe documents payment_method.detached (https://docs.stripe.com/api/events/types): the method with customer null, the event shaped like payment_intent.payment_failed.json's.",
+  "id": "evt_test_detached",
+  "object": "event",
+  "api_version": "2026-10-28.endive",
+  "created": 1794917500,
+  "data": {
+    "object": {
+      "id": "pm_1UcsRYL4sVH3OBLntlTG79Ko",
+      "object": "payment_method",
+      "allow_redisplay": "unspecified",
+      "billing_details": {
+        "address": {
+          "city": null,
+          "country": null,
+          "line1": null,
+          "line2": null,
+          "postal_code": null,
+          "state": null
+        },
+        "email": null,
+        "name": null,
+        "phone": null,
+        "tax_id": null
+      },
+      "card": {
+        "brand": "visa",
+        "checks": {
+          "address_line1_check": null,
+          "address_postal_code_check": null,
+          "cvc_check": "pass"
+        },
+        "country": "US",
+        "display_brand": "visa",
+        "exp_month": 11,
+        "exp_year": 2027,
+        "fingerprint": "scrubbed",
+        "funding": "credit",
+        "generated_from": null,
+        "last4": "4242",
+        "networks": {
+          "available": ["visa"],
+          "preferred": null
+        },
+        "regulated_status": "unregulated",
+        "three_d_secure_usage": {
+          "supported": true
+        },
+        "wallet": null
+      },
+      "created": 1794945208,
+      "customer": null,
+      "customer_account": null,
+      "livemode": false,
+      "metadata": {},
+      "shared_payment_granted_token": null,
+      "type": "card"
+    },
+    "previous_attributes": {
+      "customer": "cus_test_previous"
+    }
+  },
+  "livemode": false,
+  "pending_webhooks": 1,
+  "request": {
+    "id": null,
+    "idempotency_key": null
+  },
+  "type": "payment_method.detached"
+}

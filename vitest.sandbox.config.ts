@@ -19,13 +19,17 @@ const env = { ...fromFile, ...process.env }
 const stripe = /^(sk|rk)_test_/.test(env.STRIPE_SECRET_KEY ?? '')
 const paypal = !!env.PAYPAL_CLIENT_ID && !!env.PAYPAL_CLIENT_SECRET && (env.PAYPAL_API_BASE ?? '').indexOf('api-m.paypal.com') < 0
 
-const include = [...(stripe ? ['sandbox/stripe.sandbox.test.ts'] : []), ...(paypal ? ['sandbox/paypal.sandbox.test.ts'] : [])]
+// The schedules suite runs the library's test app (convex-test), so it needs Stripe; its PayPal part runs when PayPal's keys are there too.
+const include = [...(stripe ? ['sandbox/stripe.sandbox.test.ts', 'sandbox/schedules.sandbox.test.ts'] : []), ...(paypal ? ['sandbox/paypal.sandbox.test.ts'] : [])]
 if (!include.length) console.info('test:sandbox: no Stripe test key or PayPal sandbox keys (set ED_PAYMENTS_SANDBOX_ENV=<env file>); nothing to run.')
 
 export default defineConfig({
   test: {
     include,
     passWithNoTests: true,
+    // convex-test, for the schedules suite.
+    environment: 'edge-runtime',
+    server: { deps: { inline: ['convex-test'] } },
     testTimeout: 60_000,
     env: {
       SANDBOX_STRIPE_SECRET_KEY: stripe ? (env.STRIPE_SECRET_KEY ?? '') : '',

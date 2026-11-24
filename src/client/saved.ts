@@ -8,6 +8,7 @@ import { ConvexError } from 'convex/values'
 import { customerOf, intentState, savedMethodKind, savedMethodLabel, stripe, stripeFee, stripeMethodType, type StripePaymentIntent, type StripePaymentMethod } from '../core/stripe.js'
 import { paypal, paypalTokenOf } from '../core/paypal.js'
 import { ProcessorError, tagFor, type Payer, type Processor, type Ref, type SavedMethodKind } from '../core/types.js'
+import { declineCodeOf, declineKind, type DeclineInfo } from '../core/declines.js'
 import { PAYPAL_DECLINED, type Checkout, type Payments, type RunActionCtx } from './index.js'
 import { chargePaypalNow, paypalMethods, removePaypalMethod, verifyPaypalOwner } from './paypalVault.js'
 import { errorText } from './util.js'
@@ -38,7 +39,7 @@ const UNUSABLE = 'That payment method couldn’t be used. Please enter your deta
 const ownerTag = (owner: Ref) => `${owner.type}:${owner.id}`
 
 /** The owner's Stripe Customer, made (or adopted, when the app already had one) the first time. */
-async function ensureCustomer(p: Payments, ctx: RunActionCtx, owner: Ref, payer: Payer | null, adopt: string | undefined) {
+export async function ensureCustomer(p: Payments, ctx: RunActionCtx, owner: Ref, payer: Payer | null, adopt: string | undefined) {
   const found = await ctx.runQuery(p.component.customers.byOwner, { app: p.app, owner })
   if (found) return found
   const now = Date.now()
@@ -131,6 +132,8 @@ export async function verifyMethodOwner(p: Payments, ctx: RunActionCtx, a: { own
  */
 export async function removeSavedMethod(p: Payments, ctx: RunActionCtx, a: { owner: Ref; paymentMethodId: string; stripeCustomerId?: string }): Promise<void> {
   const m = await verifyMethodOwner(p, ctx, a)
+  if ((await ctx.runQuery(p.component.schedules.usingMethod, { paymentMethodId: m.paymentMethodId })) > 0)
+    throw new ConvexError('A repeating payment still uses this payment method. Change its method or cancel it first.')
   if (m.processor === 'paypal') return await removePaypalMethod(p, ctx, m.paymentMethodId)
   try {
     await stripe.detachPaymentMethod(p.stripeKeys(), m.paymentMethodId, { fetch: p.fetch })
@@ -180,6 +183,11 @@ export async function settleIntent(p: Payments, ctx: RunActionCtx, c: Checkout, 
 
 const declineText = (err: ProcessorError) => (err.code === 'authentication_required' ? 'The card needs the buyer to confirm the payment, which can’t happen without them.' : err.message)
 
+/** The code and kind of a refusal, for the checkout and a schedule's retries. */
+export const declineOf = (d: DeclineInfo) => ({ declineCode: declineCodeOf(d), declineKind: declineKind(d) })
+const stripeDecline = (e: { code?: string | null; decline_code?: string | null; advice_code?: string | null } | null | undefined) =>
+  declineOf({ processor: 'stripe', code: e?.code, declineCode: e?.decline_code, adviceCode: e?.advice_code })
+
 /**
  * This checkout's PaymentIntent, found among the customer's own since it started (after a try whose
  * answer never came back). Null only when Stripe has certainly none; when the list is too long to
@@ -223,7 +231,8 @@ export async function chargeNow(p: Payments, ctx: RunActionCtx & { scheduler: Sc
     })
     if (retry && n < MAX_CHARGE_ATTEMPTS) await ctx.scheduler.runAfter(RETRY_STEP_MS * n, p.wiring.worker.charge, { checkoutId: c.id })
   }
-  const failed = (reason: string, piId?: string) => ctx.runMutation(p.component.checkouts.settleFailed, { id: c.id, reason, declined: true, processorCheckoutId: piId, now: Date.now() })
+  const failed = (reason: string, piId: string | undefined, d: ReturnType<typeof declineOf>) =>
+    ctx.runMutation(p.component.checkouts.settleFailed, { id: c.id, reason, declined: true, processorCheckoutId: piId, ...d, now: Date.now() })
   if (c.processor === 'paypal') return await chargePaypalNow(p, ctx, c, note)
   if (!c.stripeCustomerId || !c.paymentMethodId || !c.chargeKey) return await note('The charge is missing its customer or payment method.', false)
 
@@ -232,7 +241,8 @@ export async function chargeNow(p: Payments, ctx: RunActionCtx & { scheduler: Sc
     const earlier = attempts > 0 ? await findIntent(p, c) : null
     if (earlier) {
       if (await settleIntent(p, ctx, c, earlier)) return
-      if (earlier.status === 'requires_payment_method') return void (await failed(earlier.last_payment_error?.message ?? 'The bank declined the charge.', earlier.id))
+      if (earlier.status === 'requires_payment_method')
+        return void (await failed(earlier.last_payment_error?.message ?? 'The bank declined the charge.', earlier.id, stripeDecline(earlier.last_payment_error)))
       return await note(`Stripe has the charge as ${earlier.status}.`, false, earlier.id)
     }
     const key = attempts === 0 ? c.chargeKey : `${c.chargeKey}:try-${attempts + 1}`
@@ -242,7 +252,8 @@ export async function chargeNow(p: Payments, ctx: RunActionCtx & { scheduler: Sc
       { fetch: p.fetch, idempotencyKey: key },
     )
   } catch (err) {
-    if (err instanceof ProcessorError && err.declined) return void (await failed(declineText(err), err.paymentIntent?.id))
+    if (err instanceof ProcessorError && err.declined)
+      return void (await failed(declineText(err), err.paymentIntent?.id, declineOf({ processor: 'stripe', code: err.code, declineCode: err.declineCode, adviceCode: err.adviceCode })))
     const retry = err instanceof ProcessorError && err.retryable
     console.warn(`payments: charge of ${c.id} (try ${attempts + 1}) ${retry ? 'will be retried' : 'needs a person'}: ${errorText(err)}`)
     return await note(errorText(err), retry, err instanceof ProcessorError ? err.paymentIntent?.id : undefined)
@@ -450,7 +461,7 @@ export async function onIntentEvent(p: Payments, ctx: RunActionCtx, type: string
   }
   const reason = pi.last_payment_error?.message ?? (c.status === 'processing' ? 'The bank payment failed.' : 'The payment was declined.')
   if (c.status === 'processing' || c.kind === 'offSession') {
-    await ctx.runMutation(p.component.checkouts.settleFailed, { id: c.id, reason, declined: true, processorCheckoutId: pi.id, now: Date.now() })
+    await ctx.runMutation(p.component.checkouts.settleFailed, { id: c.id, reason, declined: true, processorCheckoutId: pi.id, ...stripeDecline(pi.last_payment_error), now: Date.now() })
   } else {
     await ctx.runMutation(p.component.checkouts.noteError, { id: c.id, error: reason })
   }

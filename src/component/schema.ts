@@ -33,6 +33,30 @@ export const checkoutKind = v.union(v.literal('hosted'), v.literal('offSession')
 
 export const savedMethodKind = v.union(v.literal('card'), v.literal('ach'))
 
+/** How bad a refused charge was (core/declines.ts): hard ones aren't retried. */
+export const declineKind = v.union(v.literal('hard'), v.literal('soft'), v.literal('insufficient_funds'))
+
+/**
+ * starting: waiting for its first payment, which also saves the method (startScheduleCheckout).
+ * active: charged each period. paused: skipped until pausedUntil, then active again by itself.
+ * past_due: a charge was refused and is being retried. lapsed: the retries ran out or the refusal was
+ * hard; a new method (updateSchedule) or resumeSchedule starts it again. cancelled: for good.
+ */
+export const scheduleStatus = v.union(v.literal('starting'), v.literal('active'), v.literal('paused'), v.literal('past_due'), v.literal('lapsed'), v.literal('cancelled'))
+
+/** Only monthly for now; kept a field so other intervals can come without a migration. */
+export const scheduleInterval = v.literal('month')
+
+/** The host's schedule callbacks as function handles, like a checkout's. */
+export const scheduleCallbacks = v.object({
+  onCharged: v.optional(v.string()),
+  onFailed: v.optional(v.string()),
+  onChanged: v.optional(v.string()),
+})
+
+/** A PayPal card's network reference from its first payment, sent with later merchant-initiated charges. */
+export const networkRef = v.object({ id: v.string(), network: v.optional(v.string()), date: v.optional(v.string()) })
+
 /**
  * The host's own notes on a refund, e.g. { relist: 'yes' } from a question its admin page asked: kept on
  * the refund, shown in the ledger and passed to on.refunded. Opaque to the library.
@@ -81,6 +105,12 @@ export default defineSchema({
     chargeAttempts: v.optional(v.number()),
     /** offSession: when the last of those was. */
     lastTriedAt: v.optional(v.number()),
+    /** A schedule's charge (or its first payment): the schedule, and the period ('YYYY-MM') it pays. */
+    scheduleId: v.optional(v.id('schedules')),
+    schedulePeriod: v.optional(v.string()),
+    /** failed: the processor's code for the refusal (insufficient_funds, lost_card, INSTRUMENT_DECLINED...) and how bad it is. */
+    declineCode: v.optional(v.string()),
+    declineKind: v.optional(declineKind),
     /** onSession: the checkout this one retries (a declined offSession charge). */
     retryOf: v.optional(v.id('checkouts')),
     /** Stripe's Checkout Session id, PayPal's order id, or (offSession, onSession) Stripe's PaymentIntent id. */
@@ -109,7 +139,64 @@ export default defineSchema({
     .index('by_createdAt', ['createdAt'])
     .index('by_status_createdAt', ['status', 'createdAt'])
     .index('by_retryOf', ['retryOf'])
-    .index('by_chargeKey', ['chargeKey']),
+    .index('by_chargeKey', ['chargeKey'])
+    .index('by_scheduleId', ['scheduleId']),
+
+  /**
+   * Repeating charges of a saved method (monthly gifts): the library charges each due one with an
+   * off-session checkout keyed `schedule-<id>-<period>`, so a period is never charged twice. Kept
+   * forever, as the record of what a payer agreed to; small (one per agreement).
+   */
+  schedules: defineTable({
+    app: v.string(),
+    /** Whose saved method it charges (as given to setupPaymentMethod / savePaypalMethod). */
+    owner: ref,
+    /** What it is for in the app, e.g. { type: 'monthlyDonation', id }. */
+    ref,
+    purpose: v.string(),
+    description: v.string(),
+    payer,
+    processor,
+    method,
+    /** The library's saved-method id (pm_… or paypal:…); unset while starting. */
+    paymentMethodId: v.optional(v.string()),
+    amountCents: v.number(),
+    interval: scheduleInterval,
+    /** Day of the month it is charged (1-28), at hourUTC. */
+    anchorDay: v.number(),
+    hourUTC: v.number(),
+    status: scheduleStatus,
+    /** When the worker next acts on it: the period's charge, a retry, or the end of a pause. */
+    nextChargeAt: v.number(),
+    /** The period ('YYYY-MM') the next charge pays, and the one it started with. */
+    period: v.string(),
+    firstPeriod: v.string(),
+    /** Charges made for that period so far (each try has its own idempotency key). */
+    periodAttempts: v.number(),
+    /** The last period paid (or on its way, for a bank debit), so a resume or anchor change never charges it again. */
+    lastPaidPeriod: v.optional(v.string()),
+    pausedUntil: v.optional(v.number()),
+    /** Days after a period's first refusal that it is tried again (default 3, 5, 7); then it lapses. */
+    retryDays: v.array(v.number()),
+    /** Refusals in the current period, and when the first was (retries count from it). */
+    failures: v.number(),
+    firstFailedAt: v.optional(v.number()),
+    lastCheckoutId: v.optional(v.id('checkouts')),
+    lastError: v.optional(v.string()),
+    /** cancelled or lapsed: why, and who (cancelled through the API) or what (the processor). */
+    endReason: v.optional(v.string()),
+    endedBy: v.optional(v.string()),
+    endedAt: v.optional(v.number()),
+    callbacks: scheduleCallbacks,
+    /** Passed to every charge's callbacks and the schedule's own. */
+    context: v.optional(v.any()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_status_nextChargeAt', ['status', 'nextChargeAt'])
+    .index('by_owner', ['app', 'owner.type', 'owner.id'])
+    .index('by_ref', ['ref.type', 'ref.id'])
+    .index('by_paymentMethodId', ['paymentMethodId']),
 
   /** One Stripe Customer per payer of the app (owner: e.g. { type: 'user', id }), for saved payment methods. */
   customers: defineTable({
@@ -161,6 +248,10 @@ export default defineSchema({
     paymentTokenId: v.string(),
     kind: v.union(v.literal('card'), v.literal('paypal')),
     label: v.string(),
+    /** A PayPal account's agreement (UNSCHEDULED_POSTPAID, RECURRING_PREPAID...), sent back with recurring charges. */
+    usagePattern: v.optional(v.string()),
+    /** A card saved with a payment: its first payment's network reference, for later merchant-initiated charges. */
+    networkRef: v.optional(networkRef),
     declinedAt: v.optional(v.number()),
     declineReason: v.optional(v.string()),
     /** The owner removed it (deleted from PayPal's vault); kept so a charge of it fails instead of erring, and it can't be saved again. */

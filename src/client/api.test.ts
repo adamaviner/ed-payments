@@ -1,6 +1,7 @@
 // The generated functions (adminApi, publicApi, worker, registerCrons) and the hardening around every
 // public entry: refused without the app's say-so, refused past their rate limits, refused with tampered
 // amounts, and no secret ever stored or said.
+import { ConvexError } from 'convex/values'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { app, crons, defined, payments } from '../testing/app.js'
 import { fakePaypal, type FakePaypal } from '../testing/fakePaypal.js'
@@ -49,7 +50,47 @@ describe('adminApi', () => {
 
   test('every generated admin function is listed here', () => {
     const generated = Object.keys(payments.adminApi())
-    expect(generated.sort()).toEqual(cases.map(([name]) => name).sort())
+    expect(generated.sort()).toEqual([...cases.map(([name]) => name), 'access'].sort())
+  })
+
+  test('access says what the caller may do, and refuses nobody', async () => {
+    const t = createTest()
+    await t.mutation(api.host.addAdmin, { token: 'boss', name: 'Bo' })
+    await t.mutation(api.host.addAdmin, { token: 'desk', name: 'Sam', role: 'staff' })
+    expect(await t.query(api.payments.access, { auth: 'boss' })).toEqual({ level: 'admin', name: 'Bo', skipApproval: true })
+    expect(await t.query(api.payments.access, { auth: 'desk' })).toEqual({ level: 'request', name: 'Sam', skipApproval: true })
+    expect(await t.query(api.payments.access, { auth: 'guess' })).toBeNull()
+    expect(await t.query(api.payments.access, {})).toBeNull()
+  })
+
+  test('staff (authorize.request) see payments and ask for refunds; only admins approve, send or close them', async () => {
+    const t = createTest()
+    await t.mutation(api.host.addAdmin, { token: 'boss', name: 'Bo' })
+    await t.mutation(api.host.addAdmin, { token: 'desk', name: 'Sam', role: 'staff' })
+    const { checkoutId } = await t.action(api.shop.buy, { processor: 'stripe', method: 'card' })
+    await t.fetch('/stripe/webhook', await stripe.pay((await t.query(api.shop.status, { id: checkoutId }))!.processorCheckoutId!))
+    expect((await t.query(api.payments.refundable, { auth: 'desk', paginationOpts: page })).page).toHaveLength(1)
+    const refundId = await t.mutation(api.payments.requestRefund, { auth: 'desk', checkoutId, amountCents: 500, reason: 'Asked by phone' })
+    expect(await t.query(api.payments.openRefunds, { auth: 'desk' })).toMatchObject([{ id: refundId, requestedBy: 'Sam' }])
+    await expect(t.mutation(api.payments.approveRefund, { auth: 'desk', refundId })).rejects.toThrow(/Only an admin/)
+    await expect(t.action(api.payments.sendRefund, { auth: 'desk', refundId })).rejects.toThrow(/Only an admin/)
+    await expect(t.mutation(api.payments.dismissRefund, { auth: 'desk', refundId })).rejects.toThrow(/Only an admin/)
+    await expect(t.mutation(api.payments.markRefundedManually, { auth: 'desk', refundId })).rejects.toThrow(/Only an admin/)
+    expect(await t.action(api.payments.sendRefund, { auth: 'boss', refundId })).toEqual({ status: 'sent', error: null })
+  })
+
+  test('authorize.stepUp is asked before a refund is approved or sent, and its refusal carries code step_up', async () => {
+    const t = createTest()
+    await t.mutation(api.host.addAdmin, { token: 'boss', name: 'Bo', steppedUp: false })
+    const { checkoutId } = await t.action(api.shop.buy, { processor: 'stripe', method: 'card' })
+    await t.fetch('/stripe/webhook', await stripe.pay((await t.query(api.shop.status, { id: checkoutId }))!.processorCheckoutId!))
+    const refundId = await t.mutation(api.payments.requestRefund, { auth: 'boss', checkoutId, reason: 'Duplicate' })
+    const refused = await t.action(api.payments.sendRefund, { auth: 'boss', refundId }).catch((e: unknown) => e)
+    expect(refused).toBeInstanceOf(ConvexError)
+    expect((refused as ConvexError<{ code: string; message: string }>).data).toEqual({ code: 'step_up', message: 'Confirm with your passkey first.' })
+    await expect(t.mutation(api.payments.approveRefund, { auth: 'boss', refundId })).rejects.toThrow()
+    expect(stripe.refunds()).toHaveLength(0)
+    expect(await t.query(api.payments.openRefunds, { auth: 'boss' })).toMatchObject([{ id: refundId, status: 'requested' }])
   })
 
   test.each(cases)('%s is refused without the app’s say-so', async (_name, call) => {
@@ -198,6 +239,7 @@ describe('worker and crons', () => {
       ['payments reconcile', 'daily'],
       ['payments issues digest', 'daily'],
       ['payments cleanup', 'daily'],
+      ['payments schedules', 'hourly'],
     ])
   })
 

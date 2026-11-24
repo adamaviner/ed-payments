@@ -133,6 +133,28 @@ describe('fake PayPal answers in PayPal’s shapes', () => {
     expect(refused.status).toBe(422)
     expect(drift(await json(refused), fixture(paypalObjectFixtures.errorInvalidPaymentSource))).toEqual([])
   })
+
+  test('vault with purchase: a card order captured and saved, then charged as a recurring payment', async () => {
+    const pp = fakePaypal()
+    const B = 'https://api-m.sandbox.paypal.com'
+    const send = async (path: string, body?: unknown) => await pp.fetch(`${B}${path}`, { method: 'POST', body: body === undefined ? undefined : JSON.stringify(body) })
+    const order = (await json(
+      await send('/v2/checkout/orders', {
+        purchase_units: [{ custom_id: 'a:1', amount: { currency_code: 'USD', value: '25.00' } }],
+        payment_source: { card: { attributes: { vault: { store_in_vault: 'ON_SUCCESS' } } } },
+      }),
+    )) as { id: string }
+    pp.approve(order.id)
+    const captured = (await json(await send(`/v2/checkout/orders/${order.id}/capture`))) as { payment_source: { card: { attributes: { vault: { id: string } } } } }
+    expect(drift(captured, fixture(paypalObjectFixtures.orderVaultCardCaptured))).toEqual([])
+    const recurring = await json(
+      await send('/v2/checkout/orders', {
+        purchase_units: [{ custom_id: 'a:2', amount: { currency_code: 'USD', value: '25.00' } }],
+        payment_source: { card: { vault_id: captured.payment_source.card.attributes.vault.id, stored_credential: { payment_initiator: 'MERCHANT', payment_type: 'RECURRING', usage: 'SUBSEQUENT' } } },
+      }),
+    )
+    expect(drift(recurring, fixture(paypalObjectFixtures.vaultOrderRecurring))).toEqual([])
+  })
 })
 
 describe('the check itself', () => {

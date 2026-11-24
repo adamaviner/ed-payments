@@ -68,16 +68,23 @@ const calls = {
 }
 type Name = keyof typeof calls
 
+/** What the page's access query answers: an admin unless a test says otherwise. */
+let level: 'admin' | 'request' | null = 'admin'
+/** What the page's openRefunds query answers. */
+let openRefunds: OpenRefund[] = [openRefund]
+
 vi.mock('convex/react', () => ({
-  useQuery: (fn: string) => (fn === 'openRefunds' ? [openRefund] : undefined),
+  useQuery: (fn: string) => (fn === 'openRefunds' ? openRefunds : fn === 'access' ? level && { level, name: 'Bo', skipApproval: false } : undefined),
   usePaginatedQuery: (fn: string) => ({ results: fn === 'refundable' ? [checkout] : [issue], status: 'Exhausted', loadMore: () => {} }),
   useMutation: (fn: Name) => calls[fn],
   useAction: (fn: Name) => calls[fn],
 }))
 
-const api = Object.fromEntries(['openRefunds', 'refundable', 'issues', ...Object.keys(calls)].map((k) => [k, k])) as unknown as PaymentsAdminApi
+const api = Object.fromEntries(['access', 'openRefunds', 'refundable', 'issues', ...Object.keys(calls)].map((k) => [k, k])) as unknown as PaymentsAdminApi
 
 beforeEach(() => {
+  level = 'admin'
+  openRefunds = [openRefund]
   for (const fn of Object.values(calls)) fn.mockClear()
 })
 afterEach(cleanup)
@@ -110,6 +117,16 @@ test('what is left counts the open refund; more than that is refused in place', 
   expect(amountError(row)).toBe('Enter an amount in dollars, like 12.50.')
   // Not an alert: a screen reader would read it out on every keystroke.
   expect(within(row).queryByRole('alert')).toBeNull()
+})
+
+test('a payment whose open refunds hold all that is left offers no refund', () => {
+  // $100 paid, $10 refunded, $90 asked for and not sent.
+  openRefunds = [{ ...openRefund, amountCents: 9000 }]
+  render(<PaymentsAdminPage api={api} auth={{ token: 't' }} skipApproval />)
+  const row = rowOf(screen.getByText('the rest is in Refunds to do'))
+  expect(within(row).queryByText(/left$/)).toBeNull()
+  expect(within(row).queryByLabelText('Amount ($)')).toBeNull()
+  expect(within(row).queryByRole('button', { name: /^Refund/ })).toBeNull()
 })
 
 test('a refund asks twice, then requests the typed amount in cents and sends it', async () => {
@@ -251,4 +268,39 @@ test('without skipApproval the answer goes with the request, and the form clears
   await waitFor(() => expect(calls.requestRefund).toHaveBeenCalledWith({ checkoutId: 'c1', amountCents: 7000, reason: 'Refunded by an admin', hostData: { relist: 'yes' } }))
   expect(calls.sendRefund).not.toHaveBeenCalled()
   expect(within(row).getByLabelText<HTMLInputElement>('Yes, list it again').checked).toBe(false)
+})
+
+test('someone who may only ask for refunds asks, and sees no approve, send or issue controls', async () => {
+  level = 'request'
+  render(<PaymentsAdminPage api={api} auth={{ token: 't' }} skipApproval />)
+  expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull()
+  expect(screen.queryByRole('button', { name: /Refund via/ })).toBeNull()
+  expect(screen.queryByRole('button', { name: 'Mark resolved' })).toBeNull()
+  expect(screen.getByText('An admin approves and sends refunds.')).toBeTruthy()
+  const row = refundRow()
+  fireEvent.change(within(row).getByLabelText('Amount ($)'), { target: { value: '5' } })
+  fireEvent.click(within(row).getByRole('button', { name: 'Refund $5.00' }))
+  fireEvent.click(within(row).getByRole('button', { name: 'Ask to refund $5.00?' }))
+  await waitFor(() => expect(calls.requestRefund).toHaveBeenCalled())
+  expect(calls.sendRefund).not.toHaveBeenCalled()
+  expect(await screen.findByText('Asked for. An admin will approve and send it.')).toBeTruthy()
+})
+
+test('nobody the app lets in sees only a note', () => {
+  level = null
+  render(<PaymentsAdminPage api={api} auth={{ token: 't' }} />)
+  expect(screen.getByText('Only those the app lets see payments can use this page.')).toBeTruthy()
+})
+
+test('a refused second step asks the app, then sends once more', async () => {
+  const { ConvexError } = await import('convex/values')
+  calls.sendRefund.mockRejectedValueOnce(new ConvexError({ code: 'step_up', message: 'Confirm with your passkey first.' }))
+  const onStepUp = vi.fn(async () => true)
+  render(<PaymentsAdminPage api={api} auth={{ token: 't' }} skipApproval onStepUp={onStepUp} />)
+  const row = refundRow()
+  fireEvent.change(within(row).getByLabelText('Amount ($)'), { target: { value: '5' } })
+  fireEvent.click(within(row).getByRole('button', { name: 'Refund $5.00' }))
+  fireEvent.click(within(row).getByRole('button', { name: 'Send $5.00 back via Stripe?' }))
+  await waitFor(() => expect(calls.sendRefund).toHaveBeenCalledTimes(2))
+  expect(onStepUp).toHaveBeenCalledWith('send')
 })

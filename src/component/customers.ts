@@ -4,7 +4,7 @@
 import { ConvexError, v } from 'convex/values'
 import type { Doc } from './_generated/dataModel.js'
 import { mutation, query, type QueryCtx } from './_generated/server.js'
-import { ref, savedMethodKind } from './schema.js'
+import { networkRef, ref, savedMethodKind } from './schema.js'
 
 const customerView = v.object({ id: v.string(), stripeCustomerId: v.string(), email: v.string() })
 
@@ -120,6 +120,8 @@ const paypalMethodView = v.object({
   declineReason: v.union(v.string(), v.null()),
   removed: v.boolean(),
   createdAt: v.number(),
+  usagePattern: v.union(v.string(), v.null()),
+  networkRef: v.union(networkRef, v.null()),
 })
 
 const paypalMethodViewOf = (m: Doc<'paypalMethods'>) => ({
@@ -130,6 +132,8 @@ const paypalMethodViewOf = (m: Doc<'paypalMethods'>) => ({
   declineReason: m.declineReason ?? null,
   removed: m.removedAt !== undefined,
   createdAt: m.createdAt,
+  usagePattern: m.usagePattern ?? null,
+  networkRef: m.networkRef ?? null,
 })
 
 async function findPaypal(ctx: QueryCtx, app: string, owner: { type: string; id: string }) {
@@ -178,7 +182,16 @@ export const paypalMethod = query({
 
 /** Records a method just saved in PayPal's vault (and the owner's PayPal customer, the first time). Saving the same one again keeps the first row. */
 export const savePaypalMethod = mutation({
-  args: { app: v.string(), owner: ref, paypalCustomerId: v.string(), paymentTokenId: v.string(), kind: v.union(v.literal('card'), v.literal('paypal')), label: v.string(), now: v.number() },
+  args: {
+    app: v.string(),
+    owner: ref,
+    paypalCustomerId: v.string(),
+    paymentTokenId: v.string(),
+    kind: v.union(v.literal('card'), v.literal('paypal')),
+    label: v.string(),
+    usagePattern: v.optional(v.string()),
+    now: v.number(),
+  },
   returns: paypalMethodView,
   handler: async (ctx, a) => {
     const customerId = (await findPaypal(ctx, a.app, a.owner))?._id ?? (await ctx.db.insert('paypalCustomers', { app: a.app, owner: a.owner, paypalCustomerId: a.paypalCustomerId, createdAt: a.now }))
@@ -187,7 +200,7 @@ export const savePaypalMethod = mutation({
       .withIndex('by_paymentTokenId', (q) => q.eq('paymentTokenId', a.paymentTokenId))
       .first()
     if (existing) return paypalMethodViewOf(existing)
-    const id = await ctx.db.insert('paypalMethods', { customerId, paymentTokenId: a.paymentTokenId, kind: a.kind, label: a.label, createdAt: a.now })
+    const id = await ctx.db.insert('paypalMethods', { customerId, paymentTokenId: a.paymentTokenId, kind: a.kind, label: a.label, usagePattern: a.usagePattern, createdAt: a.now })
     const made = await ctx.db.get(id)
     if (!made) throw new ConvexError('The saved method vanished.')
     return paypalMethodViewOf(made)

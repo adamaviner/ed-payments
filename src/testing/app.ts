@@ -13,7 +13,8 @@ export const app = defineTestApp({
     orders: defineTable({ checkoutId: v.string(), paymentRef: v.string(), paidCents: v.number() }),
     /** Every callback the component made, in order, and Stripe events passed on to the host. */
     calls: defineTable({ name: v.string(), args: v.any() }),
-    admins: defineTable({ token: v.string(), name: v.string() }),
+    /** role 'staff' may only ask for refunds (authorize.request); steppedUp: passed the app's second step (authorize.stepUp). */
+    admins: defineTable({ token: v.string(), name: v.string(), role: v.optional(v.string()), steppedUp: v.optional(v.boolean()) }),
   }),
   components: { payments: paymentsTest },
 })
@@ -27,6 +28,7 @@ export const context = v.object({
   paid: v.optional(paidBehaviour),
   disputeThrows: v.optional(v.boolean()),
   bidId: v.optional(v.string()),
+  monthlyId: v.optional(v.string()),
 })
 
 type Ctx = (typeof context)['type']
@@ -35,22 +37,39 @@ type Ctx = (typeof context)['type']
 const wiring: PaymentsWiring<Ctx> = {
   get on() {
     const h = defined.internal.host
-    return { paid: h.paid, failed: h.failed, refunded: h.refunded, refundNeeded: h.refundNeeded, dispute: h.dispute, processing: h.processing, issues: h.issues }
+    return {
+      paid: h.paid,
+      failed: h.failed,
+      refunded: h.refunded,
+      refundNeeded: h.refundNeeded,
+      dispute: h.dispute,
+      processing: h.processing,
+      issues: h.issues,
+      scheduleCharged: h.scheduleCharged,
+      scheduleFailed: h.scheduleFailed,
+      scheduleChanged: h.scheduleChanged,
+    }
   },
   get authorize() {
-    return { admin: defined.internal.host.isAdmin }
+    return { admin: defined.internal.host.isAdmin, request: defined.internal.host.isStaff, stepUp: defined.internal.host.stepUp }
   },
   get worker() {
     return defined.internal.paymentsWorker
   },
 }
 
+/**
+ * The keys the test app uses: fakes, unless the sandbox suite (sandbox/schedules.sandbox.test.ts) puts
+ * test-mode keys here to run the same app against Stripe's test mode and PayPal's sandbox.
+ */
+export const testKeys = { stripe: 'sk_test_fake', paypalClientId: 'fake-client', paypalSecret: 'fake-secret' }
+
 export const payments = definePayments(app.components.payments, {
   app: 'test',
   context,
   siteUrl: () => 'https://app.example.org/',
-  stripe: () => ({ secretKey: 'sk_test_fake', webhookSecret: FAKE_STRIPE_WEBHOOK_SECRET }),
-  paypal: () => ({ clientId: 'fake-client', clientSecret: 'fake-secret', webhookId: 'WH-FAKE', apiBase: PAYPAL_SANDBOX_API }),
+  stripe: () => ({ secretKey: testKeys.stripe, webhookSecret: FAKE_STRIPE_WEBHOOK_SECRET }),
+  paypal: () => ({ clientId: testKeys.paypalClientId, clientSecret: testKeys.paypalSecret, webhookId: 'WH-FAKE', apiBase: PAYPAL_SANDBOX_API }),
   fees: { paypal: { card: { basisPoints: 199, fixedCents: 49, capCents: null } } },
   limits: { perKey: 3, windowMinutes: 10, globalPerMinute: 5 },
   brandName: 'Test shop',
@@ -96,6 +115,9 @@ export const defined = app.defineModules({
     refundNeeded: app.internalMutation({ args: payments.args.refundNeeded, handler: async (ctx, a) => await record(ctx, 'onRefundNeeded', a) }),
     processing: app.internalMutation({ args: payments.args.processing, handler: async (ctx, a) => await record(ctx, 'onProcessing', a) }),
     issues: app.internalMutation({ args: payments.args.issues, handler: async (ctx, a) => await record(ctx, 'onIssues', a) }),
+    scheduleCharged: app.internalMutation({ args: payments.args.scheduleCharged, handler: async (ctx, a) => await record(ctx, 'scheduleCharged', a) }),
+    scheduleFailed: app.internalMutation({ args: payments.args.scheduleFailed, handler: async (ctx, a) => await record(ctx, 'scheduleFailed', a) }),
+    scheduleChanged: app.internalMutation({ args: payments.args.scheduleChanged, handler: async (ctx, a) => await record(ctx, 'scheduleChanged', a) }),
     dispute: app.internalMutation({
       args: payments.args.dispute,
       handler: async (ctx, a) => {
@@ -111,13 +133,34 @@ export const defined = app.defineModules({
         const me = await ctx.auth.getUserIdentity()
         const token = typeof auth === 'string' ? auth : me ? `user:${me.subject}` : null
         const row = token ? (await ctx.db.query('admins').collect()).find((x) => x.token === token) : undefined
-        return row ? { name: row.name } : null
+        return row && row.role !== 'staff' ? { name: row.name } : null
+      },
+    }),
+    /** Staff: may see payments and ask for refunds. */
+    isStaff: app.internalQuery({
+      args: { auth: v.optional(v.any()) },
+      handler: async (ctx, { auth }) => {
+        const row = typeof auth === 'string' ? (await ctx.db.query('admins').collect()).find((x) => x.token === auth) : undefined
+        return row?.role === 'staff' ? { name: row.name } : null
+      },
+    }),
+    /** The app's second step before money moves: only an admin marked steppedUp passes. */
+    stepUp: app.internalQuery({
+      args: { auth: v.optional(v.any()), action: v.union(v.literal('approve'), v.literal('send')), refundId: v.string() },
+      handler: async (ctx, { auth }) => {
+        const me = await ctx.auth.getUserIdentity()
+        const token = typeof auth === 'string' ? auth : me ? `user:${me.subject}` : null
+        const row = token ? (await ctx.db.query('admins').collect()).find((x) => x.token === token) : undefined
+        return row?.steppedUp === false ? 'Confirm with your passkey first.' : null
       },
     }),
     unhandled: app.internalMutation({ args: { type: v.string(), id: v.string() }, handler: async (ctx, a) => void (await ctx.db.insert('calls', { name: 'unhandledStripe', args: a })) }),
     calls: app.query({ args: {}, handler: async (ctx) => (await ctx.db.query('calls').collect()).map((c) => ({ name: c.name, args: c.args as Record<string, unknown> })) }),
     orders: app.query({ args: {}, handler: async (ctx) => await ctx.db.query('orders').collect() }),
-    addAdmin: app.mutation({ args: { token: v.string(), name: v.string() }, handler: async (ctx, a) => void (await ctx.db.insert('admins', a)) }),
+    addAdmin: app.mutation({
+      args: { token: v.string(), name: v.string(), role: v.optional(v.string()), steppedUp: v.optional(v.boolean()) },
+      handler: async (ctx, a) => void (await ctx.db.insert('admins', a)),
+    }),
     /** Makes a checkout row with every callback, without asking a processor (the component's own tests). */
     create: app.mutation({
       args: {
@@ -265,6 +308,72 @@ export const defined = app.defineModules({
       },
     }),
     cardProcessor: app.query({ args: { amountCents: v.number() }, handler: async (_ctx, a) => payments.cardProcessorFor(a.amountCents) }),
+  },
+  /** Monthly gifts, the way ed-schedule's donations use schedules. */
+  monthly: {
+    start: app.mutation({
+      args: { donor: v.string(), paymentMethodId: v.string(), amountCents: v.optional(v.number()), firstChargeAt: v.optional(v.number()), anchorDay: v.optional(v.number()) },
+      handler: async (ctx, a): Promise<{ scheduleId: string; checkoutId: string | null }> =>
+        await payments.startSchedule(ctx, {
+          owner: { type: 'donor', id: a.donor },
+          ref: { type: 'monthly', id: `m-${a.donor}` },
+          purpose: 'donation',
+          description: 'Monthly gift',
+          payer: { email: `${a.donor}@example.org` },
+          amountCents: a.amountCents ?? 2500,
+          context: { monthlyId: `m-${a.donor}` },
+          paymentMethodId: a.paymentMethodId,
+          firstChargeAt: a.firstChargeAt,
+          anchorDay: a.anchorDay,
+        }),
+    }),
+    startCheckout: app.action({
+      args: {
+        donor: v.string(),
+        processor: v.union(v.literal('stripe'), v.literal('paypal')),
+        method: v.union(v.literal('card'), v.literal('ach'), v.literal('paypal')),
+        amountCents: v.optional(v.number()),
+      },
+      handler: async (ctx, a) =>
+        await payments.startScheduleCheckout(ctx, {
+          owner: { type: 'donor', id: a.donor },
+          ref: { type: 'monthly', id: `m-${a.donor}` },
+          purpose: 'donation',
+          description: 'Monthly gift',
+          payer: { email: `${a.donor}@example.org` },
+          amountCents: a.amountCents ?? 2500,
+          context: { monthlyId: `m-${a.donor}` },
+          processor: a.processor,
+          method: a.method,
+          returnPath: '/donate/thanks',
+          cancelPath: '/donate',
+        }),
+    }),
+    update: app.mutation({
+      args: { scheduleId: v.string(), amountCents: v.optional(v.number()), paymentMethodId: v.optional(v.string()), anchorDay: v.optional(v.number()) },
+      handler: async (ctx, a) => await payments.updateSchedule(ctx, { ...a, by: 'donor' }),
+    }),
+    pause: app.mutation({ args: { scheduleId: v.string(), until: v.number() }, handler: async (ctx, a) => await payments.pauseSchedule(ctx, { ...a, by: 'donor' }) }),
+    resume: app.mutation({ args: { scheduleId: v.string(), at: v.optional(v.number()) }, handler: async (ctx, a) => await payments.resumeSchedule(ctx, { ...a, by: 'donor' }) }),
+    cancel: app.mutation({ args: { scheduleId: v.string(), reason: v.string() }, handler: async (ctx, a) => await payments.cancelSchedule(ctx, { ...a, by: 'donor' }) }),
+    list: app.query({ args: { donor: v.string() }, handler: async (ctx, a) => await payments.schedulesFor(ctx, { type: 'donor', id: a.donor }) }),
+    get: app.query({ args: { scheduleId: v.string() }, handler: async (ctx, a) => await payments.getSchedule(ctx, a.scheduleId) }),
+    setup: app.action({
+      args: { donor: v.string() },
+      handler: async (ctx, a): Promise<{ clientSecret: string; stripeCustomerId: string }> =>
+        await payments.setupPaymentMethod(ctx, { owner: { type: 'donor', id: a.donor }, payer: { email: `${a.donor}@example.org` } }),
+    }),
+    verify: app.action({
+      args: { donor: v.string(), paymentMethodId: v.string() },
+      handler: async (ctx, a) => await payments.verifyMethodOwner(ctx, { owner: { type: 'donor', id: a.donor }, paymentMethodId: a.paymentMethodId }),
+    }),
+    remove: app.action({
+      args: { donor: v.string(), paymentMethodId: v.string() },
+      handler: async (ctx, a): Promise<null> => {
+        await payments.removeSavedMethod(ctx, { owner: { type: 'donor', id: a.donor }, paymentMethodId: a.paymentMethodId })
+        return null
+      },
+    }),
   },
   payments: { ...payments.adminApi({ skipApproval: true }), ...payments.publicApi() },
   paymentsWorker: payments.worker(),

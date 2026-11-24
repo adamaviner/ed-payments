@@ -72,7 +72,9 @@ interface PaypalButtons {
   close?(): Promise<void>
 }
 interface PaypalSdk {
+  FUNDING?: { PAYPAL?: string }
   Buttons(o: {
+    fundingSource?: string
     style: Record<string, string | number>
     createOrder: () => Promise<string>
     onApprove: (data: { orderID: string }, actions: { restart?: () => Promise<void> }) => Promise<void>
@@ -158,7 +160,7 @@ export function PaypalButtons({ payment, completeReturn, onFallback, navigate, c
     latest.current = { capture, navigate }
   }, [capture, navigate])
 
-  const { orderId, clientId, returnUrl } = payment
+  const { orderId, clientId, returnUrl, only } = payment
   useEffect(() => {
     let live = true
     let buttons: PaypalButtons | null = null
@@ -169,6 +171,8 @@ export function PaypalButtons({ payment, completeReturn, onFallback, navigate, c
         if (!live || !box.current) return
         if (!sdk) return setLoad('failed')
         buttons = sdk.Buttons({
+          // An order that saves a PayPal account for a schedule names its payment_source: only PayPal's own button can pay it.
+          ...(only === 'paypal' ? { fundingSource: sdk.FUNDING?.PAYPAL ?? 'paypal' } : {}),
           style: { layout: 'vertical', shape: 'rect', color: 'gold', label: 'paypal' },
           createOrder: () => Promise.resolve(orderId),
           onApprove: async (data, actions) => {
@@ -199,7 +203,7 @@ export function PaypalButtons({ payment, completeReturn, onFallback, navigate, c
       live = false
       void buttons?.close?.().catch(() => {})
     }
-  }, [orderId, clientId, returnUrl])
+  }, [orderId, clientId, returnUrl, only])
 
   return (
     <div className={cn('flex flex-col gap-3', className)}>
