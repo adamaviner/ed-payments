@@ -1,7 +1,7 @@
 // The page the buyer comes back to (shop.ts sends them to /items/:id/thanks). Stripe adds session_id
-// to the address, PayPal adds token; the app reads it with its own router (plain URL here) and owns
-// every word shown. Safe to reload: the library is asked again and answers the same.
-import { type CheckoutReturnState, useCheckoutReturn } from '@earthdance/payments/react'
+// to the address, PayPal adds token; checkoutReturnToken reads either from the app's own router (plain
+// URL here), and the app owns every word shown. Safe to reload: the library is asked again and answers the same.
+import { checkoutReturnToken, type CheckoutReturnState, useCheckoutReturn } from '@earthdance/payments/react'
 import { useState } from 'react'
 import { api } from '../convex/_generated/api.js'
 
@@ -14,12 +14,8 @@ const MESSAGES: Record<Exclude<CheckoutReturnState, 'checking' | 'error'>, strin
 }
 
 export function CheckoutReturn() {
-  const [{ processor, token }] = useState(() => {
-    const params = new URLSearchParams(window.location.search)
-    const sessionId = params.get('session_id')
-    return sessionId ? { processor: 'stripe' as const, token: sessionId } : { processor: 'paypal' as const, token: params.get('token') }
-  })
-  const result = useCheckoutReturn(api.payments.completeReturn, { processor, token })
+  const [back] = useState(() => checkoutReturnToken(window.location.search))
+  const result = useCheckoutReturn(api.payments.completeReturn, back ?? { processor: 'stripe', token: null })
 
   if (result.state === 'checking') return <p>Confirming your payment…</p>
   if (result.state === 'error')

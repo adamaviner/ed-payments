@@ -1,9 +1,9 @@
 // @vitest-environment happy-dom
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { SAVED_METHOD_OPTIONS, SAVED_METHOD_TYPES } from '../core/savedMethods.js'
 import { forgetScripts, STRIPE_JS } from './embedded.js'
-import { retryPaymentElementsOptions, saveMethodElementsOptions, StripeRetryPayment, StripeSaveMethod, type StripeAppearance } from './stripe.js'
+import { retryPaymentElementsOptions, saveMethodElementsOptions, StripeRetryPayment, StripeSaveMethod, useStripeSetupReturn, type StripeAppearance } from './stripe.js'
 
 type StripeError = { message: string }
 type Made = { key: string; options: Record<string, unknown>; element: Record<string, unknown> | null; updates: unknown[]; handlers: Record<string, (e: unknown) => void>; destroyed: boolean }
@@ -17,7 +17,7 @@ let fieldsError: StripeError | undefined
 const confirmSetup =
   vi.fn<(o: { clientSecret: string; redirect: string; confirmParams: { return_url: string } }) => Promise<{ error?: StripeError; setupIntent?: { status: string; payment_method: string } }>>()
 const confirmPayment = vi.fn<(o: { clientSecret: string; redirect: string }) => Promise<{ error?: StripeError; paymentIntent?: { status: string } }>>()
-const retrievePaymentIntent = vi.fn<(secret: string) => Promise<{ paymentIntent?: { status: string } }>>()
+const retrieveSetupIntent = vi.fn<(secret: string) => Promise<{ setupIntent?: { status: string; payment_method: string | null } }>>()
 
 async function finishScript(outcome: 'load' | 'error' = 'load') {
   const el = await waitFor(() => {
@@ -61,7 +61,7 @@ beforeEach(() => {
     calls.push(`confirmPayment ${o.clientSecret}`)
     return { paymentIntent: { status: 'succeeded' } }
   })
-  retrievePaymentIntent.mockReset()
+  retrieveSetupIntent.mockReset()
   ;(window as Win).Stripe = (key: string) => ({
     elements: (options: Record<string, unknown>) => {
       const m: Made = { key, options, element: null, updates: [], handlers: {}, destroyed: false }
@@ -88,7 +88,7 @@ beforeEach(() => {
     },
     confirmSetup,
     confirmPayment,
-    retrievePaymentIntent,
+    retrieveSetupIntent,
   })
 })
 afterEach(() => {
@@ -246,14 +246,39 @@ test('retry: a bank payment on its way is reported as processing; a decline is s
   expect(onPaid).toHaveBeenCalledWith('processing')
 })
 
-test('retry: back from a redirect, the PaymentIntent in the address is asked about and reported', async () => {
+test('retry: the form leaves a redirect’s return to the page (checkoutReturnToken), reporting nothing itself', async () => {
   window.history.replaceState(null, '', '/pay?payment_intent=pi_1&payment_intent_client_secret=pi_1_secret_x&redirect_status=succeeded')
-  retrievePaymentIntent.mockResolvedValue({ paymentIntent: { status: 'succeeded' } })
   const onPaid = vi.fn()
-  const createPayment = vi.fn(() => Promise.resolve('pi_1_secret_x'))
-  render(<StripeRetryPayment publishableKey="pk_test_1" amountCents={500} createPayment={createPayment} onPaid={onPaid} submitLabel="Pay" />)
+  render(<StripeRetryPayment publishableKey="pk_test_1" amountCents={500} createPayment={() => Promise.resolve('pi_1_secret_x')} onPaid={onPaid} submitLabel="Pay" />)
+  await ready('Pay')
+  expect(onPaid).not.toHaveBeenCalled()
+})
+
+test('setup return: not back from a redirect is none, and loads nothing', () => {
+  const { result } = renderHook(() => useStripeSetupReturn('pk_test_1', '?foo=1'))
+  expect(result.current).toEqual({ state: 'none' })
+  expect(scripts).toHaveLength(0)
+})
+
+test('setup return: the SetupIntent in the address is asked about; saved gives its method', async () => {
+  retrieveSetupIntent.mockResolvedValue({ setupIntent: { status: 'succeeded', payment_method: 'pm_9' } })
+  const { result } = renderHook(() => useStripeSetupReturn('pk_test_1', '?setup_intent=seti_1&setup_intent_client_secret=seti_1_secret_x&redirect_status=succeeded'))
+  expect(result.current).toEqual({ state: 'checking' })
   await finishScript()
-  await waitFor(() => expect(onPaid).toHaveBeenCalledWith('succeeded'))
-  expect(retrievePaymentIntent).toHaveBeenCalledWith('pi_1_secret_x')
-  expect(createPayment).not.toHaveBeenCalled()
+  await waitFor(() => expect(result.current).toEqual({ state: 'saved', paymentMethodId: 'pm_9' }))
+  expect(retrieveSetupIntent).toHaveBeenCalledWith('seti_1_secret_x')
+})
+
+test('setup return: a SetupIntent Stripe didn’t finish, or Stripe.js not loading, is failed', async () => {
+  retrieveSetupIntent.mockResolvedValue({ setupIntent: { status: 'requires_payment_method', payment_method: null } })
+  const refused = renderHook(() => useStripeSetupReturn('pk_test_1', '?setup_intent_client_secret=seti_1_secret_x'))
+  await finishScript()
+  await waitFor(() => expect(refused.result.current).toMatchObject({ state: 'failed', error: expect.stringMatching(/wasn’t saved/) }))
+
+  cleanup()
+  forgetScripts()
+  scripts.length = 0
+  const unloaded = renderHook(() => useStripeSetupReturn('pk_test_1', '?setup_intent_client_secret=seti_2_secret_x'))
+  await finishScript('error')
+  await waitFor(() => expect(unloaded.result.current).toMatchObject({ state: 'failed', error: expect.stringMatching(/couldn’t say/) }))
 })

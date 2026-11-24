@@ -47,6 +47,20 @@ function settledFrom(answer: Answer): Settled {
 }
 
 /**
+ * The payment the address came back with: Stripe's session_id (a hosted Checkout) or payment_intent
+ * (a Payment Element, such as StripeRetryPayment's, after a redirect), or PayPal's token. Null: none.
+ * Check it before loading anything for the page's form, and show the return instead: a form that
+ * refuses a payment already paid would otherwise show that refusal to a payer who just paid.
+ */
+export function checkoutReturnToken(search: string | URLSearchParams): { processor: Processor; token: string } | null {
+  const params = typeof search === 'string' ? new URLSearchParams(search) : search
+  const stripe = params.get('session_id') || params.get('payment_intent')
+  if (stripe) return { processor: 'stripe', token: stripe }
+  const paypal = params.get('token')
+  return paypal ? { processor: 'paypal', token: paypal } : null
+}
+
+/**
  * Calls in flight, by processor and token, shared by every mount: React StrictMode runs effects twice
  * and a page may mount twice, and each call counts against the token's rate limit. Dropped once
  * answered, so a later visit asks again, as a reload would; the library is safe to ask again.

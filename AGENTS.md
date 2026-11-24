@@ -60,4 +60,6 @@ The README has the API and the "Adopt in 5 steps" set-up.
     Use `<StripeSaveMethod>` (its `createSetupIntent` calls your action around `setupPaymentMethod`) or
     `<StripeRetryPayment>` (its `createPayment` calls your action around `retryOnSession`). Never call
     `setupPaymentMethod` or `retryOnSession` when a form opens: each call makes an intent at Stripe and
-    counts against the rate limit, even if the buyer walks away.
+    counts against the rate limit, even if the buyer walks away. The page Stripe may redirect back to
+    checks its address before loading the form: `checkoutReturnToken` then `useCheckoutReturn` for a
+    payment, `useStripeSetupReturn` for a saved method. The forms don't read a return themselves.

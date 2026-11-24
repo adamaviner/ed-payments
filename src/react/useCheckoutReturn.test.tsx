@@ -3,7 +3,7 @@ import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import { StrictMode } from 'react'
 import { afterEach, expect, test, vi } from 'vitest'
 import type { CompleteReturnRef } from './types.js'
-import { useCheckoutReturn } from './useCheckoutReturn.js'
+import { checkoutReturnToken, useCheckoutReturn } from './useCheckoutReturn.js'
 
 type Answer = { status: string; purpose: string; ref: { type: string; id: string } } | null
 const completeReturn = vi.fn<(a: { processor: string; token: string }) => Promise<Answer>>()
@@ -89,4 +89,12 @@ test('a failed call is an error that retry asks again', async () => {
   expect(result.current.state).toBe('checking')
   await waitFor(() => expect(result.current.state).toBe('paid'))
   expect(completeReturn).toHaveBeenCalledTimes(2)
+})
+
+test('checkoutReturnToken: Stripe’s session_id or payment_intent, PayPal’s token, else null', () => {
+  expect(checkoutReturnToken('?session_id=cs_1')).toEqual({ processor: 'stripe', token: 'cs_1' })
+  expect(checkoutReturnToken('?payment_intent=pi_1&payment_intent_client_secret=pi_1_secret_x&redirect_status=succeeded')).toEqual({ processor: 'stripe', token: 'pi_1' })
+  expect(checkoutReturnToken(new URLSearchParams({ token: 'ORDER1', PayerID: 'P' }))).toEqual({ processor: 'paypal', token: 'ORDER1' })
+  expect(checkoutReturnToken('?setup_intent_client_secret=seti_1_secret_x')).toBeNull()
+  expect(checkoutReturnToken('')).toBeNull()
 })
