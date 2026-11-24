@@ -6,6 +6,11 @@
 // presses the button and Stripe finds the fields complete: both are rate-limited, so merely opening
 // forms must never use up a payer's tries.
 //
+// Coming back from a redirect is not these forms' job: the page Stripe returns to checks the address
+// first (checkoutReturnToken with useCheckoutReturn for a payment, useStripeSetupReturn for a saved
+// method) and shows the outcome instead of the form. A form that read the return itself would only
+// see it if the page could still show the form, which a page for an already paid payment can't.
+//
 // The Elements options come from the same constants as the server's intents (core/savedMethods.ts),
 // because Stripe refuses to confirm an intent whose method types or options differ from the form's.
 import { useEffect, useRef, useState } from 'react'
@@ -64,7 +69,7 @@ interface StripeJs {
   elements(o: StripeElementsOptions): Elements
   confirmSetup(o: Confirm): Promise<{ error?: StripeError; setupIntent?: SetupIntent }>
   confirmPayment(o: Confirm): Promise<{ error?: StripeError; paymentIntent?: PaymentIntent }>
-  retrievePaymentIntent(clientSecret: string): Promise<{ error?: StripeError; paymentIntent?: PaymentIntent }>
+  retrieveSetupIntent(clientSecret: string): Promise<{ error?: StripeError; setupIntent?: SetupIntent }>
 }
 const stripeJs = () => (window as unknown as { Stripe?: (publishableKey: string) => StripeJs }).Stripe
 
@@ -199,7 +204,10 @@ export interface StripeSaveMethodProps {
   note?: string
   /** Stripe's Appearance API; a new one restyles the form in place (e.g. the page switching to dark). */
   appearance?: StripeAppearance
-  /** Where Stripe sends the payer back should a method need a redirect. Default: this page. */
+  /**
+   * Where Stripe sends the payer back should a method need a redirect (default: this page), with
+   * ?setup_intent_client_secret= added. That page shows the outcome with useStripeSetupReturn.
+   */
   returnUrl?: string
   className?: string
 }
@@ -277,8 +285,9 @@ export interface StripeRetryPaymentProps {
   /** Stripe's Appearance API; a new one restyles the form in place. */
   appearance?: StripeAppearance
   /**
-   * Where Stripe sends the buyer back should a method need a redirect. Default: this page, where the
-   * component (mounted again) reads Stripe's payment_intent_client_secret and reports the outcome.
+   * Where Stripe sends the buyer back should a method need a redirect (default: this page), with
+   * ?payment_intent= added. That page shows the outcome with checkoutReturnToken and useCheckoutReturn,
+   * not this form, which doesn't read the address.
    */
   returnUrl?: string
   className?: string
@@ -300,23 +309,6 @@ export function StripeRetryPayment({ publishableKey, amountCents, createPayment,
     setPaid(true)
     latest.current.onPaid(outcome)
   }
-
-  // Back from a redirect: Stripe added the PaymentIntent's client secret to the address.
-  const askedBack = useRef(false)
-  useEffect(() => {
-    const secret = new URLSearchParams(window.location.search).get('payment_intent_client_secret')
-    if (load !== 'ready' || !form.current || !secret || askedBack.current) return
-    askedBack.current = true
-    form.current.stripe.retrievePaymentIntent(secret).then(
-      ({ paymentIntent }) => {
-        const outcome = outcomeOf(paymentIntent)
-        if (!outcome) return setError('The payment didn’t go through. Please try again.')
-        setPaid(true)
-        latest.current.onPaid(outcome)
-      },
-      () => setError('Stripe couldn’t say how the payment went. Reload the page to check.'),
-    )
-  }, [load, form])
 
   const pay = async ({ stripe, elements }: Form) => {
     const checked = await elements.submit()
@@ -351,4 +343,59 @@ export function StripeRetryPayment({ publishableKey, amountCents, createPayment,
       </Button>
     </div>
   )
+}
+
+/**
+ * How a save that needed a redirect ended. none: the address isn't a return from one. saved: Stripe
+ * saved the method (savedMethods lists it from now on). processing: Stripe is still confirming it (some
+ * bank accounts). failed: it wasn't saved. unknown: Stripe couldn't say, so the method may be saved:
+ * don't invite the payer to save another before checking.
+ */
+export type StripeSetupReturn = { state: 'none' } | { state: 'checking' } | { state: 'saved'; paymentMethodId: string } | { state: 'processing' } | { state: 'failed' } | { state: 'unknown' }
+
+const setupSecretIn = (search: string) => new URLSearchParams(search).get('setup_intent_client_secret')
+
+const setupAnswer = (si: SetupIntent | undefined): StripeSetupReturn => {
+  const paymentMethodId = methodIdOf(si)
+  if (si?.status === 'succeeded' && paymentMethodId) return { state: 'saved', paymentMethodId }
+  if (si?.status === 'processing') return { state: 'processing' }
+  return si ? { state: 'failed' } : { state: 'unknown' }
+}
+
+/**
+ * For the page Stripe sends a payer back to when saving a method with StripeSaveMethod needed a
+ * redirect (rare: cards and instantly verified bank accounts finish on the page). Asks Stripe how the
+ * SetupIntent in the address ended. Whatever the app's onSaved was going to do with the method (place a
+ * bid, say) didn't happen, since the page that would have done it is gone: say so, and let the payer
+ * finish with the saved method, which the app's own savedMethods call now offers.
+ *
+ * Pass `search` from the app's router (e.g. Next's useSearchParams().toString()); it is followed as it
+ * changes. Without it the address is read after mounting, so a server render and the first client
+ * render agree, and later changes to the address aren't seen.
+ */
+export function useStripeSetupReturn(publishableKey: string, search?: string): StripeSetupReturn {
+  const [mountedSearch, setMountedSearch] = useState<string | null>(null)
+  useEffect(() => {
+    if (search === undefined) setMountedSearch(window.location.search)
+  }, [search])
+  const secret = setupSecretIn(search ?? mountedSearch ?? '')
+  const [answered, setAnswered] = useState<{ secret: string; answer: StripeSetupReturn } | null>(null)
+  useEffect(() => {
+    if (!secret) return undefined
+    let live = true
+    const settle = (answer: StripeSetupReturn) => live && setAnswered({ secret, answer })
+    const ask = async () => {
+      await loadScript(STRIPE_JS)
+      const make = stripeJs()
+      if (!make) return settle({ state: 'unknown' })
+      const { error, setupIntent } = await make(publishableKey).retrieveSetupIntent(secret)
+      settle(error ? { state: 'unknown' } : setupAnswer(setupIntent))
+    }
+    ask().catch(() => settle({ state: 'unknown' }))
+    return () => {
+      live = false
+    }
+  }, [secret, publishableKey])
+  if (!secret) return { state: 'none' }
+  return answered?.secret === secret ? answered.answer : { state: 'checking' }
 }

@@ -211,12 +211,21 @@ merely opening forms use up a payer's tries.
 - **`appearance`** is Stripe's Appearance API; the frames can't see the page's CSS, so pass literal
   colors, dark ones on a dark page. A new one restyles the form in place, keeping what was typed.
 - **Redirects.** Cards and instantly verified bank accounts finish on the page (`redirect:
-'if_required'`). Should a method need a redirect, Stripe comes back to `returnUrl` (default: the
-  page); `StripeRetryPayment` mounted there reads Stripe's `payment_intent_client_secret` and reports
-  the outcome to `onPaid`.
+'if_required'`). Should a method need a redirect (some banks' logins do), Stripe comes back to
+  `returnUrl` (default: the page) and the forms don't read it: the page checks its address first and
+  shows the outcome instead of the form. For a payment, `checkoutReturnToken(location.search)` gives
+  `{ processor: 'stripe', token: payment_intent }` for `useCheckoutReturn`, which settles it without
+  waiting for the webhook. A form that read the return itself would only see it if the page could show
+  the form again, and a page whose form refuses a paid payment (most do) would show that refusal to a
+  payer who just paid. For a save, `useStripeSetupReturn(publishableKey, search)` says `saved` (with the
+  `paymentMethodId`), `processing`, `failed` or `unknown` (Stripe couldn't say; don't invite another
+  save before checking). Pass `search` from the router in a server-rendered app; without it the address is
+  read after mounting. On `saved`: Stripe saved the method, but what `onSaved` was to do with it (place
+  the bid) didn't happen, so say so and let the payer finish with it; `savedMethods` lists it.
 
 **The return page: `useCheckoutReturn(completeReturn, { processor, token })`.** The app reads the
-token from its own URL (Stripe adds `session_id`, PayPal adds `token`) and words every state itself.
+token from its own URL (Stripe adds `session_id`, or `payment_intent` after a Payment Element's
+redirect; PayPal adds `token`), most simply with `checkoutReturnToken(search)`, and words every state itself.
 The hook asks `completeReturn` once: StrictMode's double effects and two mounts at once share one
 call; a reload asks again, which the library answers the same. It returns one of
 
@@ -234,9 +243,8 @@ with `purpose` and `ref` on the settled states, and `retry()` to ask again after
 (each call counts against the few the library allows per token).
 
 ```tsx
-const params = new URLSearchParams(location.search) // or the router's
-const sessionId = params.get('session_id')
-const result = useCheckoutReturn(api.payments.completeReturn, sessionId ? { processor: 'stripe', token: sessionId } : { processor: 'paypal', token: params.get('token') })
+const back = checkoutReturnToken(location.search) // or the router's search params; null: not a return
+const result = useCheckoutReturn(api.payments.completeReturn, back ?? { processor: 'stripe', token: null })
 if (result.state === 'checking') return <p>Confirming your payment…</p>
 ```
 
@@ -579,7 +587,8 @@ the wire code (`stripe.*`, `paypal.*`, signatures, parsers) and `STRIPE_EVENTS` 
 
 ### `@earthdance/payments/react`
 
-`PaypalButtons`, `StripeEmbeddedCheckout`, `StripeSaveMethod`, `StripeRetryPayment`, `useCheckoutReturn`,
+`PaypalButtons`, `StripeEmbeddedCheckout`, `StripeSaveMethod`, `StripeRetryPayment`, `useStripeSetupReturn`,
+`useCheckoutReturn`, `checkoutReturnToken`,
 `PaymentsAdminPage` and helpers; see
 "The React package" above.
 
