@@ -4,7 +4,10 @@
 // Request shapes follow https://docs.stripe.com/api for API version 2026-10-28.endive (looked up
 // 2026-11-16). That version removed `payment_method_types` from Checkout Sessions, so the method is
 // chosen with `allowed_payment_method_types`, which only offers methods enabled in the Dashboard.
+import { SAVED_METHOD_OPTIONS, SAVED_METHOD_TYPES, type SavedMethodType } from './savedMethods.js'
 import { ProcessorError, type Fetch, type Method } from './types.js'
+
+export * from './savedMethods.js'
 
 export const STRIPE_API_VERSION = '2026-10-28.endive'
 export const STRIPE_API_BASE = 'https://api.stripe.com'
@@ -268,19 +271,6 @@ export function sessionParams(i: SessionInput): FormParams {
 
 type Keys = Pick<StripeKeys, 'secretKey'>
 
-/**
- * What a saved method may be: a card or a US bank account. Since 2026-09-30.endive PaymentIntents and
- * SetupIntents take `allowed_payment_method_types` (`payment_method_types` answers 400
- * payment_method_types_no_longer_supported); Stripe drops a listed type the account hasn't switched on.
- */
-export const SAVED_METHOD_TYPES = ['card', 'us_bank_account'] as const
-
-/**
- * Bank accounts are verified at once through Financial Connections only: micro-deposits take a day
- * or two, which would leave the payer unable to use the account when it matters.
- */
-export const SAVED_METHOD_OPTIONS: FormParams = { us_bank_account: { verification_method: 'instant', financial_connections: { permissions: ['payment_method'] } } }
-
 export interface PaymentIntentInput {
   app: string
   checkoutId: string
@@ -349,7 +339,7 @@ export const stripe = {
     stripeCall<StripeList<StripePaymentMethod>>(keys, 'GET', `/v1/customers/${encodeURIComponent(customer)}/payment_methods`, { limit: 100 }, o),
   retrievePaymentMethod: (keys: Keys, id: string, o: StripeCallOptions) => stripeCall<StripePaymentMethod>(keys, 'GET', `/v1/payment_methods/${encodeURIComponent(id)}`, undefined, o),
   /** Saves a card or bank account for charging later with nobody present (usage off_session also collects a bank account's debit mandate). */
-  createSetupIntent: (keys: Keys, s: { customer: string; app: string; owner: string; types?: readonly (typeof SAVED_METHOD_TYPES)[number][] }, o: StripeCallOptions) =>
+  createSetupIntent: (keys: Keys, s: { customer: string; app: string; owner: string; types?: readonly SavedMethodType[] }, o: StripeCallOptions) =>
     stripeCall<StripeSetupIntent>(
       keys,
       'POST',

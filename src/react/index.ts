@@ -9,6 +9,17 @@ export { PaymentsAdminPage, type PaymentsAdminPageProps, type RefundQuestion } f
 export { useCheckoutReturn, type CheckoutReturn, type CheckoutReturnState } from './useCheckoutReturn.js'
 export { PaypalButtons, StripeEmbeddedCheckout, type PaypalButtonsProps, type StripeEmbeddedCheckoutProps } from './embedded.js'
 export { PaypalCardFields, PaypalSaveButton, paypalVaultSdkUrl, type PaypalCardFieldsProps, type PaypalFieldStyle, type PaypalSaveButtonProps } from './vault.js'
+export {
+  StripeRetryPayment,
+  StripeSaveMethod,
+  retryPaymentElementsOptions,
+  saveMethodElementsOptions,
+  type RetryPaymentOutcome,
+  type StripeAppearance,
+  type StripeElementsOptions,
+  type StripeRetryPaymentProps,
+  type StripeSaveMethodProps,
+} from './stripe.js'
 export { parseRefundAmount, refundableCents, type RefundAmount } from './refundAmount.js'
 export { errorMessage } from './errors.js'
 export type { CheckoutSummary, CompleteReturnRef, OpenRefund, PaymentIssue, PaymentRef, PaymentsAdminApi, PaymentsAuth, PaymentsPublicApi, PaypalHistoryLine, PaypalHistoryRef } from './types.js'

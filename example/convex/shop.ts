@@ -59,16 +59,25 @@ async function signedIn(ctx: { auth: { getUserIdentity(): Promise<{ subject: str
   return me
 }
 
-/** The bid form: the bidder's saved card (one not declined before), or a SetupIntent to save one. */
+/** The bid form: the bidder's saved card (one not declined before), or null for the form to save one. */
 export const bidPaymentMethod = action({
   args: {},
-  handler: async (ctx): Promise<{ paymentMethodId: string; label: string } | { clientSecret: string }> => {
+  handler: async (ctx): Promise<{ paymentMethodId: string; label: string } | null> => {
     const me = await signedIn(ctx)
-    const owner = { type: 'user', id: me.subject }
-    const saved = (await payments.savedMethods(ctx, { owner })).find((m) => !m.declined)
-    if (saved) return { paymentMethodId: saved.paymentMethodId, label: saved.label }
-    const { clientSecret } = await payments.setupPaymentMethod(ctx, { owner, payer: { email: me.email ?? '' } })
-    return { clientSecret }
+    const saved = (await payments.savedMethods(ctx, { owner: { type: 'user', id: me.subject } })).find((m) => !m.declined)
+    return saved ? { paymentMethodId: saved.paymentMethodId, label: saved.label } : null
+  },
+})
+
+/**
+ * StripeSaveMethod's createSetupIntent: a SetupIntent for the methods the form shows, made only when
+ * the bidder presses the button (setupPaymentMethod is rate-limited; opening the form makes nothing).
+ */
+export const stripeSetupIntent = action({
+  args: { methods: v.array(v.union(v.literal('card'), v.literal('ach'))) },
+  handler: async (ctx, { methods }): Promise<string> => {
+    const me = await signedIn(ctx)
+    return (await payments.setupPaymentMethod(ctx, { owner: { type: 'user', id: me.subject }, payer: { email: me.email ?? '' }, methods })).clientSecret
   },
 })
 
@@ -151,13 +160,16 @@ export const chargeWinner = internalMutation({
   },
 })
 
-/** The retry page: the bidder pays themselves after the saved card was declined. */
+/**
+ * The retry page's StripeRetryPayment createPayment: the bidder pays themselves after the saved card
+ * was declined. Called when they press Pay (the same PaymentIntent comes back while it waits).
+ */
 export const retryBidPayment = action({
   args: { bidId: v.id('bids') },
-  handler: async (ctx, { bidId }): Promise<{ clientSecret: string }> => {
+  handler: async (ctx, { bidId }): Promise<string> => {
     const me = await signedIn(ctx)
     const checkoutId = await ctx.runQuery(internal.shop.retryableCheckout, { bidId, userId: me.subject })
-    return { clientSecret: (await payments.retryOnSession(ctx, { checkoutId })).clientSecret }
+    return (await payments.retryOnSession(ctx, { checkoutId })).clientSecret
   },
 })
 

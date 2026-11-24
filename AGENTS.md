@@ -7,8 +7,9 @@ The README has the API and the "Adopt in 5 steps" set-up.
 1. **Never call Stripe or PayPal yourself.** No `api.stripe.com`, `paypal.com`, `stripe` npm package or
    processor SDK in the app's server code. Every payment, saved method, retry, refund, webhook and
    reconciliation goes through the library, which owns the keys, idempotency, retries and the records.
-   If the library can't do something you need, add it to the library. Stripe.js (and its React
-   elements) in the browser, for the card form, is the one exception.
+   If the library can't do something you need, add it to the library. In the browser, use the
+   library's React components for every Stripe or PayPal form; don't load Stripe.js or
+   `@stripe/react-stripe-js` yourself.
 2. **Never store card or bank data.** No card numbers, CVCs, bank account numbers or client secrets in
    any table, log or error. Keep only what the library hands back (checkout ids, payment method ids,
    labels like "Visa •••• 4242").
@@ -46,3 +47,8 @@ The README has the API and the "Adopt in 5 steps" set-up.
     store only the returned `paymentMethodId` (`paypal:…`). Pick where a new card goes with
     `cardProcessorFor(amount)`, not by hand. Before `removeSavedMethod`, check nothing of yours (an open
     bid) still relies on the method. Never send card numbers to your server: Card Fields keep them in PayPal's frames.
+12. **Saving with Stripe, or paying a retry:** show the form first and create the intent on submit.
+    Use `<StripeSaveMethod>` (its `createSetupIntent` calls your action around `setupPaymentMethod`) or
+    `<StripeRetryPayment>` (its `createPayment` calls your action around `retryOnSession`). Never call
+    `setupPaymentMethod` or `retryOnSession` when a form opens: each call makes an intent at Stripe and
+    counts against the rate limit, even if the buyer walks away.
