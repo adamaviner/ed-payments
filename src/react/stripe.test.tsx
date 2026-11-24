@@ -17,7 +17,7 @@ let fieldsError: StripeError | undefined
 const confirmSetup =
   vi.fn<(o: { clientSecret: string; redirect: string; confirmParams: { return_url: string } }) => Promise<{ error?: StripeError; setupIntent?: { status: string; payment_method: string } }>>()
 const confirmPayment = vi.fn<(o: { clientSecret: string; redirect: string }) => Promise<{ error?: StripeError; paymentIntent?: { status: string } }>>()
-const retrieveSetupIntent = vi.fn<(secret: string) => Promise<{ setupIntent?: { status: string; payment_method: string | null } }>>()
+const retrieveSetupIntent = vi.fn<(secret: string) => Promise<{ error?: StripeError; setupIntent?: { status: string; payment_method: string | null } }>>()
 
 async function finishScript(outcome: 'load' | 'error' = 'load') {
   const el = await waitFor(() => {
@@ -269,16 +269,42 @@ test('setup return: the SetupIntent in the address is asked about; saved gives i
   expect(retrieveSetupIntent).toHaveBeenCalledWith('seti_1_secret_x')
 })
 
-test('setup return: a SetupIntent Stripe didn’t finish, or Stripe.js not loading, is failed', async () => {
-  retrieveSetupIntent.mockResolvedValue({ setupIntent: { status: 'requires_payment_method', payment_method: null } })
-  const refused = renderHook(() => useStripeSetupReturn('pk_test_1', '?setup_intent_client_secret=seti_1_secret_x'))
+test('setup return: without search, the address is read after mounting (the first render matches a server render)', async () => {
+  window.history.replaceState(null, '', '/item?setup_intent_client_secret=seti_1_secret_x')
+  retrieveSetupIntent.mockResolvedValue({ setupIntent: { status: 'succeeded', payment_method: 'pm_9' } })
+  const seen: string[] = []
+  const { result } = renderHook(() => {
+    const r = useStripeSetupReturn('pk_test_1')
+    seen.push(r.state)
+    return r
+  })
+  expect(seen[0]).toBe('none')
   await finishScript()
-  await waitFor(() => expect(refused.result.current).toMatchObject({ state: 'failed', error: expect.stringMatching(/wasn’t saved/) }))
+  await waitFor(() => expect(result.current).toEqual({ state: 'saved', paymentMethodId: 'pm_9' }))
+})
 
-  cleanup()
-  forgetScripts()
-  scripts.length = 0
-  const unloaded = renderHook(() => useStripeSetupReturn('pk_test_1', '?setup_intent_client_secret=seti_2_secret_x'))
-  await finishScript('error')
-  await waitFor(() => expect(unloaded.result.current).toMatchObject({ state: 'failed', error: expect.stringMatching(/couldn’t say/) }))
+test('setup return: follows search as it changes, back to none once the app clears it', async () => {
+  retrieveSetupIntent.mockResolvedValue({ setupIntent: { status: 'succeeded', payment_method: 'pm_9' } })
+  const { result, rerender } = renderHook(({ search }) => useStripeSetupReturn('pk_test_1', search), { initialProps: { search: '?setup_intent_client_secret=seti_1_secret_x' } })
+  await finishScript()
+  await waitFor(() => expect(result.current.state).toBe('saved'))
+  rerender({ search: '' })
+  expect(result.current).toEqual({ state: 'none' })
+})
+
+test('setup return: not finished is failed, still confirming is processing; Stripe erring or not loading is unknown, not failed', async () => {
+  const answerFor = async (answer: Awaited<ReturnType<typeof retrieveSetupIntent>> | 'no-script', secret: string) => {
+    cleanup()
+    forgetScripts()
+    scripts.length = 0
+    if (answer !== 'no-script') retrieveSetupIntent.mockResolvedValueOnce(answer)
+    const { result } = renderHook(() => useStripeSetupReturn('pk_test_1', `?setup_intent_client_secret=${secret}`))
+    await finishScript(answer === 'no-script' ? 'error' : 'load')
+    await waitFor(() => expect(result.current.state).not.toBe('checking'))
+    return result.current
+  }
+  expect(await answerFor({ setupIntent: { status: 'requires_payment_method', payment_method: null } }, 'a')).toEqual({ state: 'failed' })
+  expect(await answerFor({ setupIntent: { status: 'processing', payment_method: 'pm_9' } }, 'b')).toEqual({ state: 'processing' })
+  expect(await answerFor({ error: { message: 'No such setupintent' } }, 'c')).toEqual({ state: 'unknown' })
+  expect(await answerFor('no-script', 'd')).toEqual({ state: 'unknown' })
 })

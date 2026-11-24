@@ -217,8 +217,10 @@ merely opening forms use up a payer's tries.
   `{ processor: 'stripe', token: payment_intent }` for `useCheckoutReturn`, which settles it without
   waiting for the webhook. A form that read the return itself would only see it if the page could show
   the form again, and a page whose form refuses a paid payment (most do) would show that refusal to a
-  payer who just paid. For a save, `useStripeSetupReturn(publishableKey)` says `saved` (with the
-  `paymentMethodId`) or `failed`: Stripe saved the method, but what `onSaved` was to do with it (place
+  payer who just paid. For a save, `useStripeSetupReturn(publishableKey, search)` says `saved` (with the
+  `paymentMethodId`), `processing`, `failed` or `unknown` (Stripe couldn't say; don't invite another
+  save before checking). Pass `search` from the router in a server-rendered app; without it the address is
+  read after mounting. On `saved`: Stripe saved the method, but what `onSaved` was to do with it (place
   the bid) didn't happen, so say so and let the payer finish with it; `savedMethods` lists it.
 
 **The return page: `useCheckoutReturn(completeReturn, { processor, token })`.** The app reads the

@@ -347,39 +347,55 @@ export function StripeRetryPayment({ publishableKey, amountCents, createPayment,
 
 /**
  * How a save that needed a redirect ended. none: the address isn't a return from one. saved: Stripe
- * saved the method (savedMethods lists it from now on). failed: it didn't, or Stripe couldn't say.
+ * saved the method (savedMethods lists it from now on). processing: Stripe is still confirming it (some
+ * bank accounts). failed: it wasn't saved. unknown: Stripe couldn't say, so the method may be saved:
+ * don't invite the payer to save another before checking.
  */
-export type StripeSetupReturn = { state: 'none' } | { state: 'checking' } | { state: 'saved'; paymentMethodId: string } | { state: 'failed'; error: string }
+export type StripeSetupReturn = { state: 'none' } | { state: 'checking' } | { state: 'saved'; paymentMethodId: string } | { state: 'processing' } | { state: 'failed' } | { state: 'unknown' }
 
 const setupSecretIn = (search: string) => new URLSearchParams(search).get('setup_intent_client_secret')
+
+const setupAnswer = (si: SetupIntent | undefined): StripeSetupReturn => {
+  const paymentMethodId = methodIdOf(si)
+  if (si?.status === 'succeeded' && paymentMethodId) return { state: 'saved', paymentMethodId }
+  if (si?.status === 'processing') return { state: 'processing' }
+  return si ? { state: 'failed' } : { state: 'unknown' }
+}
 
 /**
  * For the page Stripe sends a payer back to when saving a method with StripeSaveMethod needed a
  * redirect (rare: cards and instantly verified bank accounts finish on the page). Asks Stripe how the
  * SetupIntent in the address ended. Whatever the app's onSaved was going to do with the method (place a
  * bid, say) didn't happen, since the page that would have done it is gone: say so, and let the payer
- * finish with the saved method, which the app's own savedMethods call now offers. `search` defaults to
- * this page's address.
+ * finish with the saved method, which the app's own savedMethods call now offers.
+ *
+ * Pass `search` from the app's router (e.g. Next's useSearchParams().toString()); it is followed as it
+ * changes. Without it the address is read after mounting, so a server render and the first client
+ * render agree, and later changes to the address aren't seen.
  */
 export function useStripeSetupReturn(publishableKey: string, search?: string): StripeSetupReturn {
-  const [secret] = useState(() => setupSecretIn(search ?? (typeof window === 'undefined' ? '' : window.location.search)))
-  const [result, setResult] = useState<StripeSetupReturn>(secret ? { state: 'checking' } : { state: 'none' })
+  const [mountedSearch, setMountedSearch] = useState<string | null>(null)
   useEffect(() => {
+    if (search === undefined) setMountedSearch(window.location.search)
+  }, [search])
+  const secret = setupSecretIn(search ?? mountedSearch ?? '')
+  const [answered, setAnswered] = useState<{ secret: string; answer: StripeSetupReturn } | null>(null)
+  useEffect(() => {
+    if (!secret) return undefined
     let live = true
-    const settle = (r: StripeSetupReturn) => live && setResult(r)
-    const unknown = () => settle({ state: 'failed', error: 'Stripe couldn’t say whether your payment method was saved. Reload the page to check.' })
-    const ask = async (clientSecret: string) => {
+    const settle = (answer: StripeSetupReturn) => live && setAnswered({ secret, answer })
+    const ask = async () => {
       await loadScript(STRIPE_JS)
       const make = stripeJs()
-      if (!make) return unknown()
-      const { setupIntent } = await make(publishableKey).retrieveSetupIntent(clientSecret)
-      const paymentMethodId = methodIdOf(setupIntent)
-      settle(setupIntent?.status === 'succeeded' && paymentMethodId ? { state: 'saved', paymentMethodId } : { state: 'failed', error: 'Your payment method wasn’t saved. Please try again.' })
+      if (!make) return settle({ state: 'unknown' })
+      const { error, setupIntent } = await make(publishableKey).retrieveSetupIntent(secret)
+      settle(error ? { state: 'unknown' } : setupAnswer(setupIntent))
     }
-    if (secret) ask(secret).catch(unknown)
+    ask().catch(() => settle({ state: 'unknown' }))
     return () => {
       live = false
     }
   }, [secret, publishableKey])
-  return result
+  if (!secret) return { state: 'none' }
+  return answered?.secret === secret ? answered.answer : { state: 'checking' }
 }

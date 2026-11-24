@@ -29,6 +29,8 @@ export function SaveForBids({ itemId, amountCents, dark, onPlaced }: { itemId: s
   const clientId = 'example-paypal-client-id'
   if (back.state === 'checking') return <p>Checking your payment method…</p>
   if (back.state === 'saved') return <p>Your payment method is saved. Review your bid again to place it with it.</p>
+  if (back.state === 'processing') return <p>Stripe is still confirming your bank account. Check back in a few minutes.</p>
+  if (back.state === 'unknown') return <p>We couldn’t check your payment method just now. Reload the page before trying again.</p>
   if (!choice) return null
   const methods: SavedMethodKind[] = choice.processor === 'paypal' ? ['ach'] : ['card', 'ach']
   return (
