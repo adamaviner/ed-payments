@@ -105,17 +105,17 @@ test('the form’s options are the ones the library’s intents are made with', 
     mode: 'setup',
     currency: 'usd',
     setupFutureUsage: 'off_session',
-    paymentMethodTypes: [...SAVED_METHOD_TYPES],
+    allowedPaymentMethodTypes: [...SAVED_METHOD_TYPES],
     paymentMethodOptions: SAVED_METHOD_OPTIONS,
   })
   expect(saveMethodElementsOptions([])).toEqual(saveMethodElementsOptions(['card', 'ach']))
-  expect(saveMethodElementsOptions(['ach'])).toMatchObject({ paymentMethodTypes: ['us_bank_account'], paymentMethodOptions: SAVED_METHOD_OPTIONS })
-  expect(saveMethodElementsOptions(['card'])).toMatchObject({ paymentMethodTypes: ['card'], paymentMethodOptions: {} })
+  expect(saveMethodElementsOptions(['ach'])).toMatchObject({ allowedPaymentMethodTypes: ['us_bank_account'], paymentMethodOptions: SAVED_METHOD_OPTIONS })
+  expect(saveMethodElementsOptions(['card'])).toMatchObject({ allowedPaymentMethodTypes: ['card'], paymentMethodOptions: {} })
   expect(retryPaymentElementsOptions(12_000, night)).toEqual({
     mode: 'payment',
     currency: 'usd',
     amount: 12_000,
-    paymentMethodTypes: [...SAVED_METHOD_TYPES],
+    allowedPaymentMethodTypes: [...SAVED_METHOD_TYPES],
     paymentMethodOptions: SAVED_METHOD_OPTIONS,
     appearance: night,
   })
@@ -202,7 +202,7 @@ test('saving: a new appearance restyles the form in place; new methods mount it 
   rerender(<StripeSaveMethod {...props} methods={['ach']} appearance={night} />)
   await waitFor(() => expect(made).toHaveLength(2))
   expect(made[0].destroyed).toBe(true)
-  expect(made[1].options).toMatchObject({ paymentMethodTypes: ['us_bank_account'], appearance: night })
+  expect(made[1].options).toMatchObject({ allowedPaymentMethodTypes: ['us_bank_account'], appearance: night })
 })
 
 test('saving: Stripe.js not loading says so and leaves the button off', async () => {

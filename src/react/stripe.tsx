@@ -33,7 +33,7 @@ export interface StripeElementsOptions {
   currency: 'usd'
   amount?: number
   setupFutureUsage?: 'off_session'
-  paymentMethodTypes: SavedMethodType[]
+  allowedPaymentMethodTypes: SavedMethodType[]
   paymentMethodOptions: Partial<typeof SAVED_METHOD_OPTIONS>
   appearance?: StripeAppearance
 }
@@ -78,13 +78,13 @@ const optionsFor = (types: readonly SavedMethodType[]) =>
  */
 export function saveMethodElementsOptions(methods: readonly SavedMethodKind[], appearance?: StripeAppearance): StripeElementsOptions {
   const types = methods.length ? methods.map(stripeMethodType) : [...SAVED_METHOD_TYPES]
-  return { mode: 'setup', currency: 'usd', setupFutureUsage: 'off_session', paymentMethodTypes: types, paymentMethodOptions: optionsFor(types), appearance }
+  return { mode: 'setup', currency: 'usd', setupFutureUsage: 'off_session', allowedPaymentMethodTypes: types, paymentMethodOptions: optionsFor(types), appearance }
 }
 
 /** For paying amountCents on the page, the same as the PaymentIntent payments.retryOnSession makes: a card or a bank account. */
 export function retryPaymentElementsOptions(amountCents: number, appearance?: StripeAppearance): StripeElementsOptions {
   const types = [...SAVED_METHOD_TYPES]
-  return { mode: 'payment', currency: 'usd', amount: amountCents, paymentMethodTypes: types, paymentMethodOptions: optionsFor(types), appearance }
+  return { mode: 'payment', currency: 'usd', amount: amountCents, allowedPaymentMethodTypes: types, paymentMethodOptions: optionsFor(types), appearance }
 }
 
 /** Card first, then the bank account (SAVED_METHOD_TYPES is in that order). */
