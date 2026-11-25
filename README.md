@@ -11,7 +11,7 @@ disputes and reconciliation. An app prices things, keeps its own records and dec
 means for them, in callbacks. It never calls Stripe or PayPal itself. The rules an app (and a
 coding agent working in it) follows are in [`AGENTS.md`](AGENTS.md), shipped in the package.
 
-**Status:** v0.6: payments in USD, one-off and monthly (schedules): hosted and embedded checkouts (Stripe Checkout, PayPal), saved
+**Status:** v0.8.0: payments in USD, one-off and monthly (schedules): hosted and embedded checkouts (Stripe Checkout, PayPal), saved
 methods charged off-session (Stripe cards and bank accounts, PayPal-vaulted cards and PayPal accounts), on-session retries. Not here: subscriptions, order models, emails.
 The plans it was built from are ed-schedule's `payments_library_plan.md` (v0.1) and the v0.2 plan
 ("own all payment paths, bids included").
@@ -20,7 +20,7 @@ The plans it was built from are ed-schedule's `payments_library_plan.md` (v0.1) 
 
 The example app (`example/convex`) is a complete host; these are its files.
 
-**1. Install and mount.** `npm install github:adamaviner/ed-payments#v0.2.1` (pnpm: `pnpm add ...`).
+**1. Install and mount.** `npm install github:adamaviner/ed-payments#v0.8.0` (pnpm: `pnpm add ...`).
 
 ```ts
 // convex/convex.config.ts
@@ -119,7 +119,16 @@ Then register the webhooks: `npx ed-payments webhooks --stripe https://<deployme
 
 ## The React package (`@earthdance/payments/react`)
 
-Two pieces for an app's React code, over the functions it exported in steps 2 and 4. Its `react` peer
+The browser side of the payment paths, for an app's React code, over the functions it exported in steps 2 and 4:
+
+- paying on the app's own page: `PaypalButtons` and `StripeEmbeddedCheckout` (an embedded checkout),
+  `PaypalCardPayment` (a schedule's first payment by card at PayPal), `StripeRetryPayment` (a retry after a decline);
+- saving a method to charge later: `PaypalCardFields`, `PaypalSaveButton`, `StripeSaveMethod`, and
+  `useStripeSetupReturn` for a save that needed a redirect;
+- the return page: `checkoutReturnToken` and `useCheckoutReturn`;
+- Admin → Payments: `PaymentsAdminPage`, with `parseRefundAmount`, `refundableCents` and `errorMessage`.
+
+Its `react` peer
 dependency is optional, so an app with no React (or its own pages) needs nothing more. It brings its
 own few primitives (plain `button` and `input`, no UI library), styled with Tailwind classes on the
 shadcn theme tokens (`bg-muted`, `text-destructive`, ...), so colours come from the app's theme. Add to
@@ -220,7 +229,7 @@ merely opening forms use up a payer's tries.
   payer who just paid. For a save, `useStripeSetupReturn(publishableKey, search)` says `saved` (with the
   `paymentMethodId`), `processing`, `failed` or `unknown` (Stripe couldn't say; don't invite another
   save before checking). Pass `search` from the router in a server-rendered app; without it the address is
-  read after mounting. On `saved`: Stripe saved the method, but what `onSaved` was to do with it (place
+  read from `window.location` (none on the server, so hydration matches). On `saved`: Stripe saved the method, but what `onSaved` was to do with it (place
   the bid) didn't happen, so say so and let the payer finish with it; `savedMethods` lists it.
 
 **The return page: `useCheckoutReturn(completeReturn, { processor, token })`.** The app reads the
@@ -291,8 +300,10 @@ askForPasskey()}` and it runs the app's check, then tries once more.
 
 **Paying a schedule's first payment by card at PayPal: `<PaypalCardPayment payment={embedded}
 completeReturn={api.payments.completeReturn} submitLabel="Give $25 monthly" />`.** It uses PayPal's
-Card Fields, loaded under their own namespace. It captures through `completeReturn`, then goes to
-`returnUrl`; a declined card is said under the fields.
+Card Fields, loaded under their own namespace, styled like `PaypalCardFields` (`style` for the frames' colors). It
+captures through `completeReturn`, then goes to `returnUrl`. Only a declined card is said under the fields: once
+the capture has started, anything else (an error, no answer) also goes to `returnUrl`, whose page asks the server
+how it stands, because a capture whose answer was lost may have taken the money.
 
 Also exported: `parseRefundAmount(text, leftCents)`, `refundableCents(checkout, openRefunds)`,
 `errorMessage(err)`, and the types (`PaymentsAdminApi`, `CompleteReturnRef`, `OpenRefund`,
@@ -586,8 +597,8 @@ the wire code (`stripe.*`, `paypal.*`, signatures, parsers) and `STRIPE_EVENTS` 
 
 ### `@earthdance/payments/react`
 
-`PaypalButtons`, `StripeEmbeddedCheckout`, `StripeSaveMethod`, `StripeRetryPayment`, `useStripeSetupReturn`,
-`useCheckoutReturn`, `checkoutReturnToken`,
+`PaypalButtons`, `StripeEmbeddedCheckout`, `PaypalCardPayment`, `PaypalCardFields`, `PaypalSaveButton`,
+`StripeSaveMethod`, `StripeRetryPayment`, `useStripeSetupReturn`, `useCheckoutReturn`, `checkoutReturnToken`,
 `PaymentsAdminPage` and helpers; see
 "The React package" above.
 
@@ -689,13 +700,16 @@ refuses live ones.
 - `PaymentsAdminPage` has no `skipApproval` prop: it reads the server's `adminApi({ skipApproval })`
   through the `access` query, so the page and the server can't disagree. Remove the prop (TypeScript
   refuses it now).
+- `paypalCardPaySdkUrl` and `paypalVaultSdkUrl` are no longer exported from `@earthdance/payments/react`: the
+  components load PayPal's SDK themselves, and an app never should (AGENTS.md rule 1).
 
 ## Releasing
 
 ```sh
-npm run release -- 0.2.0
+npm run release -- 0.8.0
 ```
 
 From a clean branch: builds, runs every check, commits the version bump, puts the tag on a commit
 just past it that adds `dist`, and pushes both. Branches never hold `dist`. Apps install the tag:
-`npm install github:adamaviner/ed-payments#v0.2.0` (pnpm: `pnpm add github:adamaviner/ed-payments#v0.2.0`).
+`npm install github:adamaviner/ed-payments#v0.8.0` (pnpm: `pnpm add github:adamaviner/ed-payments#v0.8.0`).
+After a release, update "Status" above and the tag in "Adopt in 5 steps".
