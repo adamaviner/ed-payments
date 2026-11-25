@@ -376,8 +376,26 @@ export async function noteScheduleCheckout(ctx: MutationCtx, scheduleId: Id<'sch
   await ctx.db.patch(s._id, { lastCheckoutId: checkoutId, periodAttempts: s.periodAttempts + 1, nextChargeAt: now + DAY, updatedAt: now })
 }
 
-/** One refusal of the schedule's current period: retried later, or (retries used up, or a hard decline) lapsed. */
+/**
+ * One refusal of the schedule's current period: retried later, or (retries used up, or a hard decline)
+ * lapsed. A paused schedule (a charge on its way when the payer paused) stays paused until its own
+ * time, when the period is charged again; only the error is kept, and the host told.
+ */
 async function failPeriod(ctx: MutationCtx, s: Doc<'schedules'>, f: { period: string; reason: string; declineCode?: string; kind: DeclineKind; now: number; checkoutId?: Id<'checkouts'> }) {
+  if (s.status === 'paused') {
+    await ctx.db.patch(s._id, { period: f.period, lastError: f.reason, updatedAt: f.now })
+    const reported = {
+      checkoutId: f.checkoutId ?? null,
+      period: f.period,
+      attempt: s.failures + 1,
+      final: false,
+      reason: f.reason,
+      declineCode: f.declineCode ?? null,
+      declineKind: f.kind,
+      nextRetryAt: null,
+    }
+    return await tellHost(ctx, s._id, 'onFailed', reported, f.now, f.checkoutId)
+  }
   const failures = (s.period === f.period ? s.failures : 0) + 1
   const firstFailedAt = failures === 1 ? f.now : (s.firstFailedAt ?? f.now)
   const retry = retryTime({ firstFailedAt, failures, kind: f.kind, retryDays: s.retryDays, hourUTC: s.hourUTC })

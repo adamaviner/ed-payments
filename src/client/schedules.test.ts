@@ -483,3 +483,21 @@ describe('a first payment after its checkout closed', () => {
     expect(await calls('scheduleCharged')).toMatchObject([{ first: true, period: '2030-01' }])
   })
 })
+
+describe('a pause and a charge already on its way', () => {
+  test('a bank debit that bounces during a short pause keeps the pause: no retry during it, the host told', async () => {
+    const { t, calls, schedule, saved, start, runAt } = setup()
+    const bank = await saved('d1', 'bank')
+    const { scheduleId, checkoutId } = await start(bank)
+    await t.mutation(api.monthly.pause, { scheduleId, until: at('2030-01-25T00:00:00Z') })
+    expect(await schedule(scheduleId)).toMatchObject({ status: 'paused', period: '2030-02', nextChargeAt: at('2030-02-01T15:00:00Z') })
+    vi.setSystemTime(at('2030-01-05T12:00:00Z'))
+    const pi = (await t.query(api.shop.status, { id: checkoutId! }))!.paymentRef!
+    await t.fetch('/stripe/webhook', await stripe.settleBank(pi, false, 'insufficient_funds'))
+    expect(await schedule(scheduleId)).toMatchObject({ status: 'paused', pausedUntil: at('2030-01-25T00:00:00Z'), nextChargeAt: at('2030-02-01T15:00:00Z') })
+    expect(await calls('scheduleFailed')).toMatchObject([{ period: '2030-01', final: false, nextRetryAt: null, status: 'paused' }])
+    stripe.setBehaviour(bank, 'ok')
+    await runAt('2030-01-08T15:05:00Z')
+    expect(stripe.calls.filter((c) => c.method === 'POST' && c.path === '/v1/payment_intents')).toHaveLength(1)
+  })
+})

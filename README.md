@@ -382,6 +382,9 @@ await payments.schedulesFor(ctx, owner) // also schedulesForRef(ref), getSchedul
   `removeSavedMethod` refuses a method a schedule still uses.
 - **Statuses:** `starting`, `active`, `paused` (until `pausedUntil`, then active again by
   itself), `past_due`, `lapsed`, `cancelled`. Schedules are kept forever (one row per agreement).
+  A charge already on its way when the payer pauses that is then refused (or a bank debit that
+  bounces) keeps the pause: `scheduleFailed` says so (`nextRetryAt: null`, `status: 'paused'`), and the
+  refused period is charged when the pause ends.
 
 ## How it works
 
