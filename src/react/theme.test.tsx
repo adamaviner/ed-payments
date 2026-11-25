@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
-import { act, cleanup, renderHook } from '@testing-library/react'
+import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
+import { useLayoutEffect } from 'react'
 import { renderToString } from 'react-dom/server'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { pageTheme, usePageTheme, type PageColors } from './theme.js'
@@ -11,6 +12,7 @@ const VARS: PageColors = { background: '--background', text: '--foreground', mut
 const PAINT: Record<string, [number, number, number, number]> = {
   '#000': [0, 0, 0, 255],
   '#fff': [255, 255, 255, 255],
+  '#123456': [18, 52, 86, 255],
   'oklch(1 0 0)': [255, 255, 255, 255],
   'oklch(0.145 0 0)': [10, 10, 10, 255],
   'oklch(0.556 0 0)': [115, 115, 115, 255],
@@ -40,6 +42,8 @@ const DARK = {
 }
 
 let canvas: boolean
+let hidesPixels: boolean
+let contexts: ReturnType<typeof vi.spyOn>
 let systemDark: boolean
 let systemListeners: (() => void)[]
 
@@ -59,7 +63,7 @@ function fakeCanvas() {
     fillRect: () => {
       painted = PAINT[fill]
     },
-    getImageData: () => ({ data: Uint8ClampedArray.from(painted) }),
+    getImageData: () => ({ data: Uint8ClampedArray.from(hidesPixels ? [255, 255, 255, 255] : painted) }),
   }
 }
 
@@ -69,9 +73,10 @@ function paint(colors: Record<string, string>) {
 
 beforeEach(() => {
   canvas = true
+  hidesPixels = false
   systemDark = false
   systemListeners = []
-  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation((() => (canvas ? fakeCanvas() : null)) as unknown as HTMLCanvasElement['getContext'])
+  contexts = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation((() => (canvas ? fakeCanvas() : null)) as unknown as HTMLCanvasElement['getContext'])
   vi.spyOn(window, 'matchMedia').mockImplementation(
     (query: string) =>
       ({
@@ -166,4 +171,65 @@ test('on the server there is no page: the hook gives nothing, for the browser to
     return usePageTheme(VARS) === undefined ? 'none' : 'theme'
   }
   expect(renderToString(<Probe />)).toBe('none')
+})
+
+test('a canvas that hides its pixels from fingerprinting is not believed', () => {
+  paint(LIGHT)
+  hidesPixels = true
+  document.documentElement.className = 'dark'
+  expect(pageTheme(VARS)).toEqual({ dark: true, stripe: { theme: 'night' }, paypal: { input: { color: '#fafafa', background: 'transparent' } } })
+})
+
+test('a see-through background is light or dark by the class, not by its colour', () => {
+  paint({ ...LIGHT, '--background': 'oklch(1 0 0 / 10%)' })
+  document.documentElement.className = 'light'
+  expect(pageTheme(VARS).stripe.theme).toBe('stripe')
+  document.documentElement.className = 'dark'
+  expect(pageTheme(VARS).stripe.theme).toBe('night')
+})
+
+test('the hook sees a theme set before it subscribed, such as in a layout effect', async () => {
+  paint(LIGHT)
+  const { result } = renderHook(() => {
+    const theme = usePageTheme(VARS)
+    useLayoutEffect(() => {
+      paint(DARK)
+      document.documentElement.className = 'dark'
+    }, [])
+    return theme
+  })
+  await waitFor(() => expect(result.current?.stripe.theme).toBe('night'))
+})
+
+test('the hook reads a stylesheet arriving in <head>, and again when a linked one loads', async () => {
+  let sheet: Record<string, string> = {}
+  vi.spyOn(window, 'getComputedStyle').mockImplementation(() => ({ getPropertyValue: (name: string) => sheet[name] ?? '' }) as unknown as CSSStyleDeclaration)
+  const { result } = renderHook(() => usePageTheme(VARS))
+  expect(result.current?.stripe).toEqual({ theme: 'stripe' })
+
+  sheet = LIGHT
+  const link = document.createElement('link')
+  await act(async () => {
+    document.head.appendChild(link)
+  })
+  await waitFor(() => expect(result.current?.stripe.variables?.colorBackground).toBe('rgb(255, 255, 255)'))
+
+  sheet = DARK
+  act(() => void link.dispatchEvent(new Event('load')))
+  expect(result.current?.stripe.theme).toBe('night')
+  link.remove()
+})
+
+test('a change to <html> that leaves the colours alone keeps the same object and paints nothing', async () => {
+  paint(LIGHT)
+  const { result } = renderHook(() => usePageTheme(VARS))
+  await waitFor(() => expect(result.current?.stripe.theme).toBe('stripe'))
+  const first = result.current
+  const paints = contexts.mock.calls.length
+  await act(async () => {
+    document.documentElement.classList.add('scrolling')
+    await Promise.resolve()
+  })
+  expect(result.current).toBe(first)
+  expect(contexts.mock.calls.length).toBe(paints)
 })

@@ -324,19 +324,21 @@ there's no second palette to keep in step with the real one:
 const COLORS: PageColors = { background: '--background', text: '--foreground', mutedText: '--muted-foreground', primary: '--primary', danger: '--destructive', border: '--input', radius: '--radius' }
 const theme = usePageTheme(COLORS)
 <StripeSaveMethod ... appearance={theme?.stripe} />
-<PaypalCardFields ... style={theme?.paypal} />
+{theme && <PaypalCardFields ... style={theme.paypal} />}
 ```
 
-- Any colour the browser computes (`oklch()`, `color(srgb …)`, hex, rgb) is turned into `rgb()` /
-  `rgba()` by painting it on a 1-pixel canvas; colours outside sRGB are clipped. Dark or light is told by
-  the background, which picks Stripe's `night` or `stripe` base.
-- It reads again when the class, `style` or `data-theme` of `<html>` or the system's dark setting changes.
-  Stripe restyles in place; PayPal's card fields only take a style when made, so they are drawn again,
-  clearing a half-typed card.
-- A variable missing or not a colour, or no canvas: Stripe's own `night` / `stripe` theme, chosen from a
+- Each variable is read from `<html>` (define the tokens on `:root`) and must hold a whole CSS colour:
+  `oklch()`, `color(srgb …)`, hex, rgb, hsl. Bare HSL triplets (`0 0% 100%`, used as `hsl(var(--x))`) aren't
+  colours on their own and fall back. Each is turned into `rgb()` / `rgba()` by painting it on a 1-pixel
+  canvas; colours outside sRGB are clipped. Dark or light is told by the background (by the class when the
+  background is see-through), which picks Stripe's `night` or `stripe` base.
+- It looks again when the class, `style` or `data-theme` of `<html>`, the stylesheets in `<head>` or the
+  system's dark setting change, and paints again only when the variables differ. Stripe restyles in place;
+  PayPal's card fields only take a style when made, so they are drawn again, clearing a half-typed card:
+  render them once `theme` is defined, so a server-rendered page doesn't draw them twice.
+- A variable missing or not a colour, no canvas, or a canvas that hides its pixels: Stripe's own `night` / `stripe` theme, chosen from a
   `dark` / `light` class on `<html>`, else the system setting; never white fields on a dark page.
 - On the server it gives `undefined` (there is no page); the browser's first render fills it in.
-  `pageTheme(colors)` is the same read, once, outside React.
 
 ## Schedules (monthly charges)
 
@@ -667,7 +669,7 @@ the wire code (`stripe.*`, `paypal.*`, signatures, parsers) and `STRIPE_EVENTS` 
 
 `PaypalButtons`, `StripeEmbeddedCheckout`, `PaypalCardPayment`, `PaypalCardFields`, `PaypalSaveButton`,
 `StripeSaveMethod`, `StripeRetryPayment`, `useStripeSetupReturn`, `useCheckoutReturn`, `checkoutReturnToken`,
-`usePageTheme`, `pageTheme`, `PaymentsAdminPage` and helpers; see
+`usePageTheme`, `PaymentsAdminPage` and helpers; see
 "The React package" above.
 
 ### `@earthdance/payments/test`
@@ -749,7 +751,7 @@ the webhooks registered on the live deployment:
 
 ### v0.10.0 (unreleased)
 
-- **`usePageTheme(colors)` / `pageTheme(colors)`** read the app's colour tokens from the page and give
+- **`usePageTheme(colors)`** reads the app's colour tokens from the page and give
   `{ dark, stripe, paypal }`: pass `stripe` as a Stripe form's `appearance` and `paypal` as the card fields'
   `style`. An app with hand-copied palettes (`STRIPE_APPEARANCE`, `PAYPAL_FIELD_STYLE`) can drop them.
 

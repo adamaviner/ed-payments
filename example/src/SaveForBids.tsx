@@ -36,14 +36,14 @@ export function SaveForBids({ itemId, amountCents, onPlaced }: { itemId: string;
   const methods: SavedMethodKind[] = choice.processor === 'paypal' ? ['ach'] : ['card', 'ach']
   return (
     <div>
-      {choice.processor === 'paypal' && (
+      {choice.processor === 'paypal' && theme && (
         <PaypalCardFields
           clientId={clientId}
           createSetupToken={async () => (await setup({ kind: 'card' })).setupTokenId}
           onSaved={savePaypal}
           submitLabel="Place bid"
           note="You’re only charged if you win."
-          style={theme?.paypal}
+          style={theme.paypal}
         />
       )}
       <StripeSaveMethod

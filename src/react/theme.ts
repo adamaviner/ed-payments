@@ -65,36 +65,49 @@ const isDarkRgb = (rgb: string) => {
 
 /** Without colours to go by: the theme class on <html> (dark or light), else the system setting. */
 function darkWithoutColours(): boolean {
-  if (typeof document === 'undefined') return false
   const html = document.documentElement.classList
   if (html.contains('dark')) return true
   if (html.contains('light')) return false
   return typeof window.matchMedia === 'function' && window.matchMedia('(prefers-color-scheme: dark)').matches
 }
 
-function fallback(): PageTheme {
-  const dark = darkWithoutColours()
-  return dark ? { dark, stripe: { theme: 'night' }, paypal: { input: { color: '#fafafa', background: 'transparent' } } } : { dark, stripe: { theme: 'stripe' }, paypal: {} }
+const fallback = (dark: boolean): PageTheme =>
+  dark ? { dark, stripe: { theme: 'night' }, paypal: { input: { color: '#fafafa', background: 'transparent' } } } : { dark, stripe: { theme: 'stripe' }, paypal: {} }
+
+/**
+ * Painted first: a browser that hides canvas pixels from fingerprinting (Firefox's resistFingerprinting,
+ * some extensions) reads back blank or made-up pixels, which would turn every token into the same colour.
+ */
+const PROBE = '#123456'
+const PROBE_RGB = 'rgb(18, 52, 86)'
+
+/** The variables as the page has them now, and the class / system hint for when they can't be used. */
+interface Raw {
+  values: Record<string, string>
+  darkHint: boolean
 }
 
-/** Reads the page's colours now. On the server, or when they can't be read, Stripe's own theme. */
-export function pageTheme(vars: PageColors): PageTheme {
-  if (typeof document === 'undefined') return fallback()
+function rawOf(vars: PageColors): Raw {
+  const style = getComputedStyle(document.documentElement)
+  return { values: Object.fromEntries(Object.entries(vars).map(([k, name]) => [k, style.getPropertyValue(name).trim()])), darkHint: darkWithoutColours() }
+}
+
+function themeOf({ values, darkHint }: Raw): PageTheme {
   const canvas = document.createElement('canvas')
   canvas.width = canvas.height = 1
   const ctx = canvas.getContext('2d', { willReadFrequently: true }) as Paint | null
-  if (!ctx) return fallback()
-  const style = getComputedStyle(document.documentElement)
-  const read = (name: string) => plain(ctx, style.getPropertyValue(name).trim())
-  const background = read(vars.background)
-  const text = read(vars.text)
-  const mutedText = read(vars.mutedText)
-  const primary = read(vars.primary)
-  const danger = read(vars.danger)
-  const border = read(vars.border)
-  if (!background || !text || !mutedText || !primary || !danger || !border) return fallback()
-  const dark = isDarkRgb(background)
-  const radius = vars.radius ? style.getPropertyValue(vars.radius).trim() : ''
+  if (!ctx || plain(ctx, PROBE) !== PROBE_RGB) return fallback(darkHint)
+  const read = (k: keyof PageColors) => plain(ctx, values[k] ?? '')
+  const background = read('background')
+  const text = read('text')
+  const mutedText = read('mutedText')
+  const primary = read('primary')
+  const danger = read('danger')
+  const border = read('border')
+  if (!background || !text || !mutedText || !primary || !danger || !border) return fallback(darkHint)
+  // A see-through background says nothing about what is behind it.
+  const dark = background.startsWith('rgb(') ? isDarkRgb(background) : darkHint
+  const radius = values.radius ?? ''
   const line = `1px solid ${border}`
   return {
     dark,
@@ -107,14 +120,21 @@ export function pageTheme(vars: PageColors): PageTheme {
   }
 }
 
+/** Reads the page's colours now. On the server, or when they can't be read, Stripe's own theme. */
+export function pageTheme(vars: PageColors): PageTheme {
+  return typeof document === 'undefined' ? fallback(false) : themeOf(rawOf(vars))
+}
+
 /**
- * The page's theme for the payment fields, read again whenever the class, style or data-theme of <html>
- * or the system's dark setting changes. Undefined while rendering on the server, where there is no page;
- * the browser's first render fills it in before Stripe's frame is made.
+ * The page's theme for the payment fields. Looked at again whenever the class, style or data-theme of
+ * <html>, the stylesheets in <head> (a code-split route's CSS arriving, a dev server's injected styles)
+ * or the system's dark setting change; painted again only when the variables or the hint differ, since
+ * some libraries change <html> while scrolling. Undefined while rendering on the server, where there is
+ * no page; the browser's first render fills it in before Stripe's frame is made.
  */
 export function usePageTheme(vars: PageColors): PageTheme | undefined {
   const version = useRef(0)
-  const cache = useRef<{ version: number; key: string; json: string; value: PageTheme } | null>(null)
+  const cache = useRef<{ version: number; key: string; raw: string; value: PageTheme } | null>(null)
   const key = JSON.stringify(vars)
 
   const subscribe = useCallback((changed: () => void) => {
@@ -122,12 +142,28 @@ export function usePageTheme(vars: PageColors): PageTheme | undefined {
       version.current++
       changed()
     }
-    const observer = new MutationObserver(bump)
-    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'style', 'data-theme'] })
+    const links = new Set<HTMLLinkElement>()
+    const page = new MutationObserver(bump)
+    page.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'style', 'data-theme'] })
+    const head = new MutationObserver((records) => {
+      for (const r of records)
+        for (const node of r.addedNodes)
+          if (node instanceof HTMLLinkElement) {
+            links.add(node)
+            node.addEventListener('load', bump)
+          }
+      bump()
+    })
+    head.observe(document.head, { childList: true, subtree: true, characterData: true })
     const system = typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-color-scheme: dark)') : null
     system?.addEventListener('change', bump)
+    // Anything that changed between the first render and now (a layout effect setting the theme class)
+    // had no observer yet; React reads the snapshot again after subscribing, so make it look.
+    version.current++
     return () => {
-      observer.disconnect()
+      page.disconnect()
+      head.disconnect()
+      for (const link of links) link.removeEventListener('load', bump)
       system?.removeEventListener('change', bump)
     }
   }, [])
@@ -135,12 +171,11 @@ export function usePageTheme(vars: PageColors): PageTheme | undefined {
   const snapshot = () => {
     const c = cache.current
     if (c && c.version === version.current && c.key === key) return c.value
-    const value = pageTheme(JSON.parse(key) as PageColors)
-    const json = JSON.stringify(value)
-    // The same object while the colours are the same, so a form restyles only when they change.
-    const kept = c && c.json === json ? c.value : value
-    cache.current = { version: version.current, key, json, value: kept }
-    return kept
+    const raw = rawOf(JSON.parse(key) as PageColors)
+    const rawKey = JSON.stringify(raw)
+    const value = c && c.key === key && c.raw === rawKey ? c.value : themeOf(raw)
+    cache.current = { version: version.current, key, raw: rawKey, value }
+    return value
   }
 
   return useSyncExternalStore(subscribe, snapshot, () => undefined)
