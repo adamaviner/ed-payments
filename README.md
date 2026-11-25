@@ -197,7 +197,7 @@ merely opening forms use up a payer's tries.
   onSaved={(paymentMethodId) => placeBid({ itemId, amountCents, paymentMethodId })} // checks it with verifyMethodOwner
   submitLabel="Place bid"
   note="You’re only charged if you win."
-  appearance={dark ? STRIPE_DARK : STRIPE_LIGHT}
+  appearance={theme?.stripe} // const theme = usePageTheme(COLORS), below
 />
 <StripeRetryPayment
   publishableKey={STRIPE_PUBLISHABLE_KEY}
@@ -223,6 +223,7 @@ merely opening forms use up a payer's tries.
   changed the fields.
 - **`appearance`** is Stripe's Appearance API; the frames can't see the page's CSS, so pass literal
   colors, dark ones on a dark page. A new one restyles the form in place, keeping what was typed.
+  Rather than copying the palette by hand, read it from the page with `usePageTheme` (below).
 - **Redirects.** Cards and instantly verified bank accounts finish on the page (`redirect:
 'if_required'`). Should a method need a redirect (some banks' logins do), Stripe comes back to
   `returnUrl` (default: the page) and the forms don't read it: the page checks its address first and
@@ -312,6 +313,30 @@ how it stands, because a capture whose answer was lost may have taken the money.
 Also exported: `parseRefundAmount(text, leftCents)`, `refundableCents(checkout, openRefunds)`,
 `errorMessage(err)`, and the types (`PaymentsAdminApi`, `CompleteReturnRef`, `OpenRefund`,
 `CheckoutSummary`, `PaymentIssue`, `CheckoutReturn`, `RefundQuestion`). For a badge, query `api.paymentsAdmin.openCount`.
+
+### Page colours for the payment fields
+
+Stripe's and PayPal's fields sit in frames that can't see the page's CSS, so they only take literal
+colours. `usePageTheme` reads the app's own colour variables from the page and builds both styles, so
+there's no second palette to keep in step with the real one:
+
+```tsx
+const COLORS: PageColors = { background: '--background', text: '--foreground', mutedText: '--muted-foreground', primary: '--primary', danger: '--destructive', border: '--input', radius: '--radius' }
+const theme = usePageTheme(COLORS)
+<StripeSaveMethod ... appearance={theme?.stripe} />
+<PaypalCardFields ... style={theme?.paypal} />
+```
+
+- Any colour the browser computes (`oklch()`, `color(srgb …)`, hex, rgb) is turned into `rgb()` /
+  `rgba()` by painting it on a 1-pixel canvas; colours outside sRGB are clipped. Dark or light is told by
+  the background, which picks Stripe's `night` or `stripe` base.
+- It reads again when the class, `style` or `data-theme` of `<html>` or the system's dark setting changes.
+  Stripe restyles in place; PayPal's card fields only take a style when made, so they are drawn again,
+  clearing a half-typed card.
+- A variable missing or not a colour, or no canvas: Stripe's own `night` / `stripe` theme, chosen from a
+  `dark` / `light` class on `<html>`, else the system setting; never white fields on a dark page.
+- On the server it gives `undefined` (there is no page); the browser's first render fills it in.
+  `pageTheme(colors)` is the same read, once, outside React.
 
 ## Schedules (monthly charges)
 
@@ -642,7 +667,7 @@ the wire code (`stripe.*`, `paypal.*`, signatures, parsers) and `STRIPE_EVENTS` 
 
 `PaypalButtons`, `StripeEmbeddedCheckout`, `PaypalCardPayment`, `PaypalCardFields`, `PaypalSaveButton`,
 `StripeSaveMethod`, `StripeRetryPayment`, `useStripeSetupReturn`, `useCheckoutReturn`, `checkoutReturnToken`,
-`PaymentsAdminPage` and helpers; see
+`usePageTheme`, `pageTheme`, `PaymentsAdminPage` and helpers; see
 "The React package" above.
 
 ### `@earthdance/payments/test`
@@ -721,6 +746,12 @@ the webhooks registered on the live deployment:
     decline, pay on the retry page with PayPal's buttons.
 
 ## Upgrade notes
+
+### v0.10.0 (unreleased)
+
+- **`usePageTheme(colors)` / `pageTheme(colors)`** read the app's colour tokens from the page and give
+  `{ dark, stripe, paypal }`: pass `stripe` as a Stripe form's `appearance` and `paypal` as the card fields'
+  `style`. An app with hand-copied palettes (`STRIPE_APPEARANCE`, `PAYPAL_FIELD_STYLE`) can drop them.
 
 ### v0.9.2
 

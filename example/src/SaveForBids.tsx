@@ -5,16 +5,17 @@
 // Neither form makes anything at the processors until the bidder presses the button. Back from a
 // Stripe redirect (?setup_intent_client_secret=), the method is saved but the bid wasn't placed: say so.
 import type { SavedMethodKind } from '@earthdance/payments/core'
-import { PaypalCardFields, PaypalSaveButton, StripeSaveMethod, useStripeSetupReturn, type StripeAppearance } from '@earthdance/payments/react'
+import { PaypalCardFields, PaypalSaveButton, StripeSaveMethod, usePageTheme, useStripeSetupReturn, type PageColors } from '@earthdance/payments/react'
 import { useAction, useQuery } from 'convex/react'
 import { api } from '../convex/_generated/api.js'
 
 /** The app's Stripe publishable key, from its build (the same account as STRIPE_SECRET_KEY). */
 const STRIPE_PUBLISHABLE_KEY = 'pk_test_example'
-/** Stripe's frames can't see the page's CSS: the dark page's colors, literally. */
-const DARK: StripeAppearance = { theme: 'night', variables: { colorBackground: '#171717', colorText: '#fafafa' } }
+/** The app's colour tokens; Stripe's and PayPal's frames can't see them, so the library reads them from the page. */
+const COLORS: PageColors = { background: '--background', text: '--foreground', mutedText: '--muted-foreground', primary: '--primary', danger: '--destructive', border: '--input', radius: '--radius' }
 
-export function SaveForBids({ itemId, amountCents, dark, onPlaced }: { itemId: string; amountCents: number; dark: boolean; onPlaced: () => void }) {
+export function SaveForBids({ itemId, amountCents, onPlaced }: { itemId: string; amountCents: number; onPlaced: () => void }) {
+  const theme = usePageTheme(COLORS)
   const back = useStripeSetupReturn(STRIPE_PUBLISHABLE_KEY)
   const choice = useQuery(api.shop.cardProcessor, { amountCents })
   const setup = useAction(api.shop.paypalSetupToken)
@@ -42,6 +43,7 @@ export function SaveForBids({ itemId, amountCents, dark, onPlaced }: { itemId: s
           onSaved={savePaypal}
           submitLabel="Place bid"
           note="You’re only charged if you win."
+          style={theme?.paypal}
         />
       )}
       <StripeSaveMethod
@@ -54,7 +56,7 @@ export function SaveForBids({ itemId, amountCents, dark, onPlaced }: { itemId: s
         }}
         submitLabel="Place bid"
         note="You’re only charged if you win."
-        appearance={dark ? DARK : { theme: 'stripe' }}
+        appearance={theme?.stripe}
       />
       <PaypalSaveButton clientId={clientId} createSetupToken={async () => (await setup({ kind: 'paypal' })).setupTokenId} onSaved={savePaypal} />
     </div>
