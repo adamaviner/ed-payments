@@ -537,6 +537,8 @@ MERCHANT`). `savePaypalMethod` turns the approved token into a payment token and
 src/core       pure TypeScript, no Convex: fees, money, types, the processors' wire code, event lists   @earthdance/payments/core
 src/component  the Convex component: tables, queries, mutations; no network, no secrets, no routes, no crons
 src/client     what the app's convex/ code imports: definePayments, fromEnv, validators                 @earthdance/payments
+               (index.ts the Payments facade; hosted.ts, refunds.ts, sweep.ts, saved.ts, paypalVault.ts,
+               schedules.ts the flows; api.ts the generated functions; util.ts leaf helpers)
 src/react      the return page hook and the admin page                                                @earthdance/payments/react
 src/cli        npx ed-payments webhooks
 src/test.ts    register / registerPayments for convex-test, fake Stripe and PayPal, fixtures            @earthdance/payments/test
