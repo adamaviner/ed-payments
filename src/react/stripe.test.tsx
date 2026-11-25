@@ -272,7 +272,7 @@ test('on-page: the form shows for the amount with nothing started, the payer’s
   render(<StripeOnPagePayment publishableKey="pk_test_1" amountCents={2_500} payer={{ name: 'Ada Lovelace', email: 'ada@example.org' }} start={start} submitLabel="Give $25" appearance={night} />)
   await ready('Give $25')
   expect(made).toHaveLength(1)
-  expect(made[0].options).toEqual(onPagePaymentElementsOptions(2_500, false, night))
+  expect(made[0].options).toEqual(onPagePaymentElementsOptions(2_500, {}, night))
   expect(made[0].options).not.toHaveProperty('setupFutureUsage')
   expect(made[0].element).toEqual({ paymentMethodOrder: ['card', 'us_bank_account'], fields: { billingDetails: { name: 'never', email: 'never' } } })
   expect(start).not.toHaveBeenCalled()
@@ -283,11 +283,36 @@ test('on-page: a schedule’s first payment saves the method; a new amount is sh
   const props = { publishableKey: 'pk_test_1', start: () => Promise.resolve(stripeOnPage(1)), submitLabel: 'Give monthly' }
   const { rerender } = render(<StripeOnPagePayment {...props} amountCents={2_500} saveForLater />)
   await ready('Give monthly')
-  expect(made[0].options).toEqual(onPagePaymentElementsOptions(2_500, true, {}))
+  expect(made[0].options).toEqual(onPagePaymentElementsOptions(2_500, { saveForLater: true }, {}))
   expect(made[0].options).toMatchObject({ mode: 'payment', amount: 2_500, setupFutureUsage: 'off_session', allowedPaymentMethodTypes: [...SAVED_METHOD_TYPES] })
   rerender(<StripeOnPagePayment {...props} amountCents={5_000} saveForLater />)
   expect(made).toHaveLength(1)
   expect(made[0].updates).toEqual([{ amount: 5_000 }])
+})
+
+test('on-page: methods narrows the form to what start asks for, as the PaymentIntent is made', async () => {
+  render(<StripeOnPagePayment publishableKey="pk_test_1" amountCents={2_500} methods={['ach']} start={() => Promise.resolve(stripeOnPage(1))} submitLabel="Give $25" />)
+  await ready('Give $25')
+  expect(made[0].options).toEqual(onPagePaymentElementsOptions(2_500, { methods: ['ach'] }, {}))
+  expect(made[0].options).toMatchObject({ allowedPaymentMethodTypes: ['us_bank_account'], paymentMethodOptions: SAVED_METHOD_OPTIONS })
+  expect(onPagePaymentElementsOptions(2_500, { methods: ['card'] })).toMatchObject({ allowedPaymentMethodTypes: ['card'], paymentMethodOptions: {} })
+})
+
+test('on-page: no amount yet shows no form until there is one; an amount that isn’t one leaves the form as it is with the button off', async () => {
+  const props = { publishableKey: 'pk_test_1', start: () => Promise.resolve(stripeOnPage(1)), submitLabel: 'Give' }
+  const { rerender } = render(<StripeOnPagePayment {...props} amountCents={0} />)
+  await act(() => new Promise((r) => setTimeout(r, 10)))
+  expect(scripts).toHaveLength(0)
+  expect(made).toHaveLength(0)
+  rerender(<StripeOnPagePayment {...props} amountCents={2_500} />)
+  const button = await ready('Give')
+  expect(made[0].options).toMatchObject({ amount: 2_500 })
+  rerender(<StripeOnPagePayment {...props} amountCents={Number.NaN} />)
+  expect(button.hasAttribute('disabled')).toBe(true)
+  rerender(<StripeOnPagePayment {...props} amountCents={3_000} />)
+  expect(made).toHaveLength(1)
+  expect(made[0].updates).toEqual([{ amount: 3_000 }])
+  expect(button.hasAttribute('disabled')).toBe(false)
 })
 
 test('on-page: the press checks the fields first; incomplete fields start nothing', async () => {

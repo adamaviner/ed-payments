@@ -256,7 +256,7 @@ unchanged, or cancels it and starts afresh.
 
 ```tsx
 const theme = usePageTheme(COLORS)
-const last = useRef<string>()
+const last = useRef<string | undefined>(undefined)
 const start = async () => {
   const started = await startDonation({ ...form, replaces: last.current }) // the app's action: payments.start(ctx, { ..., ui: 'onPage', replaces })
   last.current = started.checkoutId
@@ -265,6 +265,7 @@ const start = async () => {
 ;<StripeOnPagePayment
   publishableKey={STRIPE_PUBLISHABLE_KEY}
   amountCents={totalCents} // as the server will price it; a new amount is shown in place
+  methods={[method]} // 'card' or 'ach', the method start passes, when the app's own tabs choose it
   saveForLater={monthly} // a schedule's first payment: setupFutureUsage 'off_session', as the PaymentIntent
   payer={{ name, email }} // from the app's form, so Stripe doesn't ask again
   start={start}
@@ -276,9 +277,11 @@ const start = async () => {
 }
 ```
 
-- **Options.** `onPagePaymentElementsOptions(amountCents, saveForLater)` (exported) is `retryPaymentElementsOptions`
-  plus `setupFutureUsage: 'off_session'` when saving: a card or a bank account, as the library's PaymentIntent.
-  Changing `saveForLater` mounts the form again (clearing it); a new `amountCents` or `appearance` doesn't.
+- **Options.** `onPagePaymentElementsOptions(amountCents, { saveForLater, methods })` (exported): the method types
+  (`methods`, both a card and a bank account by default, as `StripeSaveMethod`) and `setupFutureUsage: 'off_session'`
+  when saving, as the library's PaymentIntent is made. Changing `methods` or `saveForLater` mounts the form again
+  (clearing it); a new `amountCents` or `appearance` doesn't. The form waits for an amount Stripe takes (whole cents
+  above zero) before it shows, and keeps the last one, with its button off, while the app's amount isn't one.
 - **`payer`** hides Stripe's own name and email fields and puts them on the payment method at the confirm (a bank
   account needs both). Without it Stripe asks for what a method needs.
 - **PayPal's `clientId`** is a prop, since the fields load before anything is started; it is public and the same

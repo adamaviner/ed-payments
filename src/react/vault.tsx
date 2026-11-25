@@ -13,6 +13,7 @@ import type { EmbeddedPayment, OnPagePayment } from '../client/index.js'
 import { errorMessage } from './errors.js'
 import { useLatest, useOneAtATime } from './hooks.js'
 import type { CompleteReturnRef } from './types.js'
+import { WRONG_PROCESSOR } from './stripe.js'
 import { Button, cn, ErrorNote } from './ui.js'
 
 export const PAYPAL_VAULT_NAMESPACE = 'paypalVault'
@@ -371,6 +372,9 @@ function useCardPayment(a: { clientId: string; orderKey?: string; order: () => P
   const startError = useRef<unknown>(null)
   // The order the press paid, for its return page.
   const paying = useRef<CardOrder | null>(null)
+  // A ref as well as state: once paid (or gone to the return page to find out), no press may start another payment.
+  const doneRef = useRef(false)
+  const [done, setDone] = useState(false)
   const { busy, run } = useOneAtATime()
   const [error, setError] = useState<string | null>(null)
   const latest = useLatest({ capture, navigate: a.navigate, order: a.order })
@@ -402,7 +406,7 @@ function useCardPayment(a: { clientId: string; orderKey?: string; order: () => P
   const submit = () =>
     run(async () => {
       const cf = fields.current
-      if (!cf) return
+      if (!cf || doneRef.current) return
       setError(null)
       outcome.current = null
       startError.current = null
@@ -418,12 +422,18 @@ function useCardPayment(a: { clientId: string; orderKey?: string; order: () => P
         }
       }
       if (outcome.current === 'declined') return setError('The card was declined. Try another card.')
-      // Set by createOrder during submit, which TypeScript can't see from here.
-      const returnUrl = (paying.current as CardOrder | null)?.returnUrl
-      if (returnUrl) (latest.current.navigate ?? ((u: string) => window.location.assign(u)))(returnUrl)
+      // Set by createOrder and onApprove during submit, which TypeScript can't see from here. PayPal may report a
+      // failed createOrder to onError and resolve submit, so no capture yet means nothing was paid.
+      const order = paying.current as CardOrder | null
+      if (outcome.current === null || !order) {
+        return setError(startError.current ? errorMessage(startError.current, 'The payment couldn’t be started. Please try again.') : CARD_REFUSED)
+      }
+      doneRef.current = true
+      setDone(true)
+      ;(latest.current.navigate ?? ((u: string) => window.location.assign(u)))(order.returnUrl)
     })
 
-  return { boxes, load, error, busy, submit }
+  return { boxes, load, error, busy: busy || done, submit }
 }
 
 /**
@@ -469,7 +479,7 @@ export interface PaypalOnPagePaymentProps {
 export function PaypalOnPagePayment({ clientId, start, completeReturn, submitLabel, navigate, note, disabled, style, className }: PaypalOnPagePaymentProps) {
   const order = async (): Promise<CardOrder> => {
     const onPage = await start()
-    if (onPage.processor !== 'paypal') throw new Error('This payment was started with Stripe, not PayPal.')
+    if (onPage.processor !== 'paypal' || onPage.clientId !== clientId) throw new Error(WRONG_PROCESSOR)
     return { orderId: onPage.orderId, returnUrl: onPage.returnUrl }
   }
   const { boxes, load, error, busy, submit } = useCardPayment({ clientId, order, completeReturn, navigate, style })

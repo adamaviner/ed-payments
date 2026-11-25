@@ -171,3 +171,46 @@ test('on-page: a new style draws the fields again in it', async () => {
   await waitFor(() => expect(options).toHaveLength(2))
   expect(options[1].style?.input).toMatchObject({ color: '#fafafa' })
 })
+
+test('on-page: once paid the button stays off, so a second press can’t start and pay again', async () => {
+  capture.mockResolvedValue({ status: 'paid' })
+  const start = vi.fn(() => Promise.resolve(paypalOnPage('ORDER1')))
+  const navigate = vi.fn()
+  render(<PaypalOnPagePayment clientId="client-1" start={start} completeReturn={completeReturn} submitLabel="Give $25" navigate={navigate} />)
+  await loaded('Give $25')
+  const button = screen.getByRole<HTMLButtonElement>('button', { name: 'Give $25' })
+  fireEvent.click(button)
+  await waitFor(() => expect(navigate).toHaveBeenCalledTimes(1))
+  expect(button.disabled).toBe(true)
+  fireEvent.click(button)
+  await act(() => new Promise((r) => setTimeout(r, 10)))
+  expect(start).toHaveBeenCalledTimes(1)
+})
+
+test('on-page: the app refusing to start is said even when PayPal reports it to onError and submit resolves', async () => {
+  submitImpl = async (o) => {
+    await o.createOrder().catch(() => {})
+  }
+  render(<PaypalOnPagePayment clientId="client-1" start={() => Promise.reject(new Error('Give at least $5.'))} completeReturn={completeReturn} submitLabel="Give $25" navigate={vi.fn()} />)
+  await loaded('Give $25')
+  fireEvent.click(screen.getByRole('button', { name: 'Give $25' }))
+  expect((await screen.findByRole('alert')).textContent).toBe('Give at least $5.')
+})
+
+test('on-page: an order for another PayPal app (sandbox against live) is refused before PayPal sees it', async () => {
+  vi.spyOn(console, 'warn').mockImplementation(() => {})
+  vi.spyOn(console, 'error').mockImplementation(() => {})
+  render(
+    <PaypalOnPagePayment
+      clientId="client-1"
+      start={() => Promise.resolve({ ...paypalOnPage('ORDER1'), clientId: 'client-live' })}
+      completeReturn={completeReturn}
+      submitLabel="Give $25"
+      navigate={vi.fn()}
+    />,
+  )
+  await loaded('Give $25')
+  fireEvent.click(screen.getByRole('button', { name: 'Give $25' }))
+  expect((await screen.findByRole('alert')).textContent).toMatch(/can’t be paid here/)
+  expect(capture).not.toHaveBeenCalled()
+})

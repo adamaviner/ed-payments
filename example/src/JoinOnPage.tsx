@@ -35,6 +35,7 @@ export function JoinOnPage({ name, email }: { name: string; email: string }) {
         <StripeOnPagePayment
           publishableKey={STRIPE_PUBLISHABLE_KEY}
           amountCents={MONTHLY_CENTS}
+          methods={[how === 'bank' ? 'ach' : 'card']}
           saveForLater
           payer={{ name, email }}
           start={start}
