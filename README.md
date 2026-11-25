@@ -720,6 +720,11 @@ Nothing to migrate; these change what a host sees:
   `limitKey`, which now counts instead of the signed-in user too (`start`'s did only for signed-out payers).
 - **A `v.id()` in the context** must look like a Convex id (it was any string).
 - **PayPal webhooks** sent more than ten minutes before they arrive are refused (400) without asking PayPal.
+- `PaymentsAdminPage` has no `skipApproval` prop: it reads the server's `adminApi({ skipApproval })`
+  through the `access` query, so the page and the server can't disagree. Remove the prop (TypeScript
+  refuses it now).
+- `paypalCardPaySdkUrl` and `paypalVaultSdkUrl` are no longer exported from `@earthdance/payments/react`: the
+  components load PayPal's SDK themselves, and an app never should (AGENTS.md rule 1).
 
 ## Developing
 
@@ -736,16 +741,6 @@ repo uses an anonymous local one (no Convex account, no quota): the first time,
 ports 3410/3411 so it doesn't collide with ed-mail's (3400) or ed-schedule's (3210 and up).
 `test:sandbox` runs no files (and says so) without a Stripe test key or PayPal sandbox keys, and
 refuses live ones.
-
-## Upgrading
-
-### From v0.8.0
-
-- `PaymentsAdminPage` has no `skipApproval` prop: it reads the server's `adminApi({ skipApproval })`
-  through the `access` query, so the page and the server can't disagree. Remove the prop (TypeScript
-  refuses it now).
-- `paypalCardPaySdkUrl` and `paypalVaultSdkUrl` are no longer exported from `@earthdance/payments/react`: the
-  components load PayPal's SDK themselves, and an app never should (AGENTS.md rule 1).
 
 ## Releasing
 
