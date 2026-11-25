@@ -1,0 +1,169 @@
+{
+  "_source": "PayPal sandbox, captured 2026-11-24 (Transaction Search, fields=all: a sale and a refund; ids, people and balances scrubbed)",
+  "transaction_details": [
+    {
+      "transaction_info": {
+        "paypal_account_id": "PAYERACCOUNT1",
+        "transaction_id": "TXN00000000000000",
+        "paypal_reference_id": "ORDERREF000000001",
+        "paypal_reference_id_type": "TXN",
+        "transaction_event_code": "T0006",
+        "transaction_initiation_date": "2026-11-18T22:17:43Z",
+        "transaction_updated_date": "2026-11-18T22:17:43Z",
+        "transaction_amount": {
+          "currency_code": "USD",
+          "value": "14.79"
+        },
+        "fee_amount": {
+          "currency_code": "USD",
+          "value": "-1.23"
+        },
+        "transaction_status": "S",
+        "transaction_subject": "Herbal Tea Blend",
+        "ending_balance": {
+          "currency_code": "USD",
+          "value": "100.00"
+        },
+        "available_balance": {
+          "currency_code": "USD",
+          "value": "100.00"
+        },
+        "custom_field": "market:checkout1",
+        "protection_eligibility": "01",
+        "credit_term": "4P",
+        "annual_percentage_rate": "0.0",
+        "instrument_type": "PayPal",
+        "instrument_sub_type": "PayPal Wallet"
+      },
+      "payer_info": {
+        "account_id": "PAYERACCOUNT1",
+        "email_address": "buyer@example.org",
+        "phone_number": {
+          "country_code": "1",
+          "national_number": "5555550100"
+        },
+        "address_status": "N",
+        "payer_status": "Y",
+        "payer_name": {
+          "given_name": "Ana",
+          "surname": "Buyer",
+          "alternate_full_name": "Ana Buyer"
+        },
+        "country_code": "US"
+      },
+      "shipping_info": {
+        "name": "Ana, Buyer"
+      },
+      "cart_info": {
+        "item_details": [
+          {
+            "item_name": "Herbal Tea Blend",
+            "item_description": "Herbal Tea Blend",
+            "item_quantity": "1",
+            "item_unit_price": {
+              "currency_code": "USD",
+              "value": "14.79"
+            },
+            "item_amount": {
+              "currency_code": "USD",
+              "value": "14.79"
+            },
+            "total_item_amount": {
+              "currency_code": "USD",
+              "value": "14.79"
+            }
+          }
+        ]
+      },
+      "store_info": {},
+      "auction_info": {},
+      "incentive_info": {}
+    },
+    {
+      "transaction_info": {
+        "paypal_account_id": "PAYERACCOUNT1",
+        "transaction_id": "TXN00000000000001",
+        "paypal_reference_id": "TXN00000000000000",
+        "paypal_reference_id_type": "TXN",
+        "transaction_event_code": "T1107",
+        "transaction_initiation_date": "2026-11-18T22:18:28Z",
+        "transaction_updated_date": "2026-11-18T22:18:28Z",
+        "transaction_amount": {
+          "currency_code": "USD",
+          "value": "-5.00"
+        },
+        "fee_amount": {
+          "currency_code": "USD",
+          "value": "0.25"
+        },
+        "transaction_status": "S",
+        "ending_balance": {
+          "currency_code": "USD",
+          "value": "100.00"
+        },
+        "available_balance": {
+          "currency_code": "USD",
+          "value": "100.00"
+        },
+        "custom_field": "market:checkout2",
+        "protection_eligibility": "02",
+        "credit_term": "4P",
+        "annual_percentage_rate": "0.0",
+        "instrument_type": "PayPal",
+        "instrument_sub_type": "PayPal Wallet"
+      },
+      "payer_info": {
+        "account_id": "PAYERACCOUNT1",
+        "email_address": "buyer@example.org",
+        "phone_number": {
+          "country_code": "1",
+          "national_number": "5555550100"
+        },
+        "address_status": "N",
+        "payer_status": "Y",
+        "payer_name": {
+          "given_name": "Ana",
+          "surname": "Buyer",
+          "alternate_full_name": "Ana Buyer"
+        },
+        "country_code": "US"
+      },
+      "shipping_info": {
+        "name": "Ana, Buyer"
+      },
+      "cart_info": {
+        "item_details": [{}]
+      },
+      "store_info": {},
+      "auction_info": {},
+      "incentive_info": {}
+    }
+  ],
+  "account_number": "MERCHANT0001",
+  "start_date": "2026-11-01T00:00:00Z",
+  "end_date": "2026-11-20T00:00:00Z",
+  "last_refreshed_datetime": "2026-11-24T23:59:59Z",
+  "page": 1,
+  "total_items": 11,
+  "total_pages": 6,
+  "links": [
+    {
+      "href": "https://api.sandbox.paypal.com/v1/reporting/transactions?start_date=2026-11-01T00:00:00-0000&end_date=2026-11-20T00:00:00-0000&fields=all&page_size=2&page=6",
+      "rel": "last",
+      "method": "GET",
+      "encType": "application/json"
+    },
+    {
+      "href": "https://api.sandbox.paypal.com/v1/reporting/transactions?start_date=2026-11-01T00:00:00-0000&end_date=2026-11-20T00:00:00-0000&fields=all&page_size=2&page=2",
+      "rel": "next",
+      "method": "GET",
+      "encType": "application/json"
+    },
+    {
+      "href": "https://api.sandbox.paypal.com/v1/reporting/transactions?start_date=2026-11-01T00:00:00-0000&end_date=2026-11-20T00:00:00-0000&fields=all&page_size=2&page=1",
+      "rel": "self",
+      "method": "GET",
+      "encType": "application/json"
+    }
+  ]
+}

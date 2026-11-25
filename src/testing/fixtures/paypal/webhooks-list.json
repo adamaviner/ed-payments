@@ -1,0 +1,38 @@
+{
+  "_source": "PayPal sandbox, captured 2026-11-24 (GET /v1/notifications/webhooks; id and URL scrubbed, event types shortened)",
+  "webhooks": [
+    {
+      "id": "WEBHOOK0000000001",
+      "url": "https://example.convex.site/paypal/webhook",
+      "event_types": [
+        {
+          "name": "CHECKOUT.ORDER.APPROVED",
+          "description": "An order has been approved by buyer.",
+          "status": "ENABLED"
+        },
+        {
+          "name": "PAYMENT.CAPTURE.COMPLETED",
+          "description": "A payment capture completes.",
+          "status": "ENABLED"
+        }
+      ],
+      "links": [
+        {
+          "href": "https://api.sandbox.paypal.com/v1/notifications/webhooks/WEBHOOK0000000001",
+          "rel": "self",
+          "method": "GET"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v1/notifications/webhooks/WEBHOOK0000000001",
+          "rel": "update",
+          "method": "PATCH"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v1/notifications/webhooks/WEBHOOK0000000001",
+          "rel": "delete",
+          "method": "DELETE"
+        }
+      ]
+    }
+  ]
+}

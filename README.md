@@ -596,8 +596,12 @@ the wire code (`stripe.*`, `paypal.*`, signatures, parsers) and `STRIPE_EVENTS` 
 `registerPayments(t)` (the component plus fake Stripe and PayPal behind `fetch`), `register(t)`,
 `fakeStripe()` (sessions, customers, saved methods with `saveMethod(customer, 'ok' | 'decline' | 'auth' | 'bank')`,
 PaymentIntents with `confirm`, `settleBank`, `intentEvent`, refunds, disputes, webhook endpoints),
-`fakePaypal()`, the fixtures and event builders. `src/testing/contract.test.ts` checks every fake
-answer against a saved real object.
+`fakePaypal()`, the fixtures and event builders. `src/testing/contract.test.ts` checks every route a
+fake answers, and every webhook body it makes, against a saved real object (`drift`: no invented
+fields, no other types, no null where the processor has a value, every list element). The fakes
+refuse what the processors refuse: Stripe's 400 `idempotency_error` for a key reused with other
+parameters, and PayPal replays a request id's first answer with its first status. The sandbox suites
+compare live answers' fields with the fixtures (`keyDiff`), so a stale fixture shows.
 
 ## Fixtures
 
@@ -606,13 +610,14 @@ answer against a saved real object.
 - **Captured** from Stripe test mode (API `2026-10-28.endive`): sessions, a customer, card and bank
   payment methods and their list, a SetupIntent, off-session PaymentIntents (paid, bank processing),
   an on-session one and its cancel, an expanded one, a list, the 402 decline and authentication errors,
-  the 400 for `payment_method_types`, a 403 for a missing permission. From the PayPal sandbox: a created
-  order, an unapproved order, `ORDER_NOT_APPROVED`, Transaction Search's 403, verification's `FAILURE`.
+  the 400 for `payment_method_types`, the 400 for a reused idempotency key. From the PayPal sandbox: a
+  token, a created order, an unapproved order, `ORDER_NOT_APPROVED`, a 404, Transaction Search's rows and
+  its 403, the webhooks list, verification's `FAILURE`.
 - **Built** from those real objects as the processor documents: the Stripe `checkout.session.*`,
   `payment_intent.*`, `charge.refunded`, `refund.*` and `charge.dispute.*` events; PayPal's approved
   order, `CHECKOUT.ORDER.APPROVED`, `ORDER_ALREADY_CAPTURED` and the dispute events.
-- **Documented samples:** PayPal's captured order and `PAYMENT.CAPTURE.*` events; Stripe's refund and
-  webhook endpoint objects.
+- **Documented samples:** PayPal's captured order and `PAYMENT.CAPTURE.*` events; Stripe's refund,
+  webhook endpoint and deleted webhook endpoint objects.
 - Scrubbed of account ids, key ids, emails, client secrets, merchant and payer ids.
 
 ## Setting up an app's processors
