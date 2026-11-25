@@ -194,7 +194,7 @@ export async function chargeDue(p: Payments, ctx: SchedulerCtx, scheduleId: stri
 
 /** The hourly run (worker().schedules): every due schedule of this app is charged, or one when given. */
 export async function runSchedules(p: Payments, ctx: SchedulerCtx, o: { scheduleId?: string } = {}): Promise<{ charged: number; errors: number }> {
-  const ids = o.scheduleId ? [o.scheduleId] : (await ctx.runQuery(p.component.schedules.due, { now: Date.now(), limit: 100 })).filter((s) => s.app === p.app).map((s) => s.id)
+  const ids = o.scheduleId ? [o.scheduleId] : (await ctx.runQuery(p.component.schedules.due, { app: p.app, now: Date.now(), limit: 100 })).map((s) => s.id)
   const out = { charged: 0, errors: 0 }
   for (const id of ids) {
     try {

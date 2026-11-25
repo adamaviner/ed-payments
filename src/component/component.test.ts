@@ -487,3 +487,55 @@ describe('the refund ledger and disputes', () => {
     expect((await checkout(id)).processorFeeCents).toBe(103)
   })
 })
+
+describe('scans that page past what they skip', () => {
+  test('the sweep’s list leaves out charges handed to a person', async () => {
+    const { mutate, create, read } = setup()
+    const parked = await create({ now: NOW })
+    await mutate(pay.checkouts.attach, { id: parked, processorCheckoutId: 'pi_parked' })
+    await mutate(pay.checkouts.noteChargeAttempt, { id: parked, error: 'no answer', giveUp: true, max: 5, now: NOW })
+    const open = await create({ now: NOW + 1 })
+    expect((await read(pay.checkouts.due, { limit: 1 })).map((c) => c.id)).toEqual([open])
+  })
+
+  test('checkouts created in the same millisecond are all read, a page at a time', async () => {
+    const { create, read } = setup()
+    const ids = new Set<string>()
+    for (let i = 0; i < 5; i++) ids.add(await create({ now: NOW }))
+    const seen = new Set<string>()
+    let cursor: string | null = null
+    for (let i = 0; i < 10; i++) {
+      const page: { page: { id: string }[]; continueCursor: string; isDone: boolean } = await read(pay.checkouts.createdSince, { since: NOW - 1, paginationOpts: { numItems: 2, cursor } })
+      for (const c of page.page) seen.add(c.id)
+      if (page.isDone) break
+      cursor = page.continueCursor
+    }
+    expect(seen).toEqual(ids)
+  })
+
+  test('the schedules due are one app’s, so another app’s waiting ones don’t crowd them out', async () => {
+    const { mutate, read } = setup()
+    const make = (app: string) =>
+      mutate(pay.schedules.create, {
+        app,
+        owner: { type: 'donor', id: app },
+        ref: { type: 'monthly', id: app },
+        purpose: 'donation',
+        description: 'Monthly gift',
+        payer: { email: 'd@example.org' },
+        processor: 'stripe',
+        method: 'card',
+        paymentMethodId: 'pm_1',
+        amountCents: 2500,
+        anchorDay: 1,
+        hourUTC: 15,
+        retryDays: [3],
+        firstChargeAt: NOW,
+        callbacks: {},
+        now: NOW,
+      })
+    await make('other')
+    const ours = await make('test')
+    expect(await read(pay.schedules.due, { app: 'test', now: NOW + DAY, limit: 1 })).toEqual([{ id: ours, app: 'test' }])
+  })
+})

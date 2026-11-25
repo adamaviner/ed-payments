@@ -63,12 +63,12 @@ export async function reconcile(p: Payments, ctx: RunActionCtx, days: number): P
 
 async function checkoutsSince(p: Payments, ctx: RunActionCtx, since: number): Promise<Checkout[]> {
   const all: Checkout[] = []
-  let after: number | undefined
+  let cursor: string | null = null
   for (let i = 0; i < 50; i++) {
-    const page = await ctx.runQuery(p.component.checkouts.createdSince, { since, after, limit: 200 })
-    all.push(...page)
-    if (page.length < 200) break
-    after = page[page.length - 1].createdAt
+    const res: { page: Checkout[]; isDone: boolean; continueCursor: string } = await ctx.runQuery(p.component.checkouts.createdSince, { since, paginationOpts: { numItems: 200, cursor } })
+    all.push(...res.page)
+    if (res.isDone) break
+    cursor = res.continueCursor
   }
   return all.filter((c) => c.app === p.app)
 }

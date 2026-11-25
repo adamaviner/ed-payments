@@ -127,6 +127,11 @@ export default defineSchema({
      * captures it (completeReturn), never the webhook or the sweep. lastError says it for people.
      */
     paypalDeclinedAt: v.optional(v.number()),
+    /**
+     * Left out of the sweep's and cleanup's scans, so rows that stay put can't fill the batch: an
+     * off-session charge handed to a person (until they retry it), or an old failed checkout kept with its refund.
+     */
+    parkedAt: v.optional(v.number()),
     /** The buyer closed it (cancelCheckout): money that arrives anyway is owed back, not kept. */
     cancelledByBuyerAt: v.optional(v.number()),
     /**
@@ -144,7 +149,7 @@ export default defineSchema({
     settledAt: v.optional(v.number()),
     lastError: v.optional(v.string()),
   })
-    .index('by_status_expiresAt', ['status', 'expiresAt'])
+    .index('by_status_parked_expiresAt', ['status', 'parkedAt', 'expiresAt'])
     .index('by_processorCheckoutId', ['processorCheckoutId'])
     .index('by_paymentRef', ['paymentRef'])
     .index('by_ref', ['ref.type', 'ref.id'])
@@ -210,7 +215,7 @@ export default defineSchema({
     createdAt: v.number(),
     updatedAt: v.number(),
   })
-    .index('by_status_nextChargeAt', ['status', 'nextChargeAt'])
+    .index('by_app_status_nextChargeAt', ['app', 'status', 'nextChargeAt'])
     .index('by_owner', ['app', 'owner.type', 'owner.id'])
     .index('by_ref', ['ref.type', 'ref.id'])
     .index('by_paymentMethodId', ['paymentMethodId']),

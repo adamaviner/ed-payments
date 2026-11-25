@@ -233,16 +233,16 @@ export const forRef = query({
   },
 })
 
-/** Schedules the worker should act on now: due charges and retries, and pauses that have ended. */
+/** One app's schedules the worker should act on now: due charges and retries, and pauses that have ended. */
 export const due = query({
-  args: { now: v.number(), limit: v.number() },
+  args: { app: v.string(), now: v.number(), limit: v.number() },
   returns: v.array(v.object({ id: v.string(), app: v.string() })),
-  handler: async (ctx, { now, limit }) => {
+  handler: async (ctx, { app, now, limit }) => {
     const out: { id: string; app: string }[] = []
     for (const status of ['active', 'past_due', 'paused'] as const) {
       const rows = await ctx.db
         .query('schedules')
-        .withIndex('by_status_nextChargeAt', (q) => q.eq('status', status).lte('nextChargeAt', now))
+        .withIndex('by_app_status_nextChargeAt', (q) => q.eq('app', app).eq('status', status).lte('nextChargeAt', now))
         .take(limit)
       out.push(...rows.map((s) => ({ id: s._id as string, app: s.app })))
     }

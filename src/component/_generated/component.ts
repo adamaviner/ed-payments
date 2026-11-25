@@ -348,51 +348,67 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
       createdSince: FunctionReference<
         "query",
         "internal",
-        { after?: number; limit: number; since: number },
-        Array<{
-          amountCents: number;
-          app: string;
-          cancelUrl: string;
-          chargeAttempts: number;
-          chargeKey: string | null;
-          context: any;
-          createdAt: number;
-          declineCode: string | null;
-          declineKind: "hard" | "soft" | "insufficient_funds" | null;
-          description: string;
-          disputed: boolean;
-          expiresAt: number;
-          id: string;
-          kind: "hosted" | "offSession" | "onSession";
-          lastError: string | null;
-          lastTriedAt: number | null;
-          method: "card" | "ach" | "paypal";
-          paidCents: number | null;
-          payer: { email: string; name?: string };
-          paymentMethodId: string | null;
-          paymentRef: string | null;
-          paypalDeclinedAt: number | null;
-          processor: "stripe" | "paypal";
-          processorCheckoutId: string | null;
-          processorFeeCents: number | null;
-          purpose: string;
-          ref: { id: string; type: string };
-          refundedCents: number;
-          retryOf: string | null;
-          returnUrl: string;
-          scheduleId: string | null;
-          schedulePeriod: string | null;
-          settledAt: number | null;
-          status:
-            | "created"
-            | "pending"
-            | "processing"
-            | "paid"
-            | "failed"
-            | "abandoned"
-            | "refund_needed";
-          stripeCustomerId: string | null;
-        }>,
+        {
+          paginationOpts: {
+            cursor: string | null;
+            endCursor?: string | null;
+            id?: number;
+            maximumBytesRead?: number;
+            maximumRowsRead?: number;
+            numItems: number;
+          };
+          since: number;
+        },
+        {
+          continueCursor: string;
+          isDone: boolean;
+          page: Array<{
+            amountCents: number;
+            app: string;
+            cancelUrl: string;
+            chargeAttempts: number;
+            chargeKey: string | null;
+            context: any;
+            createdAt: number;
+            declineCode: string | null;
+            declineKind: "hard" | "soft" | "insufficient_funds" | null;
+            description: string;
+            disputed: boolean;
+            expiresAt: number;
+            id: string;
+            kind: "hosted" | "offSession" | "onSession";
+            lastError: string | null;
+            lastTriedAt: number | null;
+            method: "card" | "ach" | "paypal";
+            paidCents: number | null;
+            payer: { email: string; name?: string };
+            paymentMethodId: string | null;
+            paymentRef: string | null;
+            paypalDeclinedAt: number | null;
+            processor: "stripe" | "paypal";
+            processorCheckoutId: string | null;
+            processorFeeCents: number | null;
+            purpose: string;
+            ref: { id: string; type: string };
+            refundedCents: number;
+            retryOf: string | null;
+            returnUrl: string;
+            scheduleId: string | null;
+            schedulePeriod: string | null;
+            settledAt: number | null;
+            status:
+              | "created"
+              | "pending"
+              | "processing"
+              | "paid"
+              | "failed"
+              | "abandoned"
+              | "refund_needed";
+            stripeCustomerId: string | null;
+          }>;
+          pageStatus?: "SplitRecommended" | "SplitRequired" | null;
+          splitCursor?: string | null;
+        },
         Name
       >;
       due: FunctionReference<
@@ -1517,7 +1533,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
       due: FunctionReference<
         "query",
         "internal",
-        { limit: number; now: number },
+        { app: string; limit: number; now: number },
         Array<{ app: string; id: string }>,
         Name
       >;

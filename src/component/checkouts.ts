@@ -225,7 +225,7 @@ export const settleFailed = mutation({
     const c = await load(ctx, id)
     if (c.status !== 'created' && c.status !== 'pending' && c.status !== 'processing') return { outcome: 'already_handled' as const, status: c.status }
     const wasProcessing = c.status === 'processing'
-    const patch = { status: 'failed' as const, lastError: reason, settledAt: now, processorCheckoutId: c.processorCheckoutId ?? processorCheckoutId, declineCode, declineKind }
+    const patch = { status: 'failed' as const, lastError: reason, settledAt: now, processorCheckoutId: c.processorCheckoutId ?? processorCheckoutId, declineCode, declineKind, parkedAt: undefined }
     await ctx.db.patch(c._id, patch)
     if (declined && c.paymentMethodId) await markDeclined(ctx, c.paymentMethodId, reason, now)
     await resolveIssue(ctx, c._id, 'charge_unknown', now)
@@ -249,7 +249,14 @@ export const noteChargeAttempt = mutation({
     // Handed to a person: counted as the last try, so the sweep leaves it to them.
     const attempts = giveUp ? Math.max((c.chargeAttempts ?? 0) + 1, max) : (c.chargeAttempts ?? 0) + 1
     const ref = c.processorCheckoutId ?? processorCheckoutId
-    await ctx.db.patch(c._id, { chargeAttempts: attempts, lastTriedAt: now, lastError: error, processorCheckoutId: ref, status: c.status === 'created' ? 'pending' : c.status })
+    await ctx.db.patch(c._id, {
+      chargeAttempts: attempts,
+      lastTriedAt: now,
+      lastError: error,
+      processorCheckoutId: ref,
+      status: c.status === 'created' ? 'pending' : c.status,
+      ...(giveUp ? { parkedAt: now } : {}),
+    })
     if (giveUp) {
       await openIssue(ctx, {
         kind: 'charge_unknown',
@@ -276,6 +283,7 @@ export const reopenCharge = mutation({
     const c = await load(ctx, id)
     if (c.kind !== 'offSession') throw new ConvexError('Only a saved-method charge can be retried.')
     if (c.status !== 'created' && c.status !== 'pending') throw new ConvexError(`This charge is ${c.status}; there is nothing to retry.`)
+    if (c.parkedAt !== undefined) await ctx.db.patch(c._id, { parkedAt: undefined })
     await resolveIssue(ctx, c._id, 'charge_unknown', now)
     return null
   },
@@ -550,20 +558,20 @@ export const retriesOf = query({
   },
 })
 
-/** Checkouts created since a time, oldest first, for the nightly comparison. */
+/** Checkouts created since a time, oldest first, a page at a time, for the nightly comparison. */
 export const createdSince = query({
-  args: { since: v.number(), after: v.optional(v.number()), limit: v.number() },
-  returns: v.array(checkoutView),
-  handler: async (ctx, { since, after, limit }) => {
-    const rows = await ctx.db
+  args: { since: v.number(), paginationOpts: paginationOptsValidator },
+  returns: paginationResultValidator(checkoutView),
+  handler: async (ctx, { since, paginationOpts }) => {
+    const page = await ctx.db
       .query('checkouts')
-      .withIndex('by_createdAt', (q) => (after === undefined ? q.gte('createdAt', since) : q.gt('createdAt', after)))
-      .take(limit)
-    return rows.map(view)
+      .withIndex('by_createdAt', (q) => q.gte('createdAt', since))
+      .paginate(paginationOpts)
+    return { ...page, page: page.page.map(view) }
   },
 })
 
-/** Not-final checkouts for sweep: every created/pending/processing row, oldest expiry first. */
+/** Not-final checkouts for sweep: every created/pending/processing row not handed to a person, oldest expiry first. */
 export const due = query({
   args: { limit: v.number() },
   returns: v.array(checkoutView),
@@ -573,7 +581,7 @@ export const due = query({
       out.push(
         ...(await ctx.db
           .query('checkouts')
-          .withIndex('by_status_expiresAt', (q) => q.eq('status', status))
+          .withIndex('by_status_parked_expiresAt', (q) => q.eq('status', status).eq('parkedAt', undefined))
           .take(limit)),
       )
     }
