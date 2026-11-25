@@ -110,7 +110,7 @@ export interface ProcessingFeeComparison {
   achFeeCents: number
   /** How much paying by ACH saves. */
   achSavingsCents: number
-  /** Suggest ACH: the transaction is large. */
+  /** Suggest ACH: the total paid by card (the fee included when the buyer covers it) is large. */
   steerToAch: boolean
 }
 
@@ -118,7 +118,8 @@ export interface ProcessingFeeComparison {
 export function compareProcessingFees(netCents: number, covered: boolean, schedules: { card: FeeSchedule; ach: FeeSchedule }, thresholdCents?: number): ProcessingFeeComparison {
   const cardFeeCents = processingFeeFor(netCents, schedules.card, covered)
   const achFeeCents = processingFeeFor(netCents, schedules.ach, covered)
-  return { cardFeeCents, achFeeCents, achSavingsCents: Math.max(0, cardFeeCents - achFeeCents), steerToAch: isLargeTransaction(netCents, thresholdCents) }
+  const cardTotalCents = covered ? netCents + cardFeeCents : netCents
+  return { cardFeeCents, achFeeCents, achSavingsCents: Math.max(0, cardFeeCents - achFeeCents), steerToAch: isLargeTransaction(cardTotalCents, thresholdCents) }
 }
 
 /** What a card charge of this amount costs at each processor, and the cheaper one. */

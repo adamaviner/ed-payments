@@ -58,6 +58,8 @@
       "customer_creation": "if_required",
       "customer_details": {
         "email": "buyer@example.org",
+        "business_name": null,
+        "individual_name": null,
         "name": "Test Buyer",
         "address": null,
         "phone": null,

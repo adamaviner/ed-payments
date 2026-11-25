@@ -13,11 +13,12 @@
 //
 // The Elements options come from the same constants as the server's intents (core/savedMethods.ts),
 // because Stripe refuses to confirm an intent whose method types or options differ from the form's.
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { SAVED_METHOD_OPTIONS, SAVED_METHOD_TYPES, stripeMethodType, type SavedMethodType } from '../core/savedMethods.js'
 import type { SavedMethodKind } from '../core/types.js'
 import { loadScript, STRIPE_JS, useSlow, type Load } from './embedded.js'
 import { errorMessage } from './errors.js'
+import { useLatest, useOneAtATime } from './hooks.js'
 import { Button, cn, ErrorNote } from './ui.js'
 
 /**
@@ -111,10 +112,7 @@ function usePaymentElement(publishableKey: string, options: Omit<StripeElementsO
   // Strings, so objects made fresh on every render don't mount the element again.
   const optionsKey = JSON.stringify(options)
   const appearanceKey = JSON.stringify(appearance ?? {})
-  const latest = useRef({ appearanceKey, onChange })
-  useEffect(() => {
-    latest.current = { appearanceKey, onChange }
-  }, [appearanceKey, onChange])
+  const latest = useLatest({ appearanceKey, onChange })
 
   useEffect(() => {
     elementsNow.current?.update({ appearance: JSON.parse(appearanceKey) as StripeAppearance })
@@ -127,7 +125,7 @@ function usePaymentElement(publishableKey: string, options: Omit<StripeElementsO
       console.error('payments: Stripe’s payment form didn’t load:', err)
       if (live) setLoad('failed')
     }
-    loadScript(STRIPE_JS).then(() => {
+    loadScript(STRIPE_JS, 'Stripe').then(() => {
       const make = stripeJs()
       if (!live || !box.current) return
       if (!make) return failed(new Error('Stripe.js loaded without Stripe.'))
@@ -155,7 +153,7 @@ function usePaymentElement(publishableKey: string, options: Omit<StripeElementsO
       elementsNow.current = null
       element?.destroy()
     }
-  }, [publishableKey, optionsKey])
+  }, [publishableKey, optionsKey, latest])
 
   return { box, form, load }
 }
@@ -214,15 +212,12 @@ export interface StripeSaveMethodProps {
 
 /** Stripe's Payment Element (card or bank account) and one button that saves the method, then calls onSaved. */
 export function StripeSaveMethod({ publishableKey, methods = [], createSetupIntent, onSaved, submitLabel, disabled, note, appearance, returnUrl, className }: StripeSaveMethodProps) {
-  const [busy, setBusy] = useState(false)
+  const { busy, run } = useOneAtATime()
   const [error, setError] = useState<string | null>(null)
   // A method Stripe saved whose onSaved threw: used again rather than saving another, until the fields change.
   const saved = useRef<string | null>(null)
   const { box, form, load } = usePaymentElement(publishableKey, saveMethodElementsOptions(methods), appearance, () => (saved.current = null))
-  const latest = useRef({ createSetupIntent, onSaved })
-  useEffect(() => {
-    latest.current = { createSetupIntent, onSaved }
-  }, [createSetupIntent, onSaved])
+  const latest = useLatest({ createSetupIntent, onSaved })
 
   /** Checks the fields, then the SetupIntent, then Stripe confirms it (a bank login or 3-D Secure if needed). */
   const saveMethod = async ({ stripe, elements }: Form) => {
@@ -234,19 +229,18 @@ export function StripeSaveMethod({ publishableKey, methods = [], createSetupInte
     return methodIdOf(setupIntent) ?? refused(undefined, 'Stripe didn’t save the payment method. Please try again.')
   }
 
-  const submit = async () => {
-    if (!form.current || busy) return
-    setBusy(true)
-    setError(null)
-    try {
-      saved.current ??= await saveMethod(form.current)
-      await latest.current.onSaved(saved.current)
-    } catch (err) {
-      setError(err instanceof Refused ? err.message : errorMessage(err, 'The payment method couldn’t be saved. Please try again.'))
-    } finally {
-      setBusy(false)
-    }
-  }
+  const submit = () =>
+    run(async () => {
+      const f = form.current
+      if (!f) return
+      setError(null)
+      try {
+        saved.current ??= await saveMethod(f)
+        await latest.current.onSaved(saved.current)
+      } catch (err) {
+        setError(err instanceof Refused ? err.message : errorMessage(err, 'The payment method couldn’t be saved. Please try again.'))
+      }
+    })
 
   return (
     <div className={cn('flex flex-col gap-2', className)}>
@@ -295,17 +289,17 @@ export interface StripeRetryPaymentProps {
 
 /** Stripe's Payment Element and one button that pays a declined charge on the page (payments.retryOnSession). */
 export function StripeRetryPayment({ publishableKey, amountCents, createPayment, onPaid, submitLabel, disabled, note, appearance, returnUrl, className }: StripeRetryPaymentProps) {
-  const [busy, setBusy] = useState(false)
+  const { busy, run } = useOneAtATime()
+  // A ref as well as state: a second press in the same tick must not pay again.
+  const paidRef = useRef(false)
   const [paid, setPaid] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const { box, form, load } = usePaymentElement(publishableKey, retryPaymentElementsOptions(amountCents), appearance, () => {})
-  const latest = useRef({ createPayment, onPaid })
-  useEffect(() => {
-    latest.current = { createPayment, onPaid }
-  }, [createPayment, onPaid])
+  const latest = useLatest({ createPayment, onPaid })
 
   const settle = (pi: PaymentIntent | undefined) => {
     const outcome = outcomeOf(pi) ?? refused(undefined, 'The payment didn’t go through. Please try again.')
+    paidRef.current = true
     setPaid(true)
     latest.current.onPaid(outcome)
   }
@@ -319,18 +313,17 @@ export function StripeRetryPayment({ publishableKey, amountCents, createPayment,
     settle(paymentIntent)
   }
 
-  const submit = async () => {
-    if (!form.current || busy || paid) return
-    setBusy(true)
-    setError(null)
-    try {
-      await pay(form.current)
-    } catch (err) {
-      setError(err instanceof Refused ? err.message : errorMessage(err, 'The payment couldn’t be started. Please try again.'))
-    } finally {
-      setBusy(false)
-    }
-  }
+  const submit = () =>
+    run(async () => {
+      const f = form.current
+      if (!f || paidRef.current) return
+      setError(null)
+      try {
+        await pay(f)
+      } catch (err) {
+        setError(err instanceof Refused ? err.message : errorMessage(err, 'The payment couldn’t be started. Please try again.'))
+      }
+    })
 
   return (
     <div className={cn('flex flex-col gap-2', className)}>
@@ -353,6 +346,11 @@ export function StripeRetryPayment({ publishableKey, amountCents, createPayment,
  */
 export type StripeSetupReturn = { state: 'none' } | { state: 'checking' } | { state: 'saved'; paymentMethodId: string } | { state: 'processing' } | { state: 'failed' } | { state: 'unknown' }
 
+const subscribeToHistory = (changed: () => void) => {
+  window.addEventListener('popstate', changed)
+  return () => window.removeEventListener('popstate', changed)
+}
+
 const setupSecretIn = (search: string) => new URLSearchParams(search).get('setup_intent_client_secret')
 
 const setupAnswer = (si: SetupIntent | undefined): StripeSetupReturn => {
@@ -370,22 +368,23 @@ const setupAnswer = (si: SetupIntent | undefined): StripeSetupReturn => {
  * finish with the saved method, which the app's own savedMethods call now offers.
  *
  * Pass `search` from the app's router (e.g. Next's useSearchParams().toString()); it is followed as it
- * changes. Without it the address is read after mounting, so a server render and the first client
- * render agree, and later changes to the address aren't seen.
+ * changes. Without it the address is read from window.location (none on the server, so a server
+ * render and the first client render agree), again on back and forward.
  */
 export function useStripeSetupReturn(publishableKey: string, search?: string): StripeSetupReturn {
-  const [mountedSearch, setMountedSearch] = useState<string | null>(null)
-  useEffect(() => {
-    if (search === undefined) setMountedSearch(window.location.search)
-  }, [search])
-  const secret = setupSecretIn(search ?? mountedSearch ?? '')
+  const addressSearch = useSyncExternalStore(
+    subscribeToHistory,
+    () => window.location.search,
+    () => '',
+  )
+  const secret = setupSecretIn(search ?? addressSearch)
   const [answered, setAnswered] = useState<{ secret: string; answer: StripeSetupReturn } | null>(null)
   useEffect(() => {
     if (!secret) return undefined
     let live = true
     const settle = (answer: StripeSetupReturn) => live && setAnswered({ secret, answer })
     const ask = async () => {
-      await loadScript(STRIPE_JS)
+      await loadScript(STRIPE_JS, 'Stripe')
       const make = stripeJs()
       if (!make) return settle({ state: 'unknown' })
       const { error, setupIntent } = await make(publishableKey).retrieveSetupIntent(secret)

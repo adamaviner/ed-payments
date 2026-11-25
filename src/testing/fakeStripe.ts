@@ -66,7 +66,7 @@ export function fakeStripe({ webhookSecret = FAKE_STRIPE_WEBHOOK_SECRET, fallbac
   /** PaymentIntents made directly (saved-method charges and on-session payments). */
   const paymentIntents = new Map<string, StripePaymentIntent>()
   const endpoints = new Map<string, StripeWebhookEndpoint>()
-  const idempotent = new Map<string, { status: number; body: unknown }>()
+  const idempotent = new Map<string, { request: string; status: number; body: unknown }>()
   const calls: Call[] = []
   let n = 0
   /** Set to answer a call with this instead (e.g. Stripe being down). */
@@ -152,6 +152,8 @@ export function fakeStripe({ webhookSecret = FAKE_STRIPE_WEBHOOK_SECRET, fallbac
       if (m.behaviour === 'insufficient') Object.assign(err.error, { decline_code: 'insufficient_funds', message: 'Your card has insufficient funds.' })
       if (m.behaviour === 'lost') Object.assign(err.error, { decline_code: 'lost_card', advice_code: 'do_not_try_again', message: 'Your card has been declined.' })
       pi.status = 'requires_payment_method'
+      // The declined charge stays the intent's latest, as in Stripe's decline (error-card-declined.json).
+      pi.latest_charge = `ch_${pi.id}`
       pi.last_payment_error = {
         message: String(err.error.message),
         code: String(err.error.code),
@@ -160,8 +162,11 @@ export function fakeStripe({ webhookSecret = FAKE_STRIPE_WEBHOOK_SECRET, fallbac
       }
       return { status: 402, body: { error: { ...err.error, payment_intent: structuredClone(pi), payment_method: structuredClone(m.pm) } } }
     }
-    if (m.behaviour === 'bank') pi.status = 'processing'
-    else paid(pi)
+    if (m.behaviour === 'bank') {
+      // A bank debit has its charge from the start, as Stripe answered (payment-intent-off-session-bank.json).
+      pi.status = 'processing'
+      pi.latest_charge = `ch_${pi.id}`
+    } else paid(pi)
     return { status: 200, body: structuredClone(pi) }
   }
 
@@ -188,11 +193,21 @@ export function fakeStripe({ webhookSecret = FAKE_STRIPE_WEBHOOK_SECRET, fallbac
     const refused = refuse?.(call)
     if (refused) return refused
     const key = new Headers(init?.headers).get('idempotency-key')
-    // Stripe replays a key's first answer, errors included.
+    // Stripe replays a key's first answer, errors included, but only for the same request: the same key
+    // with other parameters is refused (400 idempotency_error), so a key reused by mistake shows here.
+    const request = `${method} ${url.pathname} ${[...params.entries()]
+      .map(([k, x]) => `${k}=${x}`)
+      .sort()
+      .join('&')}`
     const seen = key ? idempotent.get(key) : undefined
+    if (seen && seen.request !== request) {
+      const refusal = fixture(stripeObjectFixtures.errorIdempotencyKeyReused)
+      refusal.error.message = `Keys for idempotent requests can only be used with the same parameters they were first used with. Try using a key other than '${key}' if you meant to execute a different request.`
+      return fail(400, refusal)
+    }
     if (seen) return Response.json(seen.body, { status: seen.status })
     const answer = (status: number, body: unknown) => {
-      if (key) idempotent.set(key, { status, body })
+      if (key) idempotent.set(key, { request, status, body })
       return Response.json(body, { status })
     }
     const remember = (body: unknown) => answer(200, body)
@@ -204,7 +219,9 @@ export function fakeStripe({ webhookSecret = FAKE_STRIPE_WEBHOOK_SECRET, fallbac
       if (params.get('ui_mode') === 'embedded')
         return Response.json({ error: { type: 'invalid_request_error', message: 'The ui_mode value `embedded` is no longer supported. Use `embedded_page` instead.' } }, { status: 400 })
       const id = `cs_test_fake${++n}`
-      const base = fixture(stripeObjectFixtures.sessionOpen) as unknown as StripeSession
+      const m = params.get('allowed_payment_method_types[0]') ?? 'card'
+      // Each from the real session for its method: a bank account's has no card options.
+      const base = fixture(m === 'us_bank_account' ? stripeObjectFixtures.sessionAchOpen : stripeObjectFixtures.sessionOpen) as unknown as StripeSession
       // An embedded session (as in test mode on 2026-10-28.endive) has no page of its own, only a client secret for Stripe.js.
       const embedded = params.get('ui_mode') === 'embedded_page'
       const s: StripeSession = {
@@ -222,7 +239,6 @@ export function fakeStripe({ webhookSecret = FAKE_STRIPE_WEBHOOK_SECRET, fallbac
         expires_at: Number(params.get('expires_at')),
       }
       const amount = s.amount_total ?? 0
-      const m = params.get('allowed_payment_method_types[0]') ?? 'card'
       const customer = params.get('customer')
       if (customer && params.has('customer_email')) return fail(400, { error: { type: 'invalid_request_error', message: 'You may only specify one of these parameters: customer, customer_email.' } })
       const saves = params.get('payment_intent_data[setup_future_usage]') === 'off_session'
@@ -294,6 +310,7 @@ export function fakeStripe({ webhookSecret = FAKE_STRIPE_WEBHOOK_SECRET, fallbac
           return fail(400, { error: { type: 'invalid_request_error', code: 'payment_intent_unexpected_state', message: `This PaymentIntent's status is ${pi.status}.` } })
         }
         pi.status = 'canceled'
+        Object.assign(pi, { canceled_at: nowSec() })
         return ok(pi)
       }
       const x = [...sessions.values()].find((y) => y.s.payment_intent === path[2])
@@ -332,7 +349,8 @@ export function fakeStripe({ webhookSecret = FAKE_STRIPE_WEBHOOK_SECRET, fallbac
 
     // Webhook endpoints
     if (url.pathname === '/v1/webhook_endpoints') {
-      if (method === 'GET') return ok({ object: 'list', data: [...endpoints.values()], has_more: false, url: url.pathname })
+      // Stripe shows an endpoint's secret only in the answer that made it.
+      if (method === 'GET') return ok({ object: 'list', data: [...endpoints.values()].map(({ secret: _secret, ...shown }) => shown), has_more: false, url: url.pathname })
       const base = fixture(stripeObjectFixtures.webhookEndpoint) as unknown as StripeWebhookEndpoint
       const w: StripeWebhookEndpoint = {
         ...base,
@@ -468,6 +486,9 @@ export function fakeStripe({ webhookSecret = FAKE_STRIPE_WEBHOOK_SECRET, fallbac
       const x = session(id)
       const ach = x.method === 'us_bank_account'
       x.s.status = 'complete'
+      // A finished session knows the buyer's name, as checkout.session.completed carries it.
+      const shown = x.s as StripeSession & { customer_details?: Record<string, unknown> | null }
+      if (shown.customer_details) shown.customer_details = { ...shown.customer_details, name: 'Test Buyer', tax_ids: [] }
       x.s.payment_status = ach ? 'unpaid' : 'paid'
       if (x.saves && x.customer) {
         // What setup_future_usage leaves behind: the method on the Customer, and a PaymentIntent paid with it.

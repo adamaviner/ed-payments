@@ -27,3 +27,23 @@ the v0.2 plan ("own all payment paths, bids included").
 - Never use live processor keys in tests or fixtures; fixtures are scrubbed of personal data, account and key ids, client secrets.
 - Comments explain why, in plain sentences.
 - Release only with `npm run release -- X.Y.Z`; never commit `dist` on a branch.
+
+## Where things are
+
+- Hosted checkouts, refunds, sweep: `src/client/index.ts` (being split into `hosted.ts` / `refunds.ts` / `sweep.ts`)
+- Saved methods + off-session charges: `src/client/saved.ts`; PayPal vault: `src/client/paypalVault.ts`
+- Monthly schedules: `src/component/schedules.ts` (state) + `src/client/schedules.ts` (charging)
+- Admin functions: `src/client/api.ts` (`adminApi` / `publicApi` / `worker`); admin page: `src/react/PaymentsAdminPage.tsx`
+- Fakes: `src/testing/fake{Stripe,Paypal}.ts`; every route they answer and every webhook they make has a line in
+  `src/testing/contract.test.ts` (`drift` in `src/testing/drift.ts`)
+
+## Money invariants (tests must cover any change to them)
+
+- One payment per thing: a second payment for the same retry chain OR the same schedule period settles as refund_needed.
+- State flags are fields, never `lastError` text.
+- Index scans use cursors; a row that is skipped must leave the scanned range.
+
+## Releasing
+
+- After a release, update README "Status" and the install tag in "Adopt in 5 steps"; a hand-off note is per-task and is deleted when the task ends.
+- Release from main only, after the stage branch is merged (v0.6.0 forked once).

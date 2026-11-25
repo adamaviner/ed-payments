@@ -1,5 +1,5 @@
 {
-  "_source": "PayPal sandbox 2026-11-19: POST /v2/checkout/orders on the saved card (vault_id, stored_credential MERCHANT), return=representation, ids scrubbed",
+  "_source": "PayPal sandbox 2026-11-19: POST /v2/checkout/orders on the saved card (vault_id, stored_credential MERCHANT), return=representation, ids scrubbed; invoice_id (on the unit and its capture) as the sandbox answered once the library sent one, 2026-11-24",
   "id": "VAULTORDER1",
   "intent": "CAPTURE",
   "status": "COMPLETED",
@@ -30,6 +30,7 @@
       },
       "description": "Winning bid",
       "custom_id": "test:checkout1",
+      "invoice_id": "test-checkout1",
       "soft_descriptor": "TESTFACILIT",
       "supplementary_data": {
         "risk": {
@@ -64,6 +65,7 @@
               }
             },
             "custom_id": "test:checkout1",
+            "invoice_id": "test-checkout1",
             "links": [
               {
                 "href": "https://api.sandbox.paypal.com/v2/payments/captures/VAULTCAPTURE1",

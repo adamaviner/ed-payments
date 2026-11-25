@@ -151,12 +151,17 @@ describe('compareProcessingFees', () => {
         expect(c.cardFeeCents).toBe(processingFeeFor(net, card, covered))
         expect(c.achFeeCents).toBe(processingFeeFor(net, ach, covered))
         expect(c.achSavingsCents).toBe(c.cardFeeCents - c.achFeeCents)
-        expect(c.steerToAch).toBe(net >= LARGE_TRANSACTION_THRESHOLD_CENTS)
+        expect(c.steerToAch).toBe(net + (covered ? c.cardFeeCents : 0) >= LARGE_TRANSACTION_THRESHOLD_CENTS)
       }
     }
     expect(isLargeTransaction(LARGE_TRANSACTION_THRESHOLD_CENTS - 1)).toBe(false)
     expect(isLargeTransaction(LARGE_TRANSACTION_THRESHOLD_CENTS)).toBe(true)
     expect(isLargeTransaction(100, 100)).toBe(true)
+  })
+
+  test('steers on the total the buyer would pay by card, the covered fee included, not on the price alone', () => {
+    expect(compareProcessingFees(49_000, true, { card, ach }).steerToAch).toBe(true)
+    expect(compareProcessingFees(49_000, false, { card, ach }).steerToAch).toBe(false)
   })
 
   test('the $500 comparison behind the threshold', () => {

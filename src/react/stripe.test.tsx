@@ -269,15 +269,18 @@ test('setup return: the SetupIntent in the address is asked about; saved gives i
   expect(retrieveSetupIntent).toHaveBeenCalledWith('seti_1_secret_x')
 })
 
-test('setup return: without search, the address is read after mounting (the first render matches a server render)', async () => {
+test('setup return: without search, the address is read from window.location, after a hydrating render that matches the server’s', async () => {
   window.history.replaceState(null, '', '/item?setup_intent_client_secret=seti_1_secret_x')
   retrieveSetupIntent.mockResolvedValue({ setupIntent: { status: 'succeeded', payment_method: 'pm_9' } })
   const seen: string[] = []
-  const { result } = renderHook(() => {
-    const r = useStripeSetupReturn('pk_test_1')
-    seen.push(r.state)
-    return r
-  })
+  const { result } = renderHook(
+    () => {
+      const r = useStripeSetupReturn('pk_test_1')
+      seen.push(r.state)
+      return r
+    },
+    { hydrate: true },
+  )
   expect(seen[0]).toBe('none')
   await finishScript()
   await waitFor(() => expect(result.current).toEqual({ state: 'saved', paymentMethodId: 'pm_9' }))
