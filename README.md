@@ -592,8 +592,8 @@ AGENTS.md      the rules for apps that use it (shipped in the package)
 
 | Method                                                                                  | From                     | Does                                                                                                                                                           |
 | --------------------------------------------------------------------------------------- | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `start(ctx, args)`                                                                      | action                   | A hosted checkout; `{ checkoutId, redirectUrl }`, or with `ui: 'embedded'` `{ checkoutId, embedded }`. Rate-limited.                                           |
-| `cancel(ctx, checkoutId, { limitKey? })`                                                | action                   | Closes an unpaid hosted checkout the buyer won't use (Edit); gives their start back. `{ status }`, or null.                                                    |
+| `start(ctx, args)`                                                                      | action                   | `{ checkoutId, redirectUrl }`; `ui: 'embedded'`: `{ checkoutId, embedded }`; `ui: 'onPage'`: `{ checkoutId, onPage, reused }` (below). Rate-limited.           |
+| `cancel(ctx, checkoutId, { limitKey? })`                                                | action                   | Closes an unpaid hosted or on-page checkout the buyer won't use (Edit); gives their start back. `{ status }`, or null.                                         |
 | `setupPaymentMethod(ctx, { owner, payer, methods? })`                                   | action                   | `{ clientSecret, stripeCustomerId }`; call it on submit, from `StripeSaveMethod`'s `createSetupIntent` (`methods: ['ach']`: bank accounts only). Rate-limited. |
 | `setupPaypalMethod(ctx, { owner, payer, kind, description? })`                          | action                   | `{ setupTokenId, clientId }` for `PaypalCardFields` (`kind: 'card'`) or `PaypalSaveButton` (`'paypal'`). Rate-limited.                                         |
 | `savePaypalMethod(ctx, { owner, setupTokenId })`                                        | action                   | The saved method; refuses another owner's token or a card that failed its check. Rate-limited.                                                                 |
@@ -616,6 +616,21 @@ AGENTS.md      the rules for apps that use it (shipped in the package)
 | `worker()`, `adminApi({ skipApproval })`, `publicApi()`                                 | –                        | Functions for the app to export (see step 4).                                                                                                                  |
 | `sweep`, `reconcile`, `cleanup`, `issuesDigest`                                         | action/mutation          | The upkeep the crons run.                                                                                                                                      |
 | `args.paid` … `args.issues`, `paidReturns`                                              | –                        | Callback validators with the app's context (also `callbackArgs(validator)`, and untyped `paidArgs`…).                                                          |
+
+**`ui: 'onPage'` and `replaces`.** `start` and `startScheduleCheckout` with `ui: 'onPage'` make the payment when the
+payer presses pay on the app's own form, and return `onPage` for the browser: Stripe `{ processor, clientSecret, returnUrl }`
+(a PaymentIntent for the one method chosen, `card` or `ach`, confirmed by the Payment Element in deferred-intent mode; on a
+schedule's first payment it is the payer's Customer's with `setup_future_usage: 'off_session'`, and the method is saved to
+the schedule before the payment settles), or PayPal `{ processor, orderId, clientId, returnUrl, only? }` (the same order as
+`ui: 'embedded'`). The checkout's `kind` is `onPage` in the callbacks; its PaymentIntent's webhooks, `completeReturn`
+(Stripe's `payment_intent`), the sweep and `cancel` settle or close it. Pass the `checkoutId` the payer's last press got
+as `replaces`: while that checkout is still open with ten minutes or more left, for the same `ref` and `purpose`, amount,
+processor, method and schedule (a starting schedule of the same owner) or none, the same client secret or order comes back
+with `reused: true` and nothing is counted. Otherwise it is cancelled (its start given back; a starting schedule ends as
+`not_started`) and a new one started. One for the same `ref` and `purpose` that is paid or on its way is refused ("This is
+already paid." / "A payment for this is already on its way."). After a PayPal card decline the same order comes back; when
+PayPal won't take it again (`MAX_NUMBER_OF_PAYMENT_ATTEMPTS_EXCEEDED`, `ORDER_EXPIRED`, or the order is gone) the library makes
+a new order under the same checkout, counting no new start, and never captures the old one.
 
 `adminApi` functions take an optional `auth` argument, passed to `authorize.admin` as it came (for apps
 with their own session tokens); apps on Convex auth leave it out, as the caller's identity carries

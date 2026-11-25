@@ -134,6 +134,8 @@ export function fakeStripe({ webhookSecret = FAKE_STRIPE_WEBHOOK_SECRET, fallbac
       status: 'requires_payment_method',
       customer: params.get('customer'),
       payment_method: params.get('payment_method'),
+      // What saves the method that pays it to the Customer (confirm leaves it there).
+      setup_future_usage: params.get('setup_future_usage') === 'off_session' ? 'off_session' : null,
       metadata: { app: params.get('metadata[app]') ?? '', checkoutId: params.get('metadata[checkoutId]') ?? '' },
       client_secret: `${id}_secret_fake${n}`,
       latest_charge: null,
@@ -561,11 +563,13 @@ export function fakeStripe({ webhookSecret = FAKE_STRIPE_WEBHOOK_SECRET, fallbac
     },
     /**
      * The buyer confirms an on-session PaymentIntent in the Payment Element with a method like
-     * `behaviour`. Returns the webhook for the outcome (succeeded, processing or payment_failed).
+     * `behaviour` (saved to its Customer when it was made with setup_future_usage). Returns the
+     * webhook for the outcome (succeeded, processing or payment_failed).
      */
     async confirm(id: string, behaviour: FakeMethodBehaviour = 'ok', o: { eventId?: string } = {}) {
       const pi = intent(id)
-      const pm = makeMethod(typeof pi.customer === 'string' ? pi.customer : null, behaviour)
+      // Only setup_future_usage leaves the method on the Customer, as at Stripe.
+      const pm = makeMethod(typeof pi.customer === 'string' && pi.setup_future_usage ? pi.customer : null, behaviour)
       confirmWith(pi, pm.id)
       return await intentEvent(pi, o.eventId)
     },

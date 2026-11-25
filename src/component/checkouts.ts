@@ -125,6 +125,23 @@ export const attach = mutation({
   },
 })
 
+/**
+ * An on-page PayPal checkout whose order PayPal won't take again (too many tries, expired): the
+ * payment goes on under a new order. The old order is never captured (capturePaypal takes only the
+ * checkout's own), and its decline was the old order's, so the new one may be captured by the
+ * webhook or the sweep once the buyer approves it. Refused while a capture holds the checkout.
+ */
+export const reorder = mutation({
+  args: { id: v.string(), processorCheckoutId: v.string() },
+  returns: v.union(v.object({ outcome: v.literal('reordered') }), already),
+  handler: async (ctx, { id, processorCheckoutId }) => {
+    const c = await loadCheckout(ctx, id)
+    if (c.status !== 'pending' || c.kind !== 'onPage' || c.processor !== 'paypal' || c.captureClaimedAt !== undefined) return { outcome: 'already_handled' as const, status: c.status }
+    await ctx.db.patch(c._id, { processorCheckoutId, paypalDeclinedAt: undefined })
+    return { outcome: 'reordered' as const }
+  },
+})
+
 /** The processor couldn't make its checkout; start throws to the buyer, and the row is closed. */
 export const failStart = mutation({
   args: { id: v.string(), error: v.string(), now: v.number() },
