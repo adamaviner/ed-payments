@@ -9,3 +9,7 @@ test('an id must look like a Convex id, not any string, so a wrong one is refuse
   expect(mismatch(validator, { order: 'order 12!' })).toBe('context.order should be a document id')
   expect(mismatch(validator, { order: 'jh7dbvbtz2y6n8z9n4ntdyyq7h6y6rhy' })).toBeNull()
 })
+
+test('an id made by convex-test, which names its table in mixed case, is an id', () => {
+  expect(mismatch(v.object({ gift: v.id('monthlyDonations') }), { gift: '0000000000000000001monthlyDonations' })).toBeNull()
+})

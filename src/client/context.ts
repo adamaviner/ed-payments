@@ -65,6 +65,6 @@ export function mismatch(validator: GenericValidator, value: unknown, path = 'co
   return null
 }
 
-const CONVEX_ID = /^[0-9a-z]{20,64}$/
+const CONVEX_ID = /^[0-9a-zA-Z]{20,128}$/
 
 const isPlainObject = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null && !Array.isArray(x)

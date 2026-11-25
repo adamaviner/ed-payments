@@ -745,6 +745,7 @@ Nothing to migrate; these change what a host sees:
   `limitKey`, which now counts instead of the signed-in user too (`start`'s did only for signed-out payers).
 - **A `v.id()` in the context** must look like a Convex id (it was any string).
 - **PayPal webhooks** sent more than ten minutes before they arrive are refused (400) without asking PayPal.
+- **`compareProcessingFees` steers to ACH on the total paid by card** (the fee included when the buyer covers it), not on the amount before fees. An app that greys out the card option on its own rule should use `steerToAch` so the two agree.
 - **Register the webhooks again** (`npx ed-payments webhooks --paypal …`): `VAULT.PAYMENT-TOKEN.CREATED` is
   new. A schedule whose first PayPal payment saves the method after the capture (vault `APPROVED`) waits up to
   three days for the token instead of lapsing at its next charge: the schedules worker reads the order again
