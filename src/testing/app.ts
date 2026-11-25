@@ -34,7 +34,7 @@ export const context = v.object({
 type Ctx = (typeof context)['type']
 
 // The test app's modules only exist after defineModules, so the references are read when used.
-const wiring: PaymentsWiring<Ctx> = {
+export const wiring: PaymentsWiring<Ctx> = {
   get on() {
     const h = defined.internal.host
     return {

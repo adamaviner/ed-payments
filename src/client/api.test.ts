@@ -3,7 +3,9 @@
 // amounts, and no secret ever stored or said.
 import { ConvexError } from 'convex/values'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
-import { app, crons, defined, payments } from '../testing/app.js'
+import { cronJobs } from 'convex/server'
+import { definePayments } from './index.js'
+import { app, context, crons, defined, payments, wiring } from '../testing/app.js'
 import { fakePaypal, type FakePaypal } from '../testing/fakePaypal.js'
 import { fakeStripe, type FakeStripe } from '../testing/fakeStripe.js'
 
@@ -241,6 +243,15 @@ describe('worker and crons', () => {
       ['payments cleanup', 'daily'],
       ['payments schedules', 'hourly'],
     ])
+  })
+
+  test('registerCrons leaves out the schedules run for an app without the schedule callbacks, its worker a module reference', () => {
+    const { scheduleCharged: _charged, scheduleFailed: _failed, scheduleChanged: _changed, ...on } = wiring.on
+    const noSchedules = definePayments(app.components.payments, { app: 'test', context }).withCallbacks({ ...wiring, on })
+    expect(noSchedules.wiring.worker.schedules).toBeDefined()
+    const own = cronJobs()
+    noSchedules.registerCrons(own)
+    expect(Object.keys(own.crons)).toEqual(['payments sweep', 'payments reconcile', 'payments issues digest', 'payments cleanup'])
   })
 
   test('the issues digest hands new issues to the app once', async () => {

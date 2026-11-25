@@ -11,7 +11,7 @@ disputes and reconciliation. An app prices things, keeps its own records and dec
 means for them, in callbacks. It never calls Stripe or PayPal itself. The rules an app (and a
 coding agent working in it) follows are in [`AGENTS.md`](AGENTS.md), shipped in the package.
 
-**Status:** v0.8.0: payments in USD, one-off and monthly (schedules): hosted and embedded checkouts (Stripe Checkout, PayPal), saved
+**Status:** v0.9.0: payments in USD, one-off and monthly (schedules): hosted and embedded checkouts (Stripe Checkout, PayPal), saved
 methods charged off-session (Stripe cards and bank accounts, PayPal-vaulted cards and PayPal accounts), on-session retries. Not here: subscriptions, order models, emails.
 The plans it was built from are ed-schedule's `payments_library_plan.md` (v0.1) and the v0.2 plan
 ("own all payment paths, bids included").
@@ -20,7 +20,7 @@ The plans it was built from are ed-schedule's `payments_library_plan.md` (v0.1) 
 
 The example app (`example/convex`) is a complete host; these are its files.
 
-**1. Install and mount.** `npm install github:adamaviner/ed-payments#v0.8.0` (pnpm: `pnpm add ...`).
+**1. Install and mount.** `npm install github:adamaviner/ed-payments#v0.9.0` (pnpm: `pnpm add ...`).
 
 ```ts
 // convex/convex.config.ts
@@ -77,7 +77,7 @@ export const onPaid = internalMutation({
 // convex/http.ts
 payments.registerRoutes(http) // /stripe/webhook, /paypal/webhook; refuses a live deployment set up wrongly
 // convex/crons.ts
-payments.registerCrons(crons) // sweep every 10 minutes; reconcile, issues digest, cleanup nightly; schedules hourly (when exported)
+payments.registerCrons(crons) // sweep every 10 minutes; reconcile, issues digest, cleanup nightly; schedules hourly (with the schedule callbacks)
 // convex/paymentsAdmin.ts (Convex registers only top-level exports, so they are named)
 export const { access, openRefunds, refundable, issues, openCount, checkout, requestRefund, approveRefund, sendRefund, markRefundedManually, dismissRefund, resolveIssue, retryCharge, giveUpCharge } =
   payments.adminApi({ skipApproval: true })
@@ -322,7 +322,7 @@ processors require, and what was checked against them, is in [`docs/recurring-fi
 
 **Wiring.** Add three callbacks to `withCallbacks({ on })`: `scheduleCharged`, `scheduleFailed`
 and `scheduleChanged`, with `payments.args.scheduleCharged` and the others as their `args`.
-Export `schedules` from `payments.worker()`. `registerCrons` then runs it hourly, at minute 5.
+Export `schedules` from `payments.worker()`. With the three callbacks wired, `registerCrons` runs it hourly, at minute 5.
 `definePayments({ schedules: { hourUTC, retryDays } })` changes the charge hour (default 15 UTC)
 and the retry days (default `[3, 5, 7]`).
 
@@ -717,7 +717,14 @@ the webhooks registered on the live deployment:
 
 ## Upgrade notes
 
-### Next release (audit fixes)
+### Next release
+
+- **`registerCrons` adds the hourly `payments schedules` cron only when `on.scheduleCharged`,
+  `on.scheduleFailed` and `on.scheduleChanged` are wired.** Before, it added it for every app (the worker
+  reference always seems to have `schedules`), so an app without schedules had to export `schedules` from
+  `payments.worker()` or its deploys failed. That export can go now; keeping it does no harm.
+
+### v0.9.0 (audit fixes)
 
 Nothing to migrate; these change what a host sees:
 

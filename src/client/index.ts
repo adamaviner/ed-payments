@@ -156,7 +156,7 @@ export interface WorkerRefs {
   cleanup: FunctionReference<'mutation', 'internal', Record<string, never>, { deleted: number; more: boolean }>
   issuesDigest: FunctionReference<'mutation', 'internal', Record<string, never>, number>
   charge: FunctionReference<'action', 'internal', { checkoutId: string; manual?: boolean }, null>
-  /** Only for schedules: the hourly run (registerCrons adds it when exported). */
+  /** Only for schedules: the hourly run (registerCrons adds it when the schedule callbacks are wired). */
   schedules?: FunctionReference<'action', 'internal', { scheduleId?: string }, null>
 }
 
@@ -930,7 +930,10 @@ export class Payments<C extends GenericValidator = GenericValidator> {
     crons.daily('payments reconcile', { hourUTC: h, minuteUTC: 0 }, w.reconcile, {})
     crons.daily('payments issues digest', { hourUTC: h, minuteUTC: 30 }, w.issuesDigest, {})
     crons.daily('payments cleanup', { hourUTC: o.cleanupHourUTC ?? (h + 1) % 24, minuteUTC: 0 }, w.cleanup, {})
-    if (w.schedules) crons.hourly('payments schedules', { minuteUTC: 5 }, w.schedules, {})
+    // The worker is usually a module reference (internal.payments), on which every name exists, so
+    // whether the app uses schedules is read from the callbacks it wrote out, not from w.schedules.
+    const on = this.wiring.on
+    if (w.schedules && on.scheduleCharged && on.scheduleFailed && on.scheduleChanged) crons.hourly('payments schedules', { minuteUTC: 5 }, w.schedules, {})
   }
 }
 
