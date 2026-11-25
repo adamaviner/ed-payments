@@ -122,6 +122,13 @@ export default defineSchema({
     /** What the processor actually kept, when it says. */
     processorFeeCents: v.optional(v.number()),
     disputed: v.optional(v.boolean()),
+    /** The buyer closed it (cancelCheckout): money that arrives anyway is owed back, not kept. */
+    cancelledByBuyerAt: v.optional(v.number()),
+    /**
+     * PayPal: when a capture claimed it (claimCapture), before asking PayPal. The buyer can't cancel
+     * while the claim is live; once stale, cancel asks PayPal for the order first.
+     */
+    captureClaimedAt: v.optional(v.number()),
     callbacks,
     /** Passed to every callback as it was given to start. */
     context: v.optional(v.any()),
@@ -187,6 +194,11 @@ export default defineSchema({
     endReason: v.optional(v.string()),
     endedBy: v.optional(v.string()),
     endedAt: v.optional(v.number()),
+    /**
+     * Cancelled because its first payment wasn't completed (its checkout expired or failed), not by
+     * anyone: a first payment that arrives anyway, on a checkout the payer didn't cancel, starts it.
+     */
+    neverStarted: v.optional(v.boolean()),
     callbacks: scheduleCallbacks,
     /** Passed to every charge's callbacks and the schedule's own. */
     context: v.optional(v.any()),

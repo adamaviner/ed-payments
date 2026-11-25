@@ -260,13 +260,34 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         "mutation",
         "internal",
         {
+          checked?: boolean;
           giveBack?: { key: string; windowMs: number };
           id: string;
           now: number;
         },
         | { outcome: "abandoned" }
+        | { outcome: "being_paid" }
+        | { outcome: "check_processor" }
         | {
             outcome: "already_handled";
+            status:
+              | "created"
+              | "pending"
+              | "processing"
+              | "paid"
+              | "failed"
+              | "abandoned"
+              | "refund_needed";
+          },
+        Name
+      >;
+      claimCapture: FunctionReference<
+        "mutation",
+        "internal",
+        { id: string; now: number },
+        | { claimed: true }
+        | {
+            claimed: false;
             status:
               | "created"
               | "pending"
@@ -664,6 +685,13 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           pageStatus?: "SplitRecommended" | "SplitRequired" | null;
           splitCursor?: string | null;
         },
+        Name
+      >;
+      releaseCapture: FunctionReference<
+        "mutation",
+        "internal",
+        { id: string },
+        null,
         Name
       >;
       reopenCharge: FunctionReference<

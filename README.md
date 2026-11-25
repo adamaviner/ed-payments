@@ -163,6 +163,10 @@ embedded.processor === 'paypal' ? (
   the app's own action) with the id `start` returned. The Stripe session is expired at Stripe, the
   checkout is abandoned at once (a PayPal order is then never captured), and the start is given back
   to the buyer's own rate limit, once. A checkout paid in the meantime is settled as paid instead.
+  Money that still arrives after the buyer cancelled (a Stripe payment racing the cancel) is owed back:
+  `refund_needed`, never kept. While a PayPal capture is under way the cancel is refused with the
+  sentence "This payment is being paid right now…" (show it, then check the checkout again); a
+  capture that died more than five minutes ago doesn't block it, PayPal being asked first.
   Call it for the unused embedded checkout after `onFallback` too.
 - Webhooks, refunds, the sweep and the comparison treat these checkouts like any other.
 
@@ -362,7 +366,8 @@ await payments.schedulesFor(ctx, owner) // also schedulesForRef(ref), getSchedul
   schedule is `starting` until that payment is paid (or, for a bank account, on its way). Then
   `scheduleChanged` says `started` and `scheduleCharged` has `first: true`. If the payment never
   completes (the payer pressed Edit and `cancelCheckout` ran, or it expired), `scheduleChanged`
-  says `not_started`.
+  says `not_started`. If the first payment arrives anyway after the checkout expired (not after the
+  payer cancelled it, when it is owed back), the schedule starts after all (`started`).
   - **Stripe** (card or `ach`): an embedded Checkout session for the payer's Customer, with
     `setup_future_usage: off_session` (bank accounts verified at once). Checkout tells the payer the
     method is saved, and shows a bank account's mandate. Show it with `StripeEmbeddedCheckout`.
@@ -428,7 +433,7 @@ MERCHANT`). `savePaypalMethod` turns the approved token into a payment token and
   3, 4 minutes; before each new try the customer's PaymentIntents are searched for this checkout,
   because Stripe replays a key's first answer (even a 500), so a new key is used only once nothing was
   found. After five tries, or at once for anything odd, a `charge_unknown` issue asks a person, who
-  retries it or gives it up (Stripe is asked first: a charge it shows paid is settled, an open one canceled; otherwise `failed`, and the app decides what next). The sweep leaves charges handed to a person alone. A charge and its on-session retries pay for one thing: a second payment for it is owed back (`refund_needed`), and only one retry can be open at a time. A charge whose queued try died is
+  retries it or gives it up (Stripe is asked first: a charge it shows paid is settled, an open one canceled; PayPal's order is read, or without an order id Transaction Search is searched for a capture tagged with the charge, and giving up is refused until three hours after the last try, since PayPal's search lags that much; otherwise `failed`, and the app decides what next). The sweep leaves charges handed to a person alone. A charge and its on-session retries pay for one thing, as does each period of a schedule: a second payment for it is owed back (`refund_needed`), and only one retry can be open at a time. An on-session retry of a schedule's charge pays that period and moves the schedule on; one asked for once the period is paid is refused. A charge whose queued try died is
   picked up by the sweep after 10 quiet minutes.
 - **On-session retries with PayPal.** `retryWithPaypal` makes an order for PayPal's buttons (a PayPal
   account or a card), settled like an embedded checkout. One retry is open at a time: asking for the

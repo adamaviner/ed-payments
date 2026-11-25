@@ -368,3 +368,53 @@ describe('cleanup', () => {
     expect(await read(pay.checkouts.get, { id })).not.toBeNull()
   })
 })
+
+describe('money on a closed checkout', () => {
+  test('money arriving on a checkout the buyer cancelled is owed back, not kept', async () => {
+    const { mutate, create, checkout, calls } = setup()
+    const id = await create()
+    await mutate(pay.checkouts.attach, { id, processorCheckoutId: 'cs_1' })
+    expect(await mutate(pay.checkouts.cancel, { id, now: NOW })).toEqual({ outcome: 'abandoned' })
+    expect(await mutate(pay.checkouts.settlePaid, { id, paymentRef: 'pi_1', paidCents: 2500, now: NOW })).toMatchObject({
+      outcome: 'refund_needed',
+      reason: 'The buyer cancelled this payment before it arrived.',
+    })
+    expect(await checkout(id)).toMatchObject({ status: 'refund_needed', paymentRef: 'pi_1' })
+    expect(await calls('onPaid')).toHaveLength(0)
+    expect(await calls('onRefundNeeded')).toHaveLength(1)
+  })
+
+  test('a bank payment starting on an expired or failed checkout is processing, and the host told; on a cancelled one the host hears at the refund', async () => {
+    const { mutate, create, checkout, calls } = setup()
+    const expired = await create()
+    await mutate(pay.checkouts.attach, { id: expired, processorCheckoutId: 'cs_1' })
+    await mutate(pay.checkouts.abandon, { id: expired, now: NOW })
+    expect(await mutate(pay.checkouts.markProcessing, { id: expired, paymentRef: 'pi_1', now: NOW })).toEqual({ outcome: 'processing' })
+    const failed = await create()
+    await mutate(pay.checkouts.failStart, { id: failed, error: 'Stripe is down', now: NOW })
+    expect(await mutate(pay.checkouts.markProcessing, { id: failed, paymentRef: 'pi_2', now: NOW })).toEqual({ outcome: 'processing' })
+    expect((await calls('onProcessing')).map((c) => c.args.checkoutId)).toEqual([expired, failed])
+    const cancelled = await create()
+    await mutate(pay.checkouts.attach, { id: cancelled, processorCheckoutId: 'cs_3' })
+    await mutate(pay.checkouts.cancel, { id: cancelled, now: NOW })
+    expect(await mutate(pay.checkouts.markProcessing, { id: cancelled, paymentRef: 'pi_3', now: NOW })).toEqual({ outcome: 'processing' })
+    expect(await calls('onProcessing')).toHaveLength(2)
+    expect(await mutate(pay.checkouts.settlePaid, { id: cancelled, paymentRef: 'pi_3', paidCents: 2500, now: NOW })).toMatchObject({ outcome: 'refund_needed' })
+    expect((await checkout(cancelled)).status).toBe('refund_needed')
+  })
+
+  test('a PayPal capture claims the checkout: one claim at a time, and the buyer can’t cancel it until the claim goes stale', async () => {
+    const { mutate, create, checkout } = setup()
+    const id = await create({ processor: 'paypal' })
+    await mutate(pay.checkouts.attach, { id, processorCheckoutId: 'O1' })
+    expect(await mutate(pay.checkouts.claimCapture, { id, now: NOW })).toEqual({ claimed: true })
+    expect(await mutate(pay.checkouts.claimCapture, { id, now: NOW + 1000 })).toEqual({ claimed: false, status: 'pending' })
+    expect(await mutate(pay.checkouts.cancel, { id, now: NOW + 1000 })).toEqual({ outcome: 'being_paid' })
+    expect((await checkout(id)).status).toBe('pending')
+    await mutate(pay.checkouts.releaseCapture, { id })
+    expect(await mutate(pay.checkouts.claimCapture, { id, now: NOW + 2000 })).toEqual({ claimed: true })
+    expect(await mutate(pay.checkouts.cancel, { id, now: NOW + 2000 + 6 * 60_000 })).toEqual({ outcome: 'check_processor' })
+    expect(await mutate(pay.checkouts.cancel, { id, checked: true, now: NOW + 2000 + 6 * 60_000 })).toEqual({ outcome: 'abandoned' })
+    expect(await mutate(pay.checkouts.claimCapture, { id, now: NOW + 3 * 60 * 60_000 })).toEqual({ claimed: false, status: 'abandoned' })
+  })
+})

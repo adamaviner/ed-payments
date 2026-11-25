@@ -33,6 +33,7 @@ import {
   RECURRING_USAGE_PATTERN,
   approveUrl,
   captureFee,
+  getOrderOrNull,
   moneyCents,
   orderCapture,
   orderVault,
@@ -629,7 +630,8 @@ export class Payments<C extends GenericValidator = GenericValidator> {
     const c = await ctx.runQuery(this.component.checkouts.get, { id: checkoutId })
     if (!c?.scheduleId || c.kind !== 'hosted') return
     const s = await ctx.runQuery(this.component.schedules.get, { id: c.scheduleId })
-    if (!s || s.status !== 'starting' || s.paymentMethodId) return
+    // A cancelled one may be a schedule that never started, which this payment starts after all (the component decides).
+    if (!s || (s.status !== 'starting' && s.status !== 'cancelled') || s.paymentMethodId) return
     try {
       if (c.processor === 'stripe' && from.stripePaymentIntent) {
         const pi = await stripe.paymentIntentWithMethod(this.stripeKeys(), from.stripePaymentIntent, { fetch: this.fetch })
@@ -686,6 +688,9 @@ export class Payments<C extends GenericValidator = GenericValidator> {
     const c = await ctx.runQuery(this.component.checkouts.get, { id: checkoutId })
     if (c?.status !== 'pending' && c?.status !== 'created') return undefined
     if (by === 'background' && c.lastError === PAYPAL_DECLINED) return 'declined'
+    // Taken before PayPal is asked, so the buyer's cancel can't close it while the money is being
+    // taken; another capture under way (or a closed checkout) means there is nothing to do here.
+    if (!(await ctx.runMutation(this.component.checkouts.claimCapture, { id: checkoutId, now: Date.now() })).claimed) return undefined
     const requestId = by === 'buyer' ? `capture-${checkoutId}-${Date.now().toString(36)}` : `capture-${checkoutId}`
     const order = await this.withPaypal(ctx, async (call) => {
       try {
@@ -697,6 +702,9 @@ export class Payments<C extends GenericValidator = GenericValidator> {
         throw err
       }
     })
+    // No money moved: the claim goes. A capture that threw keeps it, as its outcome is unknown; once
+    // stale, cancel asks PayPal before closing the checkout.
+    if (order === 'declined' || !order) await ctx.runMutation(this.component.checkouts.releaseCapture, { id: checkoutId })
     if (order === 'declined') {
       await ctx.runMutation(this.component.checkouts.noteError, { id: checkoutId, error: PAYPAL_DECLINED })
       return order
@@ -767,8 +775,22 @@ export class Payments<C extends GenericValidator = GenericValidator> {
     }
     const limits = await this.limits(ctx, 'start', o.limitKey ?? c.payer.email)
     const own = limits?.find((l) => !l.key.endsWith(':all'))
-    const r = await ctx.runMutation(this.component.checkouts.cancel, { id: c.id, giveBack: own && { key: own.key, windowMs: own.windowMs }, now: Date.now() })
-    return { status: r.outcome === 'abandoned' ? 'abandoned' : r.status }
+    const close = (checked: boolean) =>
+      ctx.runMutation(this.component.checkouts.cancel, { id: c.id, giveBack: own && { key: own.key, windowMs: own.windowMs }, checked: checked || undefined, now: Date.now() })
+    let r = await close(false)
+    if (r.outcome === 'check_processor' && c.processorCheckoutId) {
+      // A capture claimed it and never finished: PayPal says whether the money was taken.
+      const orderId = c.processorCheckoutId
+      const order = await this.withPaypal(ctx, (call) => getOrderOrNull(call, orderId))
+      if (order?.status === 'COMPLETED') {
+        await this.settlePaypalOrder(ctx, c.id, order)
+        return { status: (await ctx.runQuery(this.component.checkouts.get, { id: c.id }))?.status ?? c.status }
+      }
+      r = await close(true)
+    }
+    if (r.outcome === 'being_paid') throw new ConvexError('This payment is being paid right now, so it can’t be cancelled. Check again in a moment.')
+    if (r.outcome === 'check_processor') r = await close(true)
+    return { status: r.outcome === 'already_handled' ? r.status : 'abandoned' }
   }
 
   // ── Saved payment methods ─────────────────────────────────────────────────────────────────────

@@ -458,3 +458,28 @@ describe('one payment per period', () => {
     expect(await s.schedule(scheduleId)).toMatchObject({ status: 'past_due', period: '2030-02' })
   })
 })
+
+describe('a first payment after its checkout closed', () => {
+  test('cancelled by the payer and paid anyway: owed back, and the schedule stays not started', async () => {
+    const { t, calls, schedule, status } = setup()
+    const started = await t.action(api.monthly.startCheckout, { donor: 'd1', processor: 'stripe', method: 'card' })
+    await t.action(api.payments.cancelCheckout, { checkoutId: started.checkoutId })
+    await t.fetch('/stripe/webhook', await stripe.pay((await status(started.checkoutId)).processorCheckoutId!))
+    expect(await status(started.checkoutId)).toMatchObject({ status: 'refund_needed' })
+    expect(await schedule(started.scheduleId)).toMatchObject({ status: 'cancelled', paymentMethodId: null })
+    expect(await calls('scheduleCharged')).toEqual([])
+  })
+
+  test('expired (not cancelled) and paid anyway: the schedule starts after all', async () => {
+    const { t, calls, schedule, status } = setup()
+    const started = await t.action(api.monthly.startCheckout, { donor: 'd1', processor: 'stripe', method: 'card' })
+    const session = (await status(started.checkoutId)).processorCheckoutId!
+    await t.fetch('/stripe/webhook', await stripe.expire(session))
+    expect(await schedule(started.scheduleId)).toMatchObject({ status: 'cancelled' })
+    await t.fetch('/stripe/webhook', await stripe.pay(session))
+    expect(await status(started.checkoutId)).toMatchObject({ status: 'paid' })
+    expect(await schedule(started.scheduleId)).toMatchObject({ status: 'active', period: '2030-02', lastPaidPeriod: '2030-01', endReason: null, paymentMethodId: expect.stringMatching(/^pm_/) })
+    expect((await calls('scheduleChanged')).map((c) => c.changes)).toEqual([['not_started'], ['started']])
+    expect(await calls('scheduleCharged')).toMatchObject([{ first: true, period: '2030-01' }])
+  })
+})

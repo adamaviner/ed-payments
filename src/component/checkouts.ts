@@ -123,10 +123,13 @@ export const markProcessing = mutation({
   returns: v.union(v.object({ outcome: v.literal('processing') }), already),
   handler: async (ctx, { id, paymentRef, method, now }) => {
     const c = await load(ctx, id)
-    if (c.status !== 'created' && c.status !== 'pending') return { outcome: 'already_handled' as const, status: c.status }
+    // Like settlePaid, money on its way to a checkout that expired or failed is still money taken.
+    if (!SETTLEABLE.has(c.status) || c.status === 'processing') return { outcome: 'already_handled' as const, status: c.status }
     const patch = { status: 'processing' as const, paymentRef: paymentRef ?? c.paymentRef, method: method ?? c.method, lastError: undefined }
     await ctx.db.patch(c._id, patch)
     await resolveIssue(ctx, c._id, 'charge_unknown', now ?? Date.now())
+    // The buyer cancelled it: the money will be owed back when it arrives (settlePaid), so the sale isn't going ahead.
+    if (c.cancelledByBuyerAt !== undefined) return { outcome: 'processing' as const }
     await scheduleProcessing(ctx, { ...c, ...patch }, now ?? Date.now())
     await notifyHost(ctx, { ...c, ...patch }, 'onProcessing', { paymentRef: patch.paymentRef ?? null }, now ?? Date.now())
     return { outcome: 'processing' as const }
@@ -161,7 +164,13 @@ export const settlePaid = mutation({
     const c = { ...loaded, method: method ?? loaded.method }
     await ctx.db.patch(c._id, { paymentRef, paidCents, processorFeeCents, settledAt: now, lastError: undefined, method: c.method, processorCheckoutId: c.processorCheckoutId ?? processorCheckoutId })
     await resolveIssue(ctx, c._id, 'charge_unknown', now)
-    let refusal: string | null = paidCents === c.amountCents ? null : `The processor took ${dollarsOf(paidCents)}, not the ${dollarsOf(c.amountCents)} asked.`
+    // The buyer cancelled before the money arrived: they were told it wasn't taken, so it goes back.
+    const cancelled = c.cancelledByBuyerAt !== undefined
+    let refusal: string | null = cancelled
+      ? 'The buyer cancelled this payment before it arrived.'
+      : paidCents === c.amountCents
+        ? null
+        : `The processor took ${dollarsOf(paidCents)}, not the ${dollarsOf(c.amountCents)} asked.`
     // A charge and its on-session retries (and a schedule's period) pay for one thing: the second to arrive is owed back.
     const duplicate = !refusal && (await paidElsewhere(ctx, c))
     if (duplicate) refusal = 'This was already paid by another payment.'
@@ -181,8 +190,8 @@ export const settlePaid = mutation({
     const updated = (await ctx.db.get(c._id)) ?? c
     await notifyHost(ctx, updated, 'onRefundNeeded', { amountCents: c.amountCents, paidCents, paymentRef, refundId, reason: refusal }, now)
     // Money the app turned away doesn't pay the period, and charging again would only be turned away
-    // too. A duplicate isn't a refusal of the period: another payment already paid it.
-    if (!duplicate) await scheduleFailed(ctx, updated, { reason: refusal, kind: 'hard', wasProcessing: loaded.status === 'processing' }, now)
+    // too. A duplicate isn't a refusal of the period (another payment paid it), nor is a payment the buyer cancelled.
+    if (!duplicate && !cancelled) await scheduleFailed(ctx, updated, { reason: refusal, kind: 'hard', wasProcessing: loaded.status === 'processing' }, now)
     return { outcome: 'refund_needed' as const, reason: refusal, refundId }
   },
 })
@@ -288,22 +297,57 @@ export const abandon = mutation({
   },
 })
 
+/** How long a PayPal capture's claim keeps the buyer from cancelling; after that it is stale (the capture died). */
+export const CAPTURE_CLAIM_MS = 5 * 60_000
+
 /**
  * The buyer closed a checkout they started (Edit on the app's page): abandoned now rather than when it
  * expires, and the start it took from their own rate limit (`giveBack`, the per-payer key) handed
  * back, so editing and continuing again isn't refused as too many tries. Only a waiting checkout is
  * closed, and only once, so cancelling can't refill the limit; the overall limit keeps its count.
+ * Money that arrives anyway is owed back (settlePaid). being_paid: a PayPal capture is under way, so
+ * it isn't closed. check_processor: a capture claimed it and never finished; ask PayPal whether it
+ * was taken, then call again with `checked`.
  */
 export const cancel = mutation({
-  args: { id: v.string(), giveBack: v.optional(v.object({ key: v.string(), windowMs: v.number() })), now: v.number() },
-  returns: v.union(v.object({ outcome: v.literal('abandoned') }), already),
-  handler: async (ctx, { id, giveBack, now }) => {
+  args: { id: v.string(), giveBack: v.optional(v.object({ key: v.string(), windowMs: v.number() })), checked: v.optional(v.boolean()), now: v.number() },
+  returns: v.union(v.object({ outcome: v.literal('abandoned') }), v.object({ outcome: v.literal('being_paid') }), v.object({ outcome: v.literal('check_processor') }), already),
+  handler: async (ctx, { id, giveBack, checked, now }) => {
     const c = await load(ctx, id)
     if (c.status !== 'created' && c.status !== 'pending') return { outcome: 'already_handled' as const, status: c.status }
-    await ctx.db.patch(c._id, { status: 'abandoned', settledAt: now })
+    if (c.captureClaimedAt !== undefined && now - c.captureClaimedAt < CAPTURE_CLAIM_MS) return { outcome: 'being_paid' as const }
+    if (c.captureClaimedAt !== undefined && !checked) return { outcome: 'check_processor' as const }
+    await ctx.db.patch(c._id, { status: 'abandoned', settledAt: now, cancelledByBuyerAt: now })
     if (giveBack && c.createdAt > now - giveBack.windowMs) await giveBackOne(ctx, giveBack.key, now, giveBack.windowMs)
     await scheduleAbandoned(ctx, c, now)
     return { outcome: 'abandoned' as const }
+  },
+})
+
+/**
+ * A PayPal capture takes the checkout before asking PayPal, so the buyer's cancel can't close it
+ * while the money is being taken. Refused when it isn't waiting, or another capture's claim is live.
+ */
+export const claimCapture = mutation({
+  args: { id: v.string(), now: v.number() },
+  returns: v.union(v.object({ claimed: v.literal(true) }), v.object({ claimed: v.literal(false), status: checkoutStatus })),
+  handler: async (ctx, { id, now }) => {
+    const c = await load(ctx, id)
+    const live = c.captureClaimedAt !== undefined && now - c.captureClaimedAt < CAPTURE_CLAIM_MS
+    if ((c.status !== 'created' && c.status !== 'pending') || live) return { claimed: false as const, status: c.status }
+    await ctx.db.patch(c._id, { captureClaimedAt: now })
+    return { claimed: true as const }
+  },
+})
+
+/** The capture ended without taking money (declined, not approved): the buyer may cancel again. */
+export const releaseCapture = mutation({
+  args: { id: v.string() },
+  returns: v.null(),
+  handler: async (ctx, { id }) => {
+    const c = await load(ctx, id)
+    if (c.captureClaimedAt !== undefined) await ctx.db.patch(c._id, { captureClaimedAt: undefined })
+    return null
   },
 })
 

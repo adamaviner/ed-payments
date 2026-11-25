@@ -422,8 +422,16 @@ async function advance(ctx: MutationCtx, s: Doc<'schedules'>, period: string, no
 
 type CheckoutDoc = Doc<'checkouts'>
 
+/**
+ * A schedule that never started because its first checkout expired or failed, whose first payment
+ * arrived anyway on a checkout the payer didn't cancel: it starts after all.
+ */
+const revivable = (s: Doc<'schedules'>, c: Pick<CheckoutDoc, 'schedulePeriod' | 'cancelledByBuyerAt'>) =>
+  s.status === 'cancelled' && s.neverStarted === true && c.cancelledByBuyerAt === undefined && c.schedulePeriod === s.firstPeriod
+
 /** A schedule's first payment arrived (or is on its way): it starts. */
 async function start(ctx: MutationCtx, s: Doc<'schedules'>, c: CheckoutDoc, now: number) {
+  if (s.status === 'cancelled') await ctx.db.patch(s._id, { endReason: undefined, endedAt: undefined, endedBy: undefined, neverStarted: undefined })
   await advance(ctx, { ...s, status: 'starting' }, c.schedulePeriod ?? s.period, now)
   await changed(ctx, s, ['started'], { now })
 }
@@ -431,7 +439,7 @@ async function start(ctx: MutationCtx, s: Doc<'schedules'>, c: CheckoutDoc, now:
 export async function scheduleProcessing(ctx: MutationCtx, c: CheckoutDoc, now: number) {
   const s = c.scheduleId ? await ctx.db.get(c.scheduleId) : null
   if (!s || !c.schedulePeriod) return
-  if (s.status === 'starting') return await start(ctx, s, c, now)
+  if (s.status === 'starting' || revivable(s, c)) return await start(ctx, s, c, now)
   if (s.status !== 'cancelled') await advance(ctx, s, c.schedulePeriod, now)
 }
 
@@ -439,7 +447,7 @@ export async function schedulePaid(ctx: MutationCtx, c: CheckoutDoc, paid: { pai
   const s = c.scheduleId ? await ctx.db.get(c.scheduleId) : null
   if (!s || !c.schedulePeriod) return
   const first = c.schedulePeriod === s.firstPeriod
-  if (s.status === 'starting') await start(ctx, s, c, now)
+  if (s.status === 'starting' || revivable(s, c)) await start(ctx, s, c, now)
   else if (s.status !== 'cancelled') await advance(ctx, s, c.schedulePeriod, now)
   await tellHost(ctx, s._id, 'onCharged', { checkoutId: c._id, period: c.schedulePeriod, paidCents: paid.paidCents, paymentRef: paid.paymentRef, first }, now, c._id)
 }
@@ -479,7 +487,7 @@ export async function scheduleAbandoned(ctx: MutationCtx, c: CheckoutDoc, now: n
 }
 
 async function notStarted(ctx: MutationCtx, s: Doc<'schedules'>, reason: string, now: number) {
-  await ctx.db.patch(s._id, { status: 'cancelled', endReason: reason, endedAt: now, updatedAt: now })
+  await ctx.db.patch(s._id, { status: 'cancelled', endReason: reason, endedAt: now, updatedAt: now, neverStarted: true })
   await changed(ctx, s, ['not_started'], { reason, now })
 }
 
@@ -507,6 +515,9 @@ export const attachMethod = mutation({
   handler: async (ctx, { id, stripe, paypal, now }) => {
     const s = await load(ctx, id)
     if (s.paymentMethodId) return null
+    // Only a schedule its first payment can still start: waiting for it, or never started and revived by it.
+    const first = s.lastCheckoutId ? await ctx.db.get(s.lastCheckoutId) : null
+    if (s.status !== 'starting' && !(first && revivable(s, first))) return null
     if (stripe) {
       const customer = await ctx.db
         .query('customers')

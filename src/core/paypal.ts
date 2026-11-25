@@ -457,6 +457,16 @@ export const PAYPAL_EVENTS = [
   'VAULT.PAYMENT-TOKEN.DELETED',
 ] as const
 
+/** The order, or null when PayPal doesn't know it (it forgets orders nobody approved after a while). */
+export async function getOrderOrNull(c: Call, id: string): Promise<PaypalOrder | null> {
+  try {
+    return await paypal.getOrder(c, id)
+  } catch (err) {
+    if (err instanceof ProcessorError && err.status === 404) return null
+    throw err
+  }
+}
+
 /** The capture of a captured order (the first unit's first capture). */
 export function orderCapture(order: PaypalOrder): PaypalCapture | null {
   return order.purchase_units?.[0]?.payments?.captures?.[0] ?? null
