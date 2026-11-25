@@ -418,7 +418,8 @@ function useCardPayment(a: { clientId: string; orderKey?: string; order: () => P
         }
       }
       if (outcome.current === 'declined') return setError('The card was declined. Try another card.')
-      const returnUrl = paying.current?.returnUrl
+      // Set by createOrder during submit, which TypeScript can't see from here.
+      const returnUrl = (paying.current as CardOrder | null)?.returnUrl
       if (returnUrl) (latest.current.navigate ?? ((u: string) => window.location.assign(u)))(returnUrl)
     })
 

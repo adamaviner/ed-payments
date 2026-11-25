@@ -37,7 +37,9 @@ The README has the API and the "Adopt in 5 steps" set-up.
    refunds (partial ones checked against what is left), approvals and issues. Add
    `@source '../node_modules/@earthdance/payments/dist';` to your CSS. Never show a refund or payment
    as done before the server says so.
-10. **Paying on your own page:** `start(ctx, { ..., ui: 'embedded' })`, then `<PaypalButtons>` or
+10. **Paying on your own page:** with the fields in your own form, `<StripeOnPagePayment>` / `<PaypalOnPagePayment>`
+    whose `start` calls your action around `start(ctx, { ..., ui: 'onPage', replaces })` at the press (pass the
+    `checkoutId` your last press got as `replaces`; never start when the form opens). Or `start(ctx, { ..., ui: 'embedded' })`, then `<PaypalButtons>` or
     `<StripeEmbeddedCheckout>` with the returned `embedded`; never load PayPal's or Stripe's scripts
     yourself or capture from the browser. Give them an `onFallback` that starts the same purchase as a
     redirect, so a blocked script never strands the buyer. When the buyer leaves the payment step

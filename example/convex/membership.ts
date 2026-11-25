@@ -1,7 +1,7 @@
 // A monthly membership: a schedule the library charges every month. The first payment, on the app's
 // page, also saves the card, bank account or PayPal account (startScheduleCheckout); the processor for
 // a new card is the cheaper one for the monthly amount, which is the app's choice to make.
-import type { StartedEmbedded, StartedRedirect } from '@earthdance/payments'
+import type { StartedEmbedded, StartedOnPage, StartedRedirect } from '@earthdance/payments'
 import { ConvexError, v } from 'convex/values'
 import { internalMutation, mutation, action } from './_generated/server.js'
 import { payments } from './payments.js'
@@ -16,7 +16,7 @@ export const start = action({
     if (!me) throw new ConvexError('Sign in to join.')
     const card = payments.cardProcessorFor(MONTHLY_CENTS).processor
     const [processor, method] = how === 'bank' ? (['stripe', 'ach'] as const) : how === 'paypal' ? (['paypal', 'paypal'] as const) : ([card, 'card'] as const)
-    return await payments.startScheduleCheckout(ctx, {
+    const started = await payments.startScheduleCheckout(ctx, {
       owner: { type: 'user', id: me.subject },
       ref: { type: 'membership', id: me.subject },
       purpose: 'membership',
@@ -29,6 +29,39 @@ export const start = action({
       returnPath: '/membership/thanks',
       cancelPath: '/membership',
     })
+    if ('onPage' in started) throw new ConvexError('The payment couldn’t be started here.')
+    return started
+  },
+})
+
+/**
+ * Starts a membership when the payer presses the button on the one-step form (src/JoinOnPage.tsx), paid with Stripe's
+ * Payment Element or PayPal's card fields right there. `replaces` is the checkout the last press started: after a
+ * decline, the library returns it again while nothing that matters changed.
+ */
+export const startOnPage = action({
+  args: { name: v.string(), email: v.string(), how: v.union(v.literal('card'), v.literal('bank')), replaces: v.optional(v.string()) },
+  handler: async (ctx, { name, email, how, replaces }): Promise<StartedOnPage & { scheduleId: string }> => {
+    const me = await ctx.auth.getUserIdentity()
+    if (!me) throw new ConvexError('Sign in to join.')
+    const [processor, method] = how === 'bank' ? (['stripe', 'ach'] as const) : ([payments.cardProcessorFor(MONTHLY_CENTS).processor, 'card'] as const)
+    const started = await payments.startScheduleCheckout(ctx, {
+      owner: { type: 'user', id: me.subject },
+      ref: { type: 'membership', id: me.subject },
+      purpose: 'membership',
+      description: 'Monthly membership',
+      payer: { email, name },
+      amountCents: MONTHLY_CENTS,
+      context: { memberId: me.subject },
+      processor,
+      method,
+      ui: 'onPage',
+      replaces,
+      returnPath: '/membership/thanks',
+      cancelPath: '/membership',
+    })
+    if (!('onPage' in started)) throw new ConvexError('The payment couldn’t be started here.')
+    return started
   },
 })
 
