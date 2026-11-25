@@ -60,10 +60,10 @@ const viewOf = (m: { paymentTokenId: string; kind: 'card' | 'paypal'; label: str
 export async function setupPaypalMethod(
   p: Payments,
   ctx: RunActionCtx,
-  a: { owner: Ref; payer: Payer; kind: 'card' | 'paypal'; description?: string; recurring?: boolean },
+  a: { owner: Ref; payer: Payer; kind: 'card' | 'paypal'; description?: string; recurring?: boolean; limitKey?: string },
 ): Promise<{ setupTokenId: string; clientId: string }> {
   const keys = p.paypalKeys()
-  await p.takeLimits(ctx, 'setup', a.payer.email)
+  await p.takeLimits(ctx, 'setup', a.payer.email, 1, a.limitKey)
   const customerId = (await ctx.runQuery(p.component.customers.paypalCustomer, { app: p.app, owner: a.owner })) ?? undefined
   const site = p.url('/')
   try {
@@ -95,9 +95,9 @@ export async function setupPaypalMethod(
  * owner's tag (it came from the browser, and anyone could send someone else's). A card whose $0
  * check failed is deleted from PayPal's vault again and refused.
  */
-export async function savePaypalMethod(p: Payments, ctx: RunActionCtx, a: { owner: Ref; setupTokenId: string; payerEmail?: string; recurring?: boolean }): Promise<SavedMethod> {
+export async function savePaypalMethod(p: Payments, ctx: RunActionCtx, a: { owner: Ref; setupTokenId: string; payerEmail?: string; recurring?: boolean; limitKey?: string }): Promise<SavedMethod> {
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(a.setupTokenId)) throw new ConvexError(UNUSABLE)
-  await p.takeLimits(ctx, 'save', a.payerEmail)
+  await p.takeLimits(ctx, 'save', a.payerEmail, 1, a.limitKey)
   const tag = await paypalOwnerTag(p.app, a.owner)
   const token = await p.withPaypal(ctx, async (call): Promise<PaypalPaymentToken> => {
     let setup

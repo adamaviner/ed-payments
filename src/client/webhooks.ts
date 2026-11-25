@@ -16,6 +16,9 @@ export type UnhandledStripeEvent = (ctx: RunActionCtx, event: StripeEvent) => Pr
 
 type Outcome = 'handled' | 'ignored' | 'foreign'
 
+/** How far a PayPal delivery's transmission time may be from now. */
+const PAYPAL_WEBHOOK_TOLERANCE_MS = 10 * 60_000
+
 const text = (status: number, body: string) => new Response(body, { status })
 
 async function once(p: Payments, ctx: RunActionCtx, processor: 'stripe' | 'paypal', id: string, type: string, act: () => Promise<Outcome>): Promise<Response> {
@@ -169,6 +172,10 @@ export async function handlePaypalWebhook(p: Payments, ctx: RunActionCtx, reques
   const body = await request.text()
   const event = parsePaypalEvent(body)
   if (!event) return text(400, 'Not a PayPal event')
+  // Checked here, before PayPal is asked: a replayed or made-up delivery costs nothing. PayPal sends
+  // each retry afresh, with its own time.
+  const sentAt = Date.parse(request.headers.get('paypal-transmission-time') ?? '')
+  if (!Number.isFinite(sentAt) || Math.abs(Date.now() - sentAt) > PAYPAL_WEBHOOK_TOLERANCE_MS) return text(400, 'Stale or missing transmission time')
   let verified: boolean
   try {
     verified = await p.withPaypal(ctx, (call) => verifyPaypalWebhook(keys, call.token, request.headers, body, { fetch: p.fetch }))

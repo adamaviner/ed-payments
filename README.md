@@ -477,9 +477,14 @@ MERCHANT`). `savePaypalMethod` turns the approved token into a payment token and
   lacks are recorded, as Stripe's are); PayPal Transaction Search for
   captures the component lacks (skipped, logged once a day, when PayPal refuses it). Differences are
   issues; one that goes away is resolved. The digest (`issuesDigest`) hands new issues to `on.issues`.
-- **Rate limits** on every public entry: `start`, `setupPaymentMethod`, `retryOnSession` and the return
-  page. Per signed-in user (else per payer email, or the token on the return page), per window, and for
-  everyone together per minute. Defaults 5 per 10 minutes and 30 a minute (the return page four times
+- **Rate limits** on every public entry: `start`, `setupPaymentMethod`, `setupPaypalMethod`,
+  `savePaypalMethod`, `savedMethods`, `verifyMethodOwner`, `removeSavedMethod`, `retryOnSession`,
+  `retryWithPaypal`, the return page and `cancelCheckout`. Per key, per window: the `limitKey` the host
+  passes (each of those takes one), else the signed-in user, else the payer's email (the owner, for the
+  saved-method lists and checks; the token on the return page); and for everyone together per minute.
+  Listing and checking saved methods allow four times as many. A PayPal webhook whose
+  `paypal-transmission-time` is more than ten minutes from now is refused (400) before PayPal is asked
+  to verify it. Defaults 5 per 10 minutes and 30 a minute (the return page four times
   that); `limits` in `definePayments`.
 - **Keys** come from `fromEnv`. `PAYMENTS_MODE=live` marks the production deployment: there every set-up
   problem (a test key, the sandbox, a missing webhook secret or id) stops the push with the reason;

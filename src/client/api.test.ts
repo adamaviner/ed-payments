@@ -257,3 +257,33 @@ describe('worker and crons', () => {
     expect(sent[0].args).toMatchObject({ issues: [{ kind: 'dispute', checkoutId, processor: 'stripe' }] })
   })
 })
+
+describe('rate limits on the saved-method entries', () => {
+  // One row per limited entry: the calls the test app allows a payer (its limit of 3, times the entry's scale), then refused.
+  const limited = /Too many tries|right now/
+  const cases: [string, number, (t: ReturnType<typeof createTest>) => Promise<unknown>][] = [
+    ['savedMethods', 12, (t) => t.action(api.bids.methods, { user: 'u1' })],
+    ['verifyMethodOwner', 12, (t) => t.action(api.bids.verify, { user: 'u1', paymentMethodId: 'pm_nobody' })],
+    ['removeSavedMethod', 3, (t) => t.action(api.bids.remove, { user: 'u1', paymentMethodId: 'pm_nobody' })],
+  ]
+  test.each(cases)('%s is limited per payer', async (_name, allowed, call) => {
+    const t = createTest()
+    for (let i = 0; i < allowed; i++) {
+      const err = await call(t).then(
+        () => null,
+        (e: Error) => e,
+      )
+      if (err && limited.test(err.message)) throw new Error(`refused after ${i} calls`)
+    }
+    await expect(call(t)).rejects.toThrow(/Too many tries/)
+  })
+})
+
+test('a PayPal webhook sent more than ten minutes ago is refused before PayPal is asked to verify it', async () => {
+  const t = createTest()
+  const hook = pp.event('PAYMENT.CAPTURE.COMPLETED', { id: 'CAP-OLD', custom_id: 'test:nothing' })
+  vi.setSystemTime(Date.now() + 11 * 60_000)
+  const res = await t.fetch('/paypal/webhook', hook)
+  expect(res.status).toBe(400)
+  expect(pp.calls.filter((c) => c.path === '/v1/notifications/verify-webhook-signature')).toHaveLength(0)
+})

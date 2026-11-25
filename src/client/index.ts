@@ -114,7 +114,7 @@ export type SchedulerCtx = RunMutationCtx & { scheduler: Scheduler; auth?: AuthL
 export type AuthLike = { getUserIdentity(): Promise<{ subject: string } | null> }
 
 export interface LimitOptions {
-  /** Per signed-in user (else per payer email), per window. Default 5. */
+  /** Per key (the host's limitKey, else the signed-in user, else the payer's email or the owner), per window. Default 5. */
   perKey?: number
   windowMinutes?: number
   /** Everyone together, per minute. Default 30. */
@@ -375,12 +375,16 @@ export class Payments<C extends GenericValidator = GenericValidator> {
     if (wrong) throw new ConvexError(`The payment’s context doesn’t fit this app’s context validator: ${wrong}.`)
   }
 
-  /** @internal The rate-limit keys of one public call: the signed-in user (else the given key), and everyone together. */
-  async limits(ctx: { auth?: AuthLike }, entry: string, fallbackKey: string | undefined, scale = 1) {
+  /**
+   * @internal The rate-limit keys of one public call: the host's own `limitKey` when it gives one, else
+   * the signed-in user, else `fallbackKey` (e.g. the payer's email); and everyone together.
+   */
+  async limits(ctx: { auth?: AuthLike }, entry: string, fallbackKey: string | undefined, scale = 1, limitKey?: string) {
     const l = this.options.limits
     if (l === false) return undefined
-    const identity = ctx.auth ? await ctx.auth.getUserIdentity() : null
-    const who = identity ? `user:${identity.subject}` : fallbackKey ? `key:${fallbackKey.trim().toLowerCase()}` : null
+    const identity = limitKey?.trim() || !ctx.auth ? null : await ctx.auth.getUserIdentity()
+    const own = limitKey?.trim() || (identity ? null : fallbackKey?.trim())
+    const who = own ? `key:${own.toLowerCase()}` : identity ? `user:${identity.subject}` : null
     const perKey = (l?.perKey ?? 5) * scale
     const windowMs = (l?.windowMinutes ?? 10) * 60_000
     const global = { key: `${this.app}:${entry}:all`, max: (l?.globalPerMinute ?? 30) * scale, windowMs: 60_000, message: 'Too many payments are being started right now. Try again in a minute.' }
@@ -388,8 +392,8 @@ export class Payments<C extends GenericValidator = GenericValidator> {
   }
 
   /** @internal */
-  async takeLimits(ctx: RunMutationCtx & { auth?: AuthLike }, entry: string, fallbackKey: string | undefined, scale = 1) {
-    const limits = await this.limits(ctx, entry, fallbackKey, scale)
+  async takeLimits(ctx: RunMutationCtx & { auth?: AuthLike }, entry: string, fallbackKey: string | undefined, scale = 1, limitKey?: string) {
+    const limits = await this.limits(ctx, entry, fallbackKey, scale, limitKey)
     if (limits) await ctx.runMutation(this.component.limits.take, { limits, now: Date.now() })
   }
 
@@ -488,7 +492,7 @@ export class Payments<C extends GenericValidator = GenericValidator> {
       expiresAt,
       context: a.context,
       callbacks: await this.handles(),
-      limits: await this.limits(ctx, 'start', a.limitKey ?? a.payer.email),
+      limits: await this.limits(ctx, 'start', a.payer.email, 1, a.limitKey),
       ...(save ? { scheduleId: save.scheduleId, schedulePeriod: save.schedulePeriod, stripeCustomerId: save.stripeCustomerId } : {}),
       now,
     })
@@ -773,7 +777,7 @@ export class Payments<C extends GenericValidator = GenericValidator> {
         }
       }
     }
-    const limits = await this.limits(ctx, 'start', o.limitKey ?? c.payer.email)
+    const limits = await this.limits(ctx, 'start', c.payer.email, 1, o.limitKey)
     const own = limits?.find((l) => !l.key.endsWith(':all'))
     const close = (checked: boolean) =>
       ctx.runMutation(this.component.checkouts.cancel, { id: c.id, giveBack: own && { key: own.key, windowMs: own.windowMs }, checked: checked || undefined, now: Date.now() })
@@ -803,7 +807,7 @@ export class Payments<C extends GenericValidator = GenericValidator> {
    */
   async setupPaymentMethod(
     ctx: RunActionCtx,
-    a: { owner: Ref; payer: Payer; stripeCustomerId?: string; methods?: readonly SavedMethodKind[] },
+    a: { owner: Ref; payer: Payer; stripeCustomerId?: string; methods?: readonly SavedMethodKind[]; limitKey?: string },
   ): Promise<{ clientSecret: string; stripeCustomerId: string }> {
     return await setupPaymentMethod(this, ctx, a)
   }
@@ -816,7 +820,7 @@ export class Payments<C extends GenericValidator = GenericValidator> {
    */
   async setupPaypalMethod(
     ctx: RunActionCtx,
-    a: { owner: Ref; payer: Payer; kind: 'card' | 'paypal'; description?: string; /** For a schedule: a PayPal account agrees to recurring charges. */ recurring?: boolean },
+    a: { owner: Ref; payer: Payer; kind: 'card' | 'paypal'; description?: string; /** For a schedule: a PayPal account agrees to recurring charges. */ recurring?: boolean; limitKey?: string },
   ): Promise<{ setupTokenId: string; clientId: string }> {
     return await setupPaypalMethod(this, ctx, a)
   }
@@ -826,30 +830,33 @@ export class Payments<C extends GenericValidator = GenericValidator> {
    * refusing a token made for someone else or a card whose check failed. Returns the saved method,
    * charged later with chargeSaved like a Stripe one. Rate-limited.
    */
-  async savePaypalMethod(ctx: RunActionCtx, a: { owner: Ref; setupTokenId: string; payerEmail?: string; /** As given to setupPaypalMethod. */ recurring?: boolean }): Promise<SavedMethod> {
+  async savePaypalMethod(
+    ctx: RunActionCtx,
+    a: { owner: Ref; setupTokenId: string; payerEmail?: string; /** As given to setupPaypalMethod. */ recurring?: boolean; limitKey?: string },
+  ): Promise<SavedMethod> {
     return await savePaypalMethod(this, ctx, a)
   }
 
-  /** The owner's saved cards, bank accounts and PayPal accounts at both processors, newest first, each with whether a charge of it was declined. */
-  async savedMethods(ctx: RunActionCtx, a: { owner: Ref; stripeCustomerId?: string }): Promise<SavedMethod[]> {
+  /** The owner's saved cards, bank accounts and PayPal accounts at both processors, newest first, each with whether a charge of it was declined. Rate-limited. */
+  async savedMethods(ctx: RunActionCtx, a: { owner: Ref; stripeCustomerId?: string; limitKey?: string }): Promise<SavedMethod[]> {
     return await savedMethods(this, ctx, a)
   }
 
   /**
    * Checks that a payment method id (from the browser) is one saved for this owner, at Stripe or in
    * PayPal's vault, and returns it; anything else throws, so nobody can pay with a made-up or someone
-   * else's method.
+   * else's method. Rate-limited.
    */
-  async verifyMethodOwner(ctx: RunActionCtx, a: { owner: Ref; paymentMethodId: string; stripeCustomerId?: string }): Promise<VerifiedMethod> {
+  async verifyMethodOwner(ctx: RunActionCtx, a: { owner: Ref; paymentMethodId: string; stripeCustomerId?: string; limitKey?: string }): Promise<VerifiedMethod> {
     return await verifyMethodOwner(this, ctx, a)
   }
 
   /**
    * The owner removes one of their saved methods (checked to be theirs): deleted from PayPal's vault
    * or detached from their Stripe Customer, and never offered or charged again. Whether it may go
-   * (e.g. a bid still relies on it) is the app's to check first.
+   * (e.g. a bid still relies on it) is the app's to check first. Rate-limited.
    */
-  async removeSavedMethod(ctx: RunActionCtx, a: { owner: Ref; paymentMethodId: string; stripeCustomerId?: string }): Promise<void> {
+  async removeSavedMethod(ctx: RunActionCtx, a: { owner: Ref; paymentMethodId: string; stripeCustomerId?: string; limitKey?: string }): Promise<void> {
     await removeSavedMethod(this, ctx, a)
   }
 
@@ -933,7 +940,7 @@ export class Payments<C extends GenericValidator = GenericValidator> {
    * reused, so two tabs can't each take a payment; one already on its way is refused. Rate-limited, so
    * call it when the buyer presses Pay (`<StripeRetryPayment createPayment>`), not when the page opens.
    */
-  async retryOnSession(ctx: RunActionCtx, a: { checkoutId: string; expiresAt?: number }): Promise<{ checkoutId: string; clientSecret: string }> {
+  async retryOnSession(ctx: RunActionCtx, a: { checkoutId: string; expiresAt?: number; limitKey?: string }): Promise<{ checkoutId: string; clientSecret: string }> {
     return await retryOnSession(this, ctx, a)
   }
 
@@ -945,7 +952,7 @@ export class Payments<C extends GenericValidator = GenericValidator> {
    */
   async retryWithPaypal(
     ctx: RunActionCtx,
-    a: { checkoutId: string; returnPath: string; expiresAt?: number },
+    a: { checkoutId: string; returnPath: string; expiresAt?: number; limitKey?: string },
   ): Promise<{ checkoutId: string; embedded: Extract<EmbeddedPayment, { processor: 'paypal' }> }> {
     return await retryWithPaypal(this, ctx, a)
   }
