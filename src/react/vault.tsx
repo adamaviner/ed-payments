@@ -9,7 +9,7 @@
 import { type RefObject, useEffect, useRef, useState } from 'react'
 import { loadScript, useSlow, type Load } from './embedded.js'
 import { useAction } from 'convex/react'
-import type { EmbeddedPayment } from '../client/index.js'
+import type { EmbeddedPayment, OnPagePayment } from '../client/index.js'
 import { errorMessage } from './errors.js'
 import { useLatest, useOneAtATime } from './hooks.js'
 import type { CompleteReturnRef } from './types.js'
@@ -354,29 +354,41 @@ export interface PaypalCardPaymentProps {
   className?: string
 }
 
+/** What the app's start returned: the order to pay and the return page to go to. */
+type CardOrder = { orderId: string; returnUrl: string }
+
 /**
- * PayPal's card fields paying an order that also saves the card (vault with purchase), for a
- * schedule's first payment: the card stays in PayPal's frames, PayPal checks it (3-D Secure only when
- * the bank asks), the payment is captured, and the buyer goes to the return page. A declined card is
- * said under the fields, and the buyer can try another. Once the capture has started, anything but a
- * decline (paid, an error, no answer) goes to the return page, which asks the server how it stands:
- * a capture whose answer was lost may well have taken the money, and a payer told it failed would pay again.
+ * Card Fields paying an order and capturing it with the app's completeReturn: `order` gives the order when the
+ * payer presses (PayPal calls createOrder then). A refusal before any capture, the app's start throwing, or a
+ * decline is said under the fields and the payer can press again; anything else after the capture has started
+ * goes to the return page, which asks the server how it stands.
  */
-export function PaypalCardPayment({ payment, completeReturn, submitLabel, navigate, note, disabled, style, className }: PaypalCardPaymentProps) {
-  const capture = useAction(completeReturn)
+function useCardPayment(a: { clientId: string; orderKey?: string; order: () => Promise<CardOrder>; completeReturn: CompleteReturnRef; navigate?: (url: string) => void; style?: PaypalFieldStyle }) {
+  const capture = useAction(a.completeReturn)
   // null: no capture asked for yet; capturing: asked, no answer (yet).
   const outcome = useRef<'capturing' | 'paid' | 'declined' | null>(null)
+  // What the app's start threw (said as it is), as PayPal only reports it as a failed submit.
+  const startError = useRef<unknown>(null)
+  // The order the press paid, for its return page.
+  const paying = useRef<CardOrder | null>(null)
   const { busy, run } = useOneAtATime()
   const [error, setError] = useState<string | null>(null)
-  const latest = useLatest({ capture, navigate })
-  const { orderId, clientId, returnUrl } = payment
-  const { boxes, fields, load } = useCardFields({ clientId, orderId, style: withFieldStyle(style ?? {}) }, async ({ clientId, orderId, style }) => {
+  const latest = useLatest({ capture, navigate: a.navigate, order: a.order })
+  const { boxes, fields, load } = useCardFields({ clientId: a.clientId, orderKey: a.orderKey, style: withFieldStyle(a.style ?? {}) }, async ({ clientId, style }) => {
     await loadScript(paypalCardPaySdkUrl(clientId), PAYPAL_CARD_PAY_NAMESPACE, { 'data-namespace': PAYPAL_CARD_PAY_NAMESPACE })
     const sdk = (window as unknown as Record<string, CardPaySdk | undefined>)[PAYPAL_CARD_PAY_NAMESPACE]
     return (
       sdk?.CardFields({
         style,
-        createOrder: () => Promise.resolve(orderId),
+        createOrder: async () => {
+          try {
+            paying.current = await latest.current.order()
+            return paying.current.orderId
+          } catch (err) {
+            startError.current = err
+            throw err
+          }
+        },
         onApprove: async ({ orderID }) => {
           outcome.current = 'capturing'
           const r = await latest.current.capture({ processor: 'paypal', token: orderID })
@@ -393,18 +405,72 @@ export function PaypalCardPayment({ payment, completeReturn, submitLabel, naviga
       if (!cf) return
       setError(null)
       outcome.current = null
+      startError.current = null
+      paying.current = null
       try {
         await cf.submit()
       } catch (err) {
-        // Refused before any capture (a mistyped card, 3-D Secure failed): nothing was charged.
+        // Refused before any capture (a mistyped card, 3-D Secure failed, the app's start refused): nothing was charged.
         if (outcome.current === null) {
+          if (startError.current) return setError(errorMessage(startError.current, 'The payment couldn’t be started. Please try again.'))
           console.warn('payments: PayPal card fields refused the card:', err)
           return setError(CARD_REFUSED)
         }
       }
       if (outcome.current === 'declined') return setError('The card was declined. Try another card.')
-      ;(latest.current.navigate ?? ((u: string) => window.location.assign(u)))(returnUrl)
+      const returnUrl = paying.current?.returnUrl
+      if (returnUrl) (latest.current.navigate ?? ((u: string) => window.location.assign(u)))(returnUrl)
     })
 
+  return { boxes, load, error, busy, submit }
+}
+
+/**
+ * PayPal's card fields paying an order that also saves the card (vault with purchase), for a
+ * schedule's first payment: the card stays in PayPal's frames, PayPal checks it (3-D Secure only when
+ * the bank asks), the payment is captured, and the buyer goes to the return page. A declined card is
+ * said under the fields, and the buyer can try another. Once the capture has started, anything but a
+ * decline (paid, an error, no answer) goes to the return page, which asks the server how it stands:
+ * a capture whose answer was lost may well have taken the money, and a payer told it failed would pay again.
+ */
+export function PaypalCardPayment({ payment, completeReturn, submitLabel, navigate, note, disabled, style, className }: PaypalCardPaymentProps) {
+  const { orderId, clientId, returnUrl } = payment
+  const { boxes, load, error, busy, submit } = useCardPayment({ clientId, orderKey: orderId, order: () => Promise.resolve({ orderId, returnUrl }), completeReturn, navigate, style })
+  return <CardForm boxes={boxes} load={load} note={note} error={error} label={busy ? 'Paying…' : submitLabel} disabled={!!disabled || busy} onSubmit={() => void submit()} className={className} />
+}
+
+export interface PaypalOnPagePaymentProps {
+  /** The REST app's client id (public; it says sandbox or live), so the fields show before anything is started. */
+  clientId: string
+  /**
+   * Calls the app's action that prices the payment and runs payments.start (or startScheduleCheckout) with ui 'onPage',
+   * processor paypal and method card, returning its onPage. Called only when the payer presses the button; after a
+   * decline the next press calls it again, and the app passes the checkoutId its last call returned as `replaces`.
+   */
+  start: () => Promise<OnPagePayment>
+  /** The app's `completeReturn` (from payments.publicApi()): captures the payment (saving the card on a schedule's first payment). */
+  completeReturn: CompleteReturnRef
+  /** The button's words, e.g. "Give $25". */
+  submitLabel: string
+  /** Goes to the order's return page once paid, or once it is unknown whether it was. Default: a full page load. */
+  navigate?: (url: string) => void
+  note?: string
+  disabled?: boolean
+  /** Colors and fonts inside PayPal's frames (usePageTheme's paypal), merged over the defaults; a new one draws the fields again, clearing them. */
+  style?: PaypalFieldStyle
+  className?: string
+}
+
+/**
+ * PayPal's card fields for a new payment on the app's own page: nothing is made at PayPal until the press, when the
+ * app's start makes the order, PayPal checks the card and the payment is captured, as PaypalCardPayment does.
+ */
+export function PaypalOnPagePayment({ clientId, start, completeReturn, submitLabel, navigate, note, disabled, style, className }: PaypalOnPagePaymentProps) {
+  const order = async (): Promise<CardOrder> => {
+    const onPage = await start()
+    if (onPage.processor !== 'paypal') throw new Error('This payment was started with Stripe, not PayPal.')
+    return { orderId: onPage.orderId, returnUrl: onPage.returnUrl }
+  }
+  const { boxes, load, error, busy, submit } = useCardPayment({ clientId, order, completeReturn, navigate, style })
   return <CardForm boxes={boxes} load={load} note={note} error={error} label={busy ? 'Paying…' : submitLabel} disabled={!!disabled || busy} onSubmit={() => void submit()} className={className} />
 }

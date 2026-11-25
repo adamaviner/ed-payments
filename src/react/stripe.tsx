@@ -20,6 +20,7 @@ import { loadScript, STRIPE_JS, useSlow, type Load } from './embedded.js'
 import { errorMessage } from './errors.js'
 import { useLatest, useOneAtATime } from './hooks.js'
 import { Button, cn, ErrorNote } from './ui.js'
+import type { OnPagePayment } from '../client/index.js'
 
 /**
  * Stripe's Appearance API (https://docs.stripe.com/elements/appearance-api): a theme ('stripe',
@@ -48,24 +49,29 @@ export interface StripeElementsOptions {
 interface StripeError {
   message?: string
 }
+/** The Payment Element's own options: the order of the tabs, and the billing details it doesn't ask for. */
+interface ElementOptions {
+  paymentMethodOrder: string[]
+  fields?: { billingDetails: { name: 'never'; email: 'never' } }
+}
 interface PaymentElement {
   mount(el: HTMLElement): void
   destroy(): void
   on(event: 'ready' | 'change' | 'loaderror', handler: (e: { error?: StripeError }) => void): void
 }
 interface Elements {
-  create(type: 'payment', o: { paymentMethodOrder: string[] }): PaymentElement
+  create(type: 'payment', o: ElementOptions): PaymentElement
   submit(): Promise<{ error?: StripeError }>
-  update(o: { appearance?: StripeAppearance }): void
+  update(o: { appearance?: StripeAppearance; amount?: number }): void
 }
 interface Confirm {
   elements: Elements
   clientSecret: string
   redirect: 'if_required'
-  confirmParams: { return_url: string }
+  confirmParams: { return_url: string; payment_method_data?: { billing_details: Payer } }
 }
 type SetupIntent = { status: string; payment_method: string | { id: string } | null }
-type PaymentIntent = { status: string }
+type PaymentIntent = { id?: string; status: string }
 interface StripeJs {
   elements(o: StripeElementsOptions): Elements
   confirmSetup(o: Confirm): Promise<{ error?: StripeError; setupIntent?: SetupIntent }>
@@ -93,16 +99,31 @@ export function retryPaymentElementsOptions(amountCents: number, appearance?: St
   return { mode: 'payment', currency: 'usd', amount: amountCents, allowedPaymentMethodTypes: types, paymentMethodOptions: optionsFor(types), appearance }
 }
 
+/**
+ * For a new payment of amountCents made at the press (payments.start or startScheduleCheckout with ui 'onPage'): the
+ * same as the PaymentIntent the library makes for it, a card or a bank account, saved for later on a schedule's first payment.
+ */
+export function onPagePaymentElementsOptions(amountCents: number, saveForLater: boolean, appearance?: StripeAppearance): StripeElementsOptions {
+  const options = retryPaymentElementsOptions(amountCents, appearance)
+  return saveForLater ? { ...options, setupFutureUsage: 'off_session' } : options
+}
+
 /** Card first, then the bank account (SAVED_METHOD_TYPES is in that order). */
-const ELEMENT_OPTIONS = { paymentMethodOrder: [...SAVED_METHOD_TYPES] }
+const ELEMENT_OPTIONS: ElementOptions = { paymentMethodOrder: [...SAVED_METHOD_TYPES] }
 
 type Form = { stripe: StripeJs; elements: Elements }
 
 /**
  * Loads Stripe.js and mounts a Payment Element in `box` for these options. Changing the options mounts
- * it again; changing only the appearance restyles it in place, keeping what the payer typed.
+ * it again; changing only the appearance or the amount updates it in place, keeping what the payer typed.
  */
-function usePaymentElement(publishableKey: string, options: Omit<StripeElementsOptions, 'appearance'>, appearance: StripeAppearance | undefined, onChange: () => void) {
+function usePaymentElement(
+  publishableKey: string,
+  { amount, ...options }: Omit<StripeElementsOptions, 'appearance'>,
+  appearance: StripeAppearance | undefined,
+  onChange: () => void,
+  element: ElementOptions = ELEMENT_OPTIONS,
+) {
   const box = useRef<HTMLDivElement>(null)
   const form = useRef<Form | null>(null)
   // Set as soon as they are made, so a new appearance reaches a form still loading.
@@ -111,12 +132,17 @@ function usePaymentElement(publishableKey: string, options: Omit<StripeElementsO
   useSlow(load, setLoad)
   // Strings, so objects made fresh on every render don't mount the element again.
   const optionsKey = JSON.stringify(options)
+  const elementKey = JSON.stringify(element)
   const appearanceKey = JSON.stringify(appearance ?? {})
-  const latest = useLatest({ appearanceKey, onChange })
+  const latest = useLatest({ appearanceKey, amount, onChange })
 
   useEffect(() => {
     elementsNow.current?.update({ appearance: JSON.parse(appearanceKey) as StripeAppearance })
   }, [appearanceKey])
+
+  useEffect(() => {
+    if (amount !== undefined) elementsNow.current?.update({ amount })
+  }, [amount])
 
   useEffect(() => {
     let live = true
@@ -131,9 +157,14 @@ function usePaymentElement(publishableKey: string, options: Omit<StripeElementsO
       if (!make) return failed(new Error('Stripe.js loaded without Stripe.'))
       try {
         const stripe = make(publishableKey)
-        const elements = stripe.elements({ ...(JSON.parse(optionsKey) as StripeElementsOptions), appearance: JSON.parse(latest.current.appearanceKey) as StripeAppearance })
+        const { amount: amountNow, appearanceKey: appearanceNow } = latest.current
+        const elements = stripe.elements({
+          ...(JSON.parse(optionsKey) as StripeElementsOptions),
+          ...(amountNow === undefined ? {} : { amount: amountNow }),
+          appearance: JSON.parse(appearanceNow) as StripeAppearance,
+        })
         elementsNow.current = elements
-        const made = elements.create('payment', ELEMENT_OPTIONS)
+        const made = elements.create('payment', JSON.parse(elementKey) as ElementOptions)
         element = made
         made.on('ready', () => {
           if (!live) return
@@ -153,7 +184,7 @@ function usePaymentElement(publishableKey: string, options: Omit<StripeElementsO
       elementsNow.current = null
       element?.destroy()
     }
-  }, [publishableKey, optionsKey, latest])
+  }, [publishableKey, optionsKey, elementKey, latest])
 
   return { box, form, load }
 }
@@ -311,6 +342,115 @@ export function StripeRetryPayment({ publishableKey, amountCents, createPayment,
     const { error: stripeError, paymentIntent } = await stripe.confirmPayment({ elements, clientSecret, redirect: 'if_required', confirmParams: { return_url: returnTo(returnUrl) } })
     if (stripeError) refused(stripeError, 'The payment didn’t go through. Please try again.')
     settle(paymentIntent)
+  }
+
+  const submit = () =>
+    run(async () => {
+      const f = form.current
+      if (!f || paidRef.current) return
+      setError(null)
+      try {
+        await pay(f)
+      } catch (err) {
+        setError(err instanceof Refused ? err.message : errorMessage(err, 'The payment couldn’t be started. Please try again.'))
+      }
+    })
+
+  return (
+    <div className={cn('flex flex-col gap-2', className)}>
+      <LoadNote load={load} />
+      <div ref={box} />
+      {note && <p className="text-xs text-muted-foreground">{note}</p>}
+      <ErrorNote error={error} />
+      <Button variant="default" className="h-9" disabled={disabled || busy || paid || load !== 'ready'} onClick={() => void submit()}>
+        {busy ? 'Paying…' : submitLabel}
+      </Button>
+    </div>
+  )
+}
+
+/** Who is paying, as the app's own form already asked. */
+export interface Payer {
+  name: string
+  email: string
+}
+
+/** Stripe's return address with the PaymentIntent added, as Stripe adds it after a redirect, so one return page serves both. */
+const withPaymentIntent = (returnUrl: string, pi: PaymentIntent | undefined) => {
+  if (!pi?.id) return returnUrl
+  const url = new URL(returnUrl, window.location.href)
+  url.searchParams.set('payment_intent', pi.id)
+  return url.toString()
+}
+
+export interface StripeOnPagePaymentProps {
+  /** The app's Stripe publishable key, the same account as its secret key. */
+  publishableKey: string
+  /** What the payment will be, as the app's server will price it; a new amount is shown in place, keeping what the payer typed. */
+  amountCents: number
+  /**
+   * A schedule's first payment (payments.startScheduleCheckout): the method is saved for the next ones, and Stripe says
+   * so under the fields. Must match what start makes; changing it mounts the form again.
+   */
+  saveForLater?: boolean
+  /**
+   * The payer's name and email from the app's own form: Stripe's fields don't ask for them again, and they go on the
+   * payment method when it is confirmed. Without it Stripe asks for what a method needs (a bank account's name and email).
+   */
+  payer?: Payer
+  /**
+   * Calls the app's action that prices the payment and runs payments.start (or startScheduleCheckout) with ui 'onPage',
+   * returning its onPage. Called only when the payer presses the button and Stripe finds the fields complete; after a
+   * decline the next press calls it again, and the app passes the checkoutId its last call returned as `replaces`.
+   */
+  start: () => Promise<OnPagePayment>
+  /** The button's words, e.g. "Give $25". */
+  submitLabel: string
+  /**
+   * Goes to the return page (onPage.returnUrl with ?payment_intent= added, as Stripe adds it after a redirect) once Stripe
+   * took the payment or a bank payment is on its way. Default: a full page load. The page shows the outcome with
+   * checkoutReturnToken and useCheckoutReturn.
+   */
+  navigate?: (url: string) => void
+  disabled?: boolean
+  note?: string
+  /** Stripe's Appearance API (usePageTheme's stripe); a new one restyles the form in place. */
+  appearance?: StripeAppearance
+  className?: string
+}
+
+const PAYER_FIELDS: ElementOptions = { ...ELEMENT_OPTIONS, fields: { billingDetails: { name: 'never', email: 'never' } } }
+
+/**
+ * Stripe's Payment Element for a new payment on the app's own page, with one button. Nothing is made at Stripe until
+ * the press: then the fields are checked, the app's start makes the PaymentIntent, and Stripe confirms it here (a
+ * card's security check on the page). A decline is said under the fields, and the next press starts again.
+ */
+export function StripeOnPagePayment({ publishableKey, amountCents, saveForLater, payer, start, submitLabel, navigate, disabled, note, appearance, className }: StripeOnPagePaymentProps) {
+  const { busy, run } = useOneAtATime()
+  const paidRef = useRef(false)
+  const [paid, setPaid] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const { box, form, load } = usePaymentElement(publishableKey, onPagePaymentElementsOptions(amountCents, !!saveForLater), appearance, () => {}, payer ? PAYER_FIELDS : ELEMENT_OPTIONS)
+  const latest = useLatest({ start, payer, navigate })
+
+  const pay = async ({ stripe, elements }: Form) => {
+    const checked = await elements.submit()
+    if (checked.error) refused(checked.error, 'Check the payment details.')
+    const onPage = await latest.current.start()
+    if (onPage.processor !== 'stripe') throw new Error('This payment was started with PayPal, not Stripe.')
+    const { payer: billing } = latest.current
+    const { error: stripeError, paymentIntent } = await stripe.confirmPayment({
+      elements,
+      clientSecret: onPage.clientSecret,
+      redirect: 'if_required',
+      confirmParams: { return_url: onPage.returnUrl, ...(billing ? { payment_method_data: { billing_details: { name: billing.name, email: billing.email } } } : {}) },
+    })
+    if (stripeError) refused(stripeError, 'The payment didn’t go through. Please try again.')
+    if (!outcomeOf(paymentIntent)) refused(undefined, 'The payment didn’t go through. Please try again.')
+    paidRef.current = true
+    setPaid(true)
+    ;(latest.current.navigate ?? ((u: string) => window.location.assign(u)))(withPaymentIntent(onPage.returnUrl, paymentIntent))
   }
 
   const submit = () =>

@@ -3,7 +3,17 @@ import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from '@t
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { SAVED_METHOD_OPTIONS, SAVED_METHOD_TYPES } from '../core/savedMethods.js'
 import { forgetScripts, STRIPE_JS } from './embedded.js'
-import { retryPaymentElementsOptions, saveMethodElementsOptions, StripeRetryPayment, StripeSaveMethod, useStripeSetupReturn, type StripeAppearance } from './stripe.js'
+import {
+  onPagePaymentElementsOptions,
+  retryPaymentElementsOptions,
+  saveMethodElementsOptions,
+  StripeOnPagePayment,
+  StripeRetryPayment,
+  StripeSaveMethod,
+  useStripeSetupReturn,
+  type StripeAppearance,
+} from './stripe.js'
+import type { OnPagePayment } from '../client/index.js'
 
 type StripeError = { message: string }
 type Made = { key: string; options: Record<string, unknown>; element: Record<string, unknown> | null; updates: unknown[]; handlers: Record<string, (e: unknown) => void>; destroyed: boolean }
@@ -16,7 +26,8 @@ let calls: string[]
 let fieldsError: StripeError | undefined
 const confirmSetup =
   vi.fn<(o: { clientSecret: string; redirect: string; confirmParams: { return_url: string } }) => Promise<{ error?: StripeError; setupIntent?: { status: string; payment_method: string } }>>()
-const confirmPayment = vi.fn<(o: { clientSecret: string; redirect: string }) => Promise<{ error?: StripeError; paymentIntent?: { status: string } }>>()
+const confirmPayment =
+  vi.fn<(o: { clientSecret: string; redirect: string; confirmParams: Record<string, unknown> }) => Promise<{ error?: StripeError; paymentIntent?: { id?: string; status: string } }>>()
 const retrieveSetupIntent = vi.fn<(secret: string) => Promise<{ error?: StripeError; setupIntent?: { status: string; payment_method: string | null } }>>()
 
 async function finishScript(outcome: 'load' | 'error' = 'load') {
@@ -252,6 +263,82 @@ test('retry: the form leaves a redirect’s return to the page (checkoutReturnTo
   render(<StripeRetryPayment publishableKey="pk_test_1" amountCents={500} createPayment={() => Promise.resolve('pi_1_secret_x')} onPaid={onPaid} submitLabel="Pay" />)
   await ready('Pay')
   expect(onPaid).not.toHaveBeenCalled()
+})
+
+const stripeOnPage = (n: number): OnPagePayment => ({ processor: 'stripe', clientSecret: `pi_${n}_secret_x`, returnUrl: 'https://app.example.org/donate/thanks' })
+
+test('on-page: the form shows for the amount with nothing started, the payer’s name and email not asked for again', async () => {
+  const start = vi.fn(() => Promise.resolve(stripeOnPage(1)))
+  render(<StripeOnPagePayment publishableKey="pk_test_1" amountCents={2_500} payer={{ name: 'Ada Lovelace', email: 'ada@example.org' }} start={start} submitLabel="Give $25" appearance={night} />)
+  await ready('Give $25')
+  expect(made).toHaveLength(1)
+  expect(made[0].options).toEqual(onPagePaymentElementsOptions(2_500, false, night))
+  expect(made[0].options).not.toHaveProperty('setupFutureUsage')
+  expect(made[0].element).toEqual({ paymentMethodOrder: ['card', 'us_bank_account'], fields: { billingDetails: { name: 'never', email: 'never' } } })
+  expect(start).not.toHaveBeenCalled()
+  expect(confirmPayment).not.toHaveBeenCalled()
+})
+
+test('on-page: a schedule’s first payment saves the method; a new amount is shown in place, keeping what the payer typed', async () => {
+  const props = { publishableKey: 'pk_test_1', start: () => Promise.resolve(stripeOnPage(1)), submitLabel: 'Give monthly' }
+  const { rerender } = render(<StripeOnPagePayment {...props} amountCents={2_500} saveForLater />)
+  await ready('Give monthly')
+  expect(made[0].options).toEqual(onPagePaymentElementsOptions(2_500, true, {}))
+  expect(made[0].options).toMatchObject({ mode: 'payment', amount: 2_500, setupFutureUsage: 'off_session', allowedPaymentMethodTypes: [...SAVED_METHOD_TYPES] })
+  rerender(<StripeOnPagePayment {...props} amountCents={5_000} saveForLater />)
+  expect(made).toHaveLength(1)
+  expect(made[0].updates).toEqual([{ amount: 5_000 }])
+})
+
+test('on-page: the press checks the fields first; incomplete fields start nothing', async () => {
+  const start = vi.fn(() => Promise.resolve(stripeOnPage(1)))
+  render(<StripeOnPagePayment publishableKey="pk_test_1" amountCents={2_500} start={start} submitLabel="Give $25" />)
+  const button = await ready('Give $25')
+  fieldsError = { message: 'Your card number is incomplete.' }
+  await press(button)
+  expect(screen.getByRole('alert').textContent).toBe('Your card number is incomplete.')
+  expect(calls).toEqual(['submit'])
+  expect(start).not.toHaveBeenCalled()
+})
+
+test('on-page: a decline is said; the next press starts again and pays, then goes to the return page with the PaymentIntent', async () => {
+  let n = 0
+  const start = vi.fn(async () => {
+    calls.push('start')
+    return stripeOnPage(++n)
+  })
+  const navigate = vi.fn()
+  confirmPayment.mockImplementationOnce(async (o) => {
+    calls.push(`confirmPayment ${o.clientSecret}`)
+    return { error: { message: 'Your card was declined.' } }
+  })
+  confirmPayment.mockImplementationOnce(async (o) => {
+    calls.push(`confirmPayment ${o.clientSecret}`)
+    return { paymentIntent: { id: 'pi_2', status: 'succeeded' } }
+  })
+  render(<StripeOnPagePayment publishableKey="pk_test_1" amountCents={2_500} payer={{ name: 'Ada Lovelace', email: 'ada@example.org' }} start={start} submitLabel="Give $25" navigate={navigate} />)
+  const button = await ready('Give $25')
+  await press(button)
+  expect(screen.getByRole('alert').textContent).toBe('Your card was declined.')
+  expect(navigate).not.toHaveBeenCalled()
+  await press(button)
+  expect(calls).toEqual(['submit', 'start', 'confirmPayment pi_1_secret_x', 'submit', 'start', 'confirmPayment pi_2_secret_x'])
+  expect(confirmPayment.mock.calls[1][0]).toMatchObject({
+    redirect: 'if_required',
+    confirmParams: { return_url: 'https://app.example.org/donate/thanks', payment_method_data: { billing_details: { name: 'Ada Lovelace', email: 'ada@example.org' } } },
+  })
+  expect(navigate).toHaveBeenCalledWith('https://app.example.org/donate/thanks?payment_intent=pi_2')
+  expect(screen.queryByRole('alert')).toBeNull()
+  expect(button.hasAttribute('disabled')).toBe(true)
+})
+
+test('on-page: the app refusing to start is said in its words, and nothing is confirmed', async () => {
+  const start = vi.fn().mockRejectedValueOnce(new Error('[CONVEX A(donations:start)] [Request ID: 1] Server Error\nUncaught Error: Give at least $5.\n  at x')).mockResolvedValue(stripeOnPage(1))
+  render(<StripeOnPagePayment publishableKey="pk_test_1" amountCents={400} start={start} submitLabel="Give" navigate={() => {}} />)
+  const button = await ready('Give')
+  await press(button)
+  expect(screen.getByRole('alert').textContent).toBe('Give at least $5.')
+  expect(confirmPayment).not.toHaveBeenCalled()
 })
 
 test('setup return: not back from a redirect is none, and loads nothing', () => {
