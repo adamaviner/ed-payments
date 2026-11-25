@@ -15,8 +15,8 @@ const S = 'https://api.stripe.com'
 const B = 'https://api-m.sandbox.paypal.com'
 
 /** A webhook request a fake made, checked against the fixture for its event. */
-const stripeHook = (hook: RequestInit, name: StripeEventFixture, nullable?: string[]) => drift(JSON.parse(String(hook.body)), fixture(stripeEventFixtures[name]), { nullable })
-const paypalHook = (hook: RequestInit, name: PaypalEventFixture) => drift(JSON.parse(String(hook.body)), fixture(paypalEventFixtures[name]))
+const stripeHook = (hook: RequestInit, name: StripeEventFixture, nullable?: string[]) => drift(JSON.parse(hook.body as string), fixture(stripeEventFixtures[name]), { nullable })
+const paypalHook = (hook: RequestInit, name: PaypalEventFixture) => drift(JSON.parse(hook.body as string), fixture(paypalEventFixtures[name]))
 
 /**
  * A webhook for an intent paid in the Payment Element: the event against its fixture, and the intent
@@ -24,7 +24,7 @@ const paypalHook = (hook: RequestInit, name: PaypalEventFixture) => drift(JSON.p
  * intents, whose bank options differ (no financial_connections).
  */
 function onSessionHook(hook: RequestInit, name: StripeEventFixture) {
-  const event = JSON.parse(String(hook.body)) as { data: { object: unknown } }
+  const event = JSON.parse(hook.body as string) as { data: { object: unknown } }
   return [...drift({ ...event, data: { ...event.data, object: {} } }, fixture(stripeEventFixtures[name])), ...drift(event.data.object, fixture(stripeObjectFixtures.paymentIntentOnSession))]
 }
 
@@ -120,8 +120,8 @@ describe('fake Stripe answers in Stripe’s shapes', () => {
       id: string
     }
     await stripe.pay(session.id)
-    const pi = stripe.session(session.id).payment_intent
-    expect(drift(await json(await stripe.fetch(`${S}/v1/payment_intents/${String(pi)}`)), fixture(stripeObjectFixtures.paymentIntent))).toEqual([])
+    const pi = stripe.session(session.id).payment_intent as string
+    expect(drift(await json(await stripe.fetch(`${S}/v1/payment_intents/${pi}`)), fixture(stripeObjectFixtures.paymentIntent))).toEqual([])
   })
 
   test('the old payment_method_types parameter is refused as Stripe refuses it', async () => {
@@ -195,7 +195,7 @@ describe('fake Stripe answers in Stripe’s shapes', () => {
     expect(onSessionHook(await stripe.intentEvent(ach), 'payment_intent.payment_failed')).toEqual([])
     expect(stripeHook(await stripe.detach(stripe.saveMethod(customer.id, 'ok')), 'payment_method.detached')).toEqual([])
 
-    const pi = String(stripe.session(card.id).payment_intent)
+    const pi = stripe.session(card.id).payment_intent as string
     const dashboard = await stripe.refundInDashboard(pi, 500)
     expect(stripeHook(dashboard.created, 'refund.created')).toEqual([])
     expect(stripeHook(dashboard.charge, 'charge.refunded')).toEqual([])
