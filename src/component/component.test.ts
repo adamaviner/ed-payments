@@ -539,3 +539,33 @@ describe('scans that page past what they skip', () => {
     expect(await read(pay.schedules.due, { app: 'test', now: NOW + DAY, limit: 1 })).toEqual([{ id: ours, app: 'test' }])
   })
 })
+
+test('a schedule on a saved method the library has no row for is charged, whichever processor it is at', async () => {
+  const { mutate } = setup()
+  const make = (paymentMethodId: string, processor: 'stripe' | 'paypal') =>
+    mutate(pay.schedules.create, {
+      app: 'test',
+      owner: { type: 'donor', id: paymentMethodId },
+      ref: { type: 'monthly', id: paymentMethodId },
+      purpose: 'donation',
+      description: 'Monthly gift',
+      payer: { email: 'd@example.org' },
+      processor,
+      method: 'card',
+      paymentMethodId,
+      amountCents: 2500,
+      anchorDay: 1,
+      hourUTC: 15,
+      retryDays: [3],
+      firstChargeAt: NOW,
+      callbacks: {},
+      now: NOW,
+    })
+  for (const [pm, processor] of [
+    ['pm_unknown', 'stripe'],
+    ['paypal:unknown', 'paypal'],
+  ] as const) {
+    const id = await make(pm, processor)
+    expect(await mutate(pay.schedules.claim, { id, app: 'test', now: NOW })).toMatchObject({ action: 'charge', paymentMethodId: pm })
+  }
+})

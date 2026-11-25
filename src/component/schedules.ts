@@ -279,7 +279,11 @@ const chargePlan = v.object({
   context: v.any(),
 })
 
-/** Whether a saved method can still be charged: known to the library and not removed. */
+/**
+ * Whether a saved method can still be charged: not known to be removed. One the library has no row
+ * for, at either processor, is charged, and the processor's answer decides; calling it gone would
+ * lapse the schedule as a hard decline on a guess.
+ */
 async function methodUsable(ctx: QueryCtx, paymentMethodId: string | undefined): Promise<boolean> {
   if (!paymentMethodId) return false
   if (paymentMethodId.startsWith('paypal:')) {
@@ -287,7 +291,7 @@ async function methodUsable(ctx: QueryCtx, paymentMethodId: string | undefined):
       .query('paypalMethods')
       .withIndex('by_paymentTokenId', (q) => q.eq('paymentTokenId', paymentMethodId.slice('paypal:'.length)))
       .first()
-    return !!pp && pp.removedAt === undefined
+    return !pp || pp.removedAt === undefined
   }
   const pm = await ctx.db
     .query('paymentMethods')
