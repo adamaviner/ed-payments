@@ -305,6 +305,52 @@ describe('the buyer pays on the app’s page after a decline', () => {
   })
 })
 
+describe('a method that isn’t saved for the payer', () => {
+  test('a failed checkout (METHOD_NOT_SAVED), the failed callback once, nothing charged; the same key gives the same checkout', async () => {
+    const { t, status, calls, settle } = setup()
+    const id = await t.mutation(api.bids.charge, { user: 'nobody', bidId: 'b1', paymentMethodId: 'pm_gone' })
+    await settle()
+    expect(await status(id)).toMatchObject({
+      status: 'failed',
+      kind: 'offSession',
+      processor: 'stripe',
+      amountCents: 5000,
+      declineCode: 'METHOD_NOT_SAVED',
+      declineKind: 'hard',
+      lastError: 'This payer has no saved payment method here.',
+    })
+    expect(intentCalls()).toHaveLength(0)
+    expect((await calls('onFailed')).map((c) => c.args)).toMatchObject([
+      { checkoutId: id, kind: 'offSession', purpose: 'bid', declined: false, wasProcessing: false, declineCode: 'METHOD_NOT_SAVED', context: { bidId: 'b1' } },
+    ])
+    expect(await t.mutation(api.bids.charge, { user: 'nobody', bidId: 'b1', paymentMethodId: 'pm_gone' })).toBe(id)
+    await settle()
+    expect(await calls('onFailed')).toHaveLength(1)
+  })
+
+  test('the payer then pays on the app’s page with a new card (retryOnSession)', async () => {
+    const { t, status, calls, settle, post } = setup()
+    const id = await t.mutation(api.bids.charge, { user: 'nobody', bidId: 'b1', paymentMethodId: 'pm_gone' })
+    await settle()
+    const retry = await t.action(api.bids.retry, { checkoutId: id })
+    expect(retry.clientSecret).toMatch(/_secret_/)
+    expect(await status(retry.checkoutId)).toMatchObject({ kind: 'onSession', status: 'pending', retryOf: id, amountCents: 5000 })
+    await post(await stripe.confirm((await status(retry.checkoutId)).processorCheckoutId!, 'ok'))
+    expect(await status(retry.checkoutId)).toMatchObject({ status: 'paid' })
+    expect((await calls('onPaid')).map((c) => c.args)).toMatchObject([{ kind: 'onSession', context: { bidId: 'b1' }, paidCents: 5000 }])
+  })
+
+  test('the other refusals still throw before anything is recorded', async () => {
+    const { t, saved, calls } = setup()
+    await expect(t.mutation(api.bids.charge, { user: 'nobody', bidId: 'b1', paymentMethodId: 'pm_gone', amountCents: 0 })).rejects.toThrow(/at least one cent/)
+    await expect(t.mutation(api.bids.charge, { user: 'nobody', bidId: 'b1', paymentMethodId: 'pm_gone', key: 'x'.repeat(201) })).rejects.toThrow(/idempotency key/)
+    const pm = await saved()
+    await t.mutation(api.bids.charge, { user: 'u1', bidId: 'b1', paymentMethodId: pm, key: 'k1' })
+    await expect(t.mutation(api.bids.charge, { user: 'nobody', bidId: 'b1', paymentMethodId: 'pm_gone', key: 'k1' })).rejects.toThrow(/different charge/)
+    expect(await calls('onFailed')).toEqual([])
+  })
+})
+
 describe('refunds, disputes, sweep and the comparison cover saved-method charges', () => {
   test('a refund through the ledger, a dashboard refund and a dispute on a bid charge are recorded', async () => {
     const { t, status, saved, charge, post, calls, issues } = setup()

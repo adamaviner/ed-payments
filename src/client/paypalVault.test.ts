@@ -97,7 +97,6 @@ describe('saving a card or PayPal account in PayPal’s vault', () => {
     const bensCard = await save({ user: 'u2' })
     await expect(t.action(api.bids.verify, { user: 'u1', paymentMethodId: bensCard.paymentMethodId })).rejects.toThrow(/couldn’t be used/)
     await expect(t.action(api.bids.verify, { user: 'u1', paymentMethodId: 'paypal:madeup' })).rejects.toThrow(/couldn’t be used/)
-    await expect(t.mutation(api.bids.charge, { user: 'u1', bidId: 'b1', paymentMethodId: bensCard.paymentMethodId })).rejects.toThrow(/isn’t saved for this payer/)
   })
 
   test('removing: a PayPal method is deleted from the vault, a Stripe one detached; neither is listed or accepted again', async () => {
@@ -212,6 +211,30 @@ describe('the buyer pays after a declined PayPal charge', () => {
     expect(await t.action(api.payments.completeReturn, { processor: 'paypal', token: again.embedded.orderId })).toMatchObject({ status: 'paid' })
     expect(await status(again.checkoutId)).toMatchObject({ status: 'paid', kind: 'onSession', processor: 'paypal' })
     await expect(t.action(api.bids.retryPaypal, { checkoutId: declined })).rejects.toThrow(/already paid/)
+  })
+})
+
+describe('charging a PayPal method that isn’t saved for the payer', () => {
+  test('another owner’s method: a failed checkout (METHOD_NOT_SAVED), nothing charged, their method untouched; the payer then pays with PayPal’s buttons', async () => {
+    const { t, status, calls, save, charge } = setup()
+    const bensCard = await save({ user: 'u2' })
+    const id = await charge(bensCard.paymentMethodId)
+    expect(await status(id)).toMatchObject({
+      status: 'failed',
+      processor: 'paypal',
+      declineCode: 'METHOD_NOT_SAVED',
+      declineKind: 'hard',
+      lastError: 'That payment method isn’t saved for this payer.',
+    })
+    expect(pp.vaultCharges).toHaveLength(0)
+    expect((await calls('onFailed')).map((c) => c.args)).toMatchObject([{ checkoutId: id, kind: 'offSession', declined: false, declineCode: 'METHOD_NOT_SAVED', context: { bidId: 'b1' } }])
+    expect(await t.action(api.bids.methods, { user: 'u2' })).toMatchObject([{ paymentMethodId: bensCard.paymentMethodId, declined: false }])
+
+    const retry = await t.action(api.bids.retryPaypal, { checkoutId: id })
+    pp.approve(retry.embedded.orderId)
+    expect(await t.action(api.payments.completeReturn, { processor: 'paypal', token: retry.embedded.orderId })).toMatchObject({ status: 'paid' })
+    expect(await status(retry.checkoutId)).toMatchObject({ status: 'paid', kind: 'onSession', processor: 'paypal', retryOf: id })
+    expect((await calls('onPaid')).map((c) => c.args)).toMatchObject([{ kind: 'onSession', context: { bidId: 'b1' } }])
   })
 })
 

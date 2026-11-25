@@ -466,6 +466,11 @@ MERCHANT`). `savePaypalMethod` turns the approved token into a payment token and
   found. After five tries, or at once for anything odd, a `charge_unknown` issue asks a person, who
   retries it or gives it up (Stripe is asked first: a charge it shows paid is settled, an open one canceled; PayPal's order is read, or without an order id Transaction Search is searched for a capture tagged with the charge, and giving up is refused until three hours after the last try, since PayPal's search lags that much; otherwise `failed`, and the app decides what next). The sweep leaves charges handed to a person alone. A charge and its on-session retries pay for one thing, as does each period of a schedule: a second payment for it is owed back (`refund_needed`), and only one retry can be open at a time. An on-session retry of a schedule's charge pays that period and moves the schedule on; one asked for once the period is paid is refused. A charge whose queued try died is
   picked up by the sweep after 10 quiet minutes.
+  A method that isn't saved for the payer (a PayPal token that isn't theirs or isn't recorded, or a
+  payer with no Stripe Customer here) isn't thrown: `chargeSaved` records the checkout failed at once,
+  `declineCode: 'METHOD_NOT_SAVED'` (`declineKind: 'hard'`, `declined: false`, nothing charged), and
+  `failed` runs in that transaction as for a decline, so the payer pays with `retryOnSession` or
+  `retryWithPaypal`. The same key returns that checkout, with no second callback.
 - **On-session retries with PayPal.** `retryWithPaypal` makes an order for PayPal's buttons (a PayPal
   account or a card), settled like an embedded checkout. One retry is open at a time: asking for the
   other processor closes the open one (a Stripe PaymentIntent canceled first).
@@ -600,7 +605,7 @@ AGENTS.md      the rules for apps that use it (shipped in the package)
 | `updateSchedule`, `pauseSchedule`, `resumeSchedule`, `cancelSchedule`                   | mutation                 | Change, pause, resume, end; `by` is recorded and passed to `scheduleChanged`.                                                                                  |
 | `schedulesFor(ctx, owner)`, `schedulesForRef(ctx, ref)`, `getSchedule(ctx, id)`         | query                    | Schedules, ended ones included.                                                                                                                                |
 | `retryWithPaypal(ctx, { checkoutId, returnPath })`                                      | action                   | `{ checkoutId, embedded }` for `PaypalButtons` after a decline. Rate-limited.                                                                                  |
-| `chargeSaved(ctx, args)`                                                                | mutation/action          | Queues an off-session charge; the checkout id. Same `idempotencyKey`, same checkout.                                                                           |
+| `chargeSaved(ctx, args)`                                                                | mutation/action          | Queues an off-session charge; the checkout id. Same `idempotencyKey`, same checkout. A method not saved for the payer: failed at once (`METHOD_NOT_SAVED`).    |
 | `retryOnSession(ctx, { checkoutId })`                                                   | action                   | `{ checkoutId, clientSecret }` for the buyer to pay after a decline; call it on submit, from `StripeRetryPayment`'s `createPayment`. Rate-limited.             |
 | `completeReturn(ctx, { processor, token })`                                             | action                   | Settles if the processor says so; `{ checkoutId, ref, purpose, status }` or null.                                                                              |
 | `status` / `get`, `forRef`, `byPaymentRef`, `list`, `refundable`                        | query                    | Checkouts (`refundable` is paged and indexed).                                                                                                                 |
@@ -725,6 +730,14 @@ the webhooks registered on the live deployment:
   `payments.worker()` or its deploys failed. That export can go now; keeping it does no harm.
 - **A `v.id()` in the context may have capital letters** (as ids made by convex-test do, ending in the table
   name). v0.9.0 refused them, so a host's tests failed on tables named in mixed case; production ids were fine.
+- **`chargeSaved` no longer throws for a method that isn't saved for the payer** ("That payment method
+  isn’t saved for this payer." / "This payer has no saved payment method here."). It returns a checkout
+  id as usual, for a checkout already `failed` with `declineCode: 'METHOD_NOT_SAVED'` (`declined: false`,
+  nothing charged), and `on.failed` runs for it in that transaction, as for a declined charge; the same
+  key returns it again without a second callback. `retryOnSession` and `retryWithPaypal` take it, so the
+  payer can pay with another card or PayPal. An app that caught the throw (to ask for another method)
+  drops that catch and lets its failed-charge path run; word `METHOD_NOT_SAVED` as "pay with another
+  method", not as a declined card. A bad amount, a misused key or a wrong context still throws.
 
 ### v0.9.0 (audit fixes)
 

@@ -97,11 +97,20 @@ export const create = mutation({
   handler: async (ctx, a) => (await insertCheckout(ctx, a)).id,
 })
 
-/** create, saying whether this call made the checkout, so a repeat of a charge doesn't queue it again. */
+/**
+ * create, saying whether this call made the checkout, so a repeat of a charge doesn't queue it again.
+ * With `failed` (chargeSaved found the method isn't saved for the payer) the charge is recorded as
+ * failed in the same transaction, onFailed included, so the payer can be asked to pay on the app's
+ * page (a retry needs a failed charge). A repeat finds it already failed and calls nothing again.
+ */
 export const createCharge = mutation({
-  args: createArgs,
+  args: { ...createArgs, failed: v.optional(v.object({ reason: v.string(), declineCode: v.string() })) },
   returns: v.object({ id: v.string(), created: v.boolean() }),
-  handler: async (ctx, a) => await insertCheckout(ctx, a),
+  handler: async (ctx, { failed, ...a }) => {
+    const made = await insertCheckout(ctx, a)
+    if (made.created && failed) await failCheckout(ctx, await loadCheckout(ctx, made.id), { ...failed, declineKind: 'hard', now: a.now })
+    return made
+  },
 })
 
 /** The processor made its checkout: remember its id; the buyer is on their way. */
@@ -233,19 +242,26 @@ export const settleFailed = mutation({
     now: v.number(),
   },
   returns: v.union(v.object({ outcome: v.literal('failed') }), already),
-  handler: async (ctx, { id, reason, declined, declineCode, declineKind, processorCheckoutId, now }) => {
+  handler: async (ctx, { id, ...f }) => {
     const c = await loadCheckout(ctx, id)
     if (c.status !== 'created' && c.status !== 'pending' && c.status !== 'processing') return { outcome: 'already_handled' as const, status: c.status }
-    const wasProcessing = c.status === 'processing'
-    const patch = { status: 'failed' as const, lastError: reason, settledAt: now, processorCheckoutId: c.processorCheckoutId ?? processorCheckoutId, declineCode, declineKind, parkedAt: undefined }
-    await ctx.db.patch(c._id, patch)
-    if (declined && c.paymentMethodId) await markDeclined(ctx, c.paymentMethodId, reason, now)
-    await resolveIssue(ctx, c._id, 'charge_unknown', now)
-    await notifyHost(ctx, { ...c, ...patch }, 'onFailed', { reason, declined: declined ?? false, wasProcessing, declineCode: declineCode ?? null }, now)
-    await scheduleFailed(ctx, { ...c, ...patch }, { reason, declineCode, kind: declineKind, wasProcessing }, now)
+    await failCheckout(ctx, c, f)
     return { outcome: 'failed' as const }
   },
 })
+
+type Failure = { reason: string; declined?: boolean; declineCode?: string; declineKind?: Doc<'checkouts'>['declineKind']; processorCheckoutId?: string; now: number }
+
+/** settleFailed's work on a checkout still open: the row, the method marked, the host's onFailed and the schedule, in the caller's transaction. */
+async function failCheckout(ctx: MutationCtx, c: Doc<'checkouts'>, { reason, declined, declineCode, declineKind, processorCheckoutId, now }: Failure) {
+  const wasProcessing = c.status === 'processing'
+  const patch = { status: 'failed' as const, lastError: reason, settledAt: now, processorCheckoutId: c.processorCheckoutId ?? processorCheckoutId, declineCode, declineKind, parkedAt: undefined }
+  await ctx.db.patch(c._id, patch)
+  if (declined && c.paymentMethodId) await markDeclined(ctx, c.paymentMethodId, reason, now)
+  await resolveIssue(ctx, c._id, 'charge_unknown', now)
+  await notifyHost(ctx, { ...c, ...patch }, 'onFailed', { reason, declined: declined ?? false, wasProcessing, declineCode: declineCode ?? null }, now)
+  await scheduleFailed(ctx, { ...c, ...patch }, { reason, declineCode, kind: declineKind, wasProcessing }, now)
+}
 
 /**
  * An off-session charge whose outcome isn't known (no answer, Stripe down, an odd status). The row
