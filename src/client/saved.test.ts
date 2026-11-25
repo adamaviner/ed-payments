@@ -352,3 +352,60 @@ describe('refunds, disputes, sweep and the comparison cover saved-method charges
     ])
   })
 })
+
+describe('one charge per idempotency key', () => {
+  test('the same key for a different amount, method or thing is refused, not answered with the first charge', async () => {
+    const { t, saved, charge } = setup()
+    const pm = await saved()
+    await charge(pm, { key: 'k1', amountCents: 5000 })
+    await expect(t.mutation(api.bids.charge, { user: 'u1', bidId: 'b1', paymentMethodId: pm, amountCents: 6000, key: 'k1' })).rejects.toThrow(/different charge/)
+    await expect(t.mutation(api.bids.charge, { user: 'u1', bidId: 'b2', paymentMethodId: pm, amountCents: 5000, key: 'k1' })).rejects.toThrow(/different charge/)
+    const other = await saved('u1', 'ok')
+    await expect(t.mutation(api.bids.charge, { user: 'u1', bidId: 'b1', paymentMethodId: other, amountCents: 5000, key: 'k1' })).rejects.toThrow(/different charge/)
+    expect(await t.mutation(api.bids.charge, { user: 'u1', bidId: 'b1', paymentMethodId: pm, amountCents: 5000, key: 'k1' })).toEqual(expect.any(String))
+  })
+
+  test('Stripe still working on the same key (409) is tried again, not handed to a person', async () => {
+    const { status, saved, charge, issues } = setup()
+    const pm = await saved()
+    let busy = true
+    stripe.refuse((c) => {
+      if (!busy || c.method !== 'POST' || c.path !== '/v1/payment_intents') return undefined
+      busy = false
+      return Response.json(
+        { error: { type: 'idempotency_error', code: 'idempotency_key_in_use', message: 'There is currently another in-progress request using this Idempotent Key.' } },
+        { status: 409 },
+      )
+    })
+    const id = await charge(pm)
+    expect(await status(id)).toMatchObject({ status: 'paid', chargeAttempts: 1 })
+    expect(await issues()).toEqual([])
+  })
+
+  test('the component makes one checkout per charge key and says whether it made it', async () => {
+    const { t } = setup()
+    const args = {
+      app: 'test',
+      ref: { type: 'bid', id: 'b1' },
+      purpose: 'bid',
+      description: 'Winning bid',
+      amountCents: 5000,
+      processor: 'stripe' as const,
+      method: 'card' as const,
+      payer: { email: 'ana@example.org' },
+      returnUrl: 'https://app.example.org/',
+      cancelUrl: 'https://app.example.org/',
+      expiresAt: Date.now() + 60_000,
+      callbacks: {},
+      kind: 'offSession' as const,
+      paymentMethodId: 'pm_1',
+      chargeKey: 'test:k1',
+      now: Date.now(),
+    }
+    const first = await t.run(async (ctx) => await ctx.runMutation(app.components.payments.checkouts.createCharge, args))
+    const again = await t.run(async (ctx) => await ctx.runMutation(app.components.payments.checkouts.createCharge, args))
+    expect(first.created).toBe(true)
+    expect(again).toEqual({ id: first.id, created: false })
+    await expect(t.run(async (ctx) => await ctx.runMutation(app.components.payments.checkouts.createCharge, { ...args, amountCents: 6000 }))).rejects.toThrow(/different charge/)
+  })
+})

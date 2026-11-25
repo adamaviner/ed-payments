@@ -1,7 +1,7 @@
 // The checkout state machine. Every transition checks where the row is first and answers
 // already_handled when it has moved on, so a repeated webhook, a reloaded return page and the sweep
 // can all race without doing anything twice (Convex runs mutations one at a time per row).
-import { ConvexError, v } from 'convex/values'
+import { ConvexError, v, type ObjectType } from 'convex/values'
 import { paginationOptsValidator, paginationResultValidator } from 'convex/server'
 import type { Doc, Id } from './_generated/dataModel.js'
 import { mutation, query, type MutationCtx, type QueryCtx } from './_generated/server.js'
@@ -20,76 +20,95 @@ async function load(ctx: MutationCtx, id: string): Promise<Doc<'checkouts'>> {
   return c
 }
 
-/** Makes the row before the processor is asked, so its id can be the processor's reference. Refuses past the rate limits. */
+const createArgs = {
+  app: v.string(),
+  ref,
+  purpose: v.string(),
+  description: v.string(),
+  amountCents: v.number(),
+  processor,
+  method,
+  payer,
+  returnUrl: v.string(),
+  cancelUrl: v.string(),
+  expiresAt: v.number(),
+  context: v.optional(v.any()),
+  callbacks,
+  kind: v.optional(checkoutKind),
+  stripeCustomerId: v.optional(v.string()),
+  paymentMethodId: v.optional(v.string()),
+  chargeKey: v.optional(v.string()),
+  retryOf: v.optional(v.string()),
+  /** A schedule's charge or first payment, and the period it pays. */
+  scheduleId: v.optional(v.string()),
+  schedulePeriod: v.optional(v.string()),
+  limits: v.optional(limitsArg),
+  now: v.number(),
+}
+
+/**
+ * Makes the row before the processor is asked, so its id can be the processor's reference. Refuses
+ * past the rate limits. A charge key already used is the same charge: its checkout is returned (not
+ * made), and a different charge under it is refused, as Stripe refuses a key reused with other parameters.
+ */
+async function insertCheckout(ctx: MutationCtx, { limits, now, retryOf, scheduleId, ...a }: ObjectType<typeof createArgs>): Promise<{ id: Id<'checkouts'>; created: boolean }> {
+  if (!Number.isInteger(a.amountCents) || a.amountCents < 1) throw new ConvexError('A checkout needs an amount of at least one cent.')
+  // The same charge key is the same charge: two calls at once make one row.
+  if (a.chargeKey) {
+    const same = await ctx.db
+      .query('checkouts')
+      .withIndex('by_chargeKey', (q) => q.eq('chargeKey', a.chargeKey))
+      .first()
+    if (same) {
+      const differs = same.amountCents !== a.amountCents || same.paymentMethodId !== a.paymentMethodId || same.ref.type !== a.ref.type || same.ref.id !== a.ref.id
+      if (differs) throw new ConvexError('That idempotency key was already used for a different charge (another amount, payment method or thing paid for).')
+      return { id: same._id, created: false }
+    }
+  }
+  if (limits) await takeAll(ctx, limits, now)
+  const original = retryOf ? ctx.db.normalizeId('checkouts', retryOf) : null
+  if (retryOf && !original) throw new ConvexError(`No checkout ${retryOf}.`)
+  // One open retry at a time, decided in this transaction, so two tabs can't each start one.
+  if (original) {
+    const open = await ctx.db
+      .query('checkouts')
+      .withIndex('by_retryOf', (q) => q.eq('retryOf', original))
+      .filter((q) => q.or(q.eq(q.field('status'), 'created'), q.eq(q.field('status'), 'pending'), q.eq(q.field('status'), 'processing')))
+      .first()
+    if (open) throw new ConvexError('A payment for this is already open. Reload the page to continue it.')
+  }
+  // A retry pays what its charge was for: a schedule's charge carries its schedule and period on,
+  // so paying the retry pays the period and a second payment for it is owed back.
+  const from = original && !scheduleId ? await ctx.db.get(original) : null
+  if (from?.scheduleId && from.schedulePeriod) {
+    scheduleId = from.scheduleId
+    a.schedulePeriod = from.schedulePeriod
+  }
+  const schedule = scheduleId ? ctx.db.normalizeId('schedules', scheduleId) : null
+  if (scheduleId && (!schedule || !a.schedulePeriod)) throw new ConvexError(`No schedule ${scheduleId}.`)
+  const id = await ctx.db.insert('checkouts', {
+    ...a,
+    ...(original ? { retryOf: original } : {}),
+    ...(schedule ? { scheduleId: schedule } : {}),
+    status: 'created',
+    refundedCents: 0,
+    createdAt: now,
+  })
+  if (schedule && a.schedulePeriod) await noteScheduleCheckout(ctx, schedule, id, a.schedulePeriod, a.kind === 'offSession', now)
+  return { id, created: true }
+}
+
 export const create = mutation({
-  args: {
-    app: v.string(),
-    ref,
-    purpose: v.string(),
-    description: v.string(),
-    amountCents: v.number(),
-    processor,
-    method,
-    payer,
-    returnUrl: v.string(),
-    cancelUrl: v.string(),
-    expiresAt: v.number(),
-    context: v.optional(v.any()),
-    callbacks,
-    kind: v.optional(checkoutKind),
-    stripeCustomerId: v.optional(v.string()),
-    paymentMethodId: v.optional(v.string()),
-    chargeKey: v.optional(v.string()),
-    retryOf: v.optional(v.string()),
-    /** A schedule's charge or first payment, and the period it pays. */
-    scheduleId: v.optional(v.string()),
-    schedulePeriod: v.optional(v.string()),
-    limits: v.optional(limitsArg),
-    now: v.number(),
-  },
+  args: createArgs,
   returns: v.string(),
-  handler: async (ctx, { limits, now, retryOf, scheduleId, ...a }) => {
-    if (!Number.isInteger(a.amountCents) || a.amountCents < 1) throw new ConvexError('A checkout needs an amount of at least one cent.')
-    // The same charge key is the same charge: two calls at once make one row.
-    if (a.chargeKey) {
-      const same = await ctx.db
-        .query('checkouts')
-        .withIndex('by_chargeKey', (q) => q.eq('chargeKey', a.chargeKey))
-        .first()
-      if (same) return same._id
-    }
-    if (limits) await takeAll(ctx, limits, now)
-    const original = retryOf ? ctx.db.normalizeId('checkouts', retryOf) : null
-    if (retryOf && !original) throw new ConvexError(`No checkout ${retryOf}.`)
-    // One open retry at a time, decided in this transaction, so two tabs can't each start one.
-    if (original) {
-      const open = await ctx.db
-        .query('checkouts')
-        .withIndex('by_retryOf', (q) => q.eq('retryOf', original))
-        .filter((q) => q.or(q.eq(q.field('status'), 'created'), q.eq(q.field('status'), 'pending'), q.eq(q.field('status'), 'processing')))
-        .first()
-      if (open) throw new ConvexError('A payment for this is already open. Reload the page to continue it.')
-    }
-    // A retry pays what its charge was for: a schedule's charge carries its schedule and period on,
-    // so paying the retry pays the period and a second payment for it is owed back.
-    const from = original && !scheduleId ? await ctx.db.get(original) : null
-    if (from?.scheduleId && from.schedulePeriod) {
-      scheduleId = from.scheduleId
-      a.schedulePeriod = from.schedulePeriod
-    }
-    const schedule = scheduleId ? ctx.db.normalizeId('schedules', scheduleId) : null
-    if (scheduleId && (!schedule || !a.schedulePeriod)) throw new ConvexError(`No schedule ${scheduleId}.`)
-    const id = await ctx.db.insert('checkouts', {
-      ...a,
-      ...(original ? { retryOf: original } : {}),
-      ...(schedule ? { scheduleId: schedule } : {}),
-      status: 'created',
-      refundedCents: 0,
-      createdAt: now,
-    })
-    if (schedule && a.schedulePeriod) await noteScheduleCheckout(ctx, schedule, id, a.schedulePeriod, a.kind === 'offSession', now)
-    return id
-  },
+  handler: async (ctx, a) => (await insertCheckout(ctx, a)).id,
+})
+
+/** create, saying whether this call made the checkout, so a repeat of a charge doesn't queue it again. */
+export const createCharge = mutation({
+  args: createArgs,
+  returns: v.object({ id: v.string(), created: v.boolean() }),
+  handler: async (ctx, a) => await insertCheckout(ctx, a),
 })
 
 /** The processor made its checkout: remember its id; the buyer is on their way. */

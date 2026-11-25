@@ -871,11 +871,15 @@ export class Payments<C extends GenericValidator = GenericValidator> {
     if (!a.idempotencyKey || a.idempotencyKey.length > 200) throw new ConvexError('A charge needs an idempotency key of at most 200 characters.')
     this.checkContext(a.context)
     const existing = await ctx.runQuery(this.component.checkouts.byChargeKey, { chargeKey: `${this.app}:${a.idempotencyKey}` })
-    if (existing) return existing.id
+    if (existing) {
+      if (existing.amountCents !== a.amountCents || existing.paymentMethodId !== a.paymentMethodId || existing.ref.type !== a.ref.type || existing.ref.id !== a.ref.id)
+        throw new ConvexError('That idempotency key was already used for a different charge (another amount, payment method or thing paid for).')
+      return existing.id
+    }
     const target = await this.chargeTarget(ctx, a)
     const now = Date.now()
     const site = this.url('/')
-    const checkoutId = await ctx.runMutation(this.component.checkouts.create, {
+    const made = await ctx.runMutation(this.component.checkouts.createCharge, {
       app: this.app,
       ref: a.ref,
       purpose: a.purpose,
@@ -897,8 +901,9 @@ export class Payments<C extends GenericValidator = GenericValidator> {
       ...(schedule ?? {}),
       now,
     })
-    await ctx.scheduler.runAfter(0, this.wiring.worker.charge, { checkoutId })
-    return checkoutId
+    // Made by a call racing this one: that call queued the charge.
+    if (made.created) await ctx.scheduler.runAfter(0, this.wiring.worker.charge, { checkoutId: made.id })
+    return made.id
   }
 
   /** @internal Which processor charges a saved method: PayPal's must be the owner's, recorded here; Stripe's need the owner's Customer. */
