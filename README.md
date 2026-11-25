@@ -682,6 +682,30 @@ the webhooks registered on the live deployment:
     sandbox kept 2.59% + 49¢ on a saved card). Remove one: gone from the bid form and from PayPal. After a
     decline, pay on the retry page with PayPal's buttons.
 
+## Upgrade notes
+
+### Next release (audit fixes)
+
+Nothing to migrate; these change what a host sees:
+
+- **Money on a checkout the buyer cancelled** (`cancelCheckout` / `payments.cancel`) that arrives anyway
+  is now `refund_needed` (`on.refundNeeded`), not `paid`. A checkout that only expired still settles as paid.
+- **`cancelCheckout` can refuse** while a PayPal capture is under way, throwing "This payment is being paid
+  right now…". Show the sentence and check the checkout again.
+- **One payment per schedule period:** a second payment for a period is `refund_needed`. An on-session
+  retry of a schedule's charge pays that period; asking for one once the period is paid throws "This is already paid."
+- **`giveUpCharge` on a PayPal charge with no order id** looks in Transaction Search first and is refused
+  until three hours after the charge's last try when nothing shows yet.
+- **A charge key reused** for another amount, payment method or `ref` now throws instead of returning
+  the first charge.
+- **Refunds are refused while a dispute is open**, and a lost Stripe dispute is taken off what is left
+  to refund. `on.refunded` may come with `reversed: true` (add nothing to your validator: `payments.args.refunded` has it).
+- **Rate limits:** `savedMethods`, `verifyMethodOwner` and `removeSavedMethod` are now limited (per
+  owner; the first two at four times the usual number). Every public entry takes an optional
+  `limitKey`, which now counts instead of the signed-in user too (`start`'s did only for signed-out payers).
+- **A `v.id()` in the context** must look like a Convex id (it was any string).
+- **PayPal webhooks** sent more than ten minutes before they arrive are refused (400) without asking PayPal.
+
 ## Developing
 
 ```sh
