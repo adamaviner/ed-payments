@@ -264,7 +264,6 @@ ledger, passed to `on.refunded`).
 <PaymentsAdminPage
   api={api.paymentsAdmin} // the module from step 4, checked against the library's adminApi
   auth={{ token }} // only for apps with their own session tokens; leave out on Convex auth
-  skipApproval // the same as adminApi({ skipApproval }) on the server
   refLink={(ref) => (ref.type === 'item' ? <Link to={`/items/${ref.id}`}>The item</Link> : null)}
   refundQuestion={(checkout, amountCents, leftCents) =>
     amountCents === leftCents
@@ -284,8 +283,8 @@ ledger, passed to `on.refunded`).
 **Who may do what on the admin page.** `authorize.admin` may do everything. An optional
 `authorize.request` query (same shape) may see payments and issues and ask for refunds, nothing
 more: the page shows it only the refund form (always "Ask to refund") and the list of open refunds.
-The page asks `api.paymentsAdmin.access` (`{ level: 'admin' | 'request', name } | null`), so
-export `access` too. An optional `authorize.stepUp` query (`{ auth, action: 'approve' | 'send',
+The page asks `api.paymentsAdmin.access` (`{ level: 'admin' | 'request', name, skipApproval } | null`), so
+export `access` too; whether a refund waits for approval is the server's `adminApi({ skipApproval })`, read from there. An optional `authorize.stepUp` query (`{ auth, action: 'approve' | 'send',
 refundId }` → null, or a sentence) runs right before a refund is approved or sent. A sentence
 refuses with `ConvexError({ code: 'step_up', message })`. Give the page `onStepUp={(action) =>
 askForPasskey()}` and it runs the app's check, then tries once more.
@@ -677,6 +676,14 @@ repo uses an anonymous local one (no Convex account, no quota): the first time,
 ports 3410/3411 so it doesn't collide with ed-mail's (3400) or ed-schedule's (3210 and up).
 `test:sandbox` runs no files (and says so) without a Stripe test key or PayPal sandbox keys, and
 refuses live ones.
+
+## Upgrading
+
+### From v0.8.0
+
+- `PaymentsAdminPage` has no `skipApproval` prop: it reads the server's `adminApi({ skipApproval })`
+  through the `access` query, so the page and the server can't disagree. Remove the prop (TypeScript
+  refuses it now).
 
 ## Releasing
 

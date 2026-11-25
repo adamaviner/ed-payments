@@ -16,11 +16,6 @@ export interface PaymentsAdminPageProps {
   api: PaymentsAdminApi
   /** Passed to the app's authorize.admin query as it is (ed-schedule: `{ token }`); apps on Convex auth leave it out. */
   auth?: PaymentsAuth
-  /**
-   * The same as the server's adminApi({ skipApproval }). False (the default, as there): a refund asked
-   * for here waits for someone to approve it before it can be sent. True: it is sent at once.
-   */
-  skipApproval?: boolean
   /** What a payment was for, in the app (a link to the order or bid); else its description is shown alone. */
   refLink?: (ref: PaymentRef, checkout: CheckoutSummary) => ReactNode
   /** Payments and issues loaded at a time. Default 20. */
@@ -69,10 +64,12 @@ export function PaymentsAdminPage(props: PaymentsAdminPageProps) {
   const access = useQuery(props.api.access, args)
   if (access === undefined) return <Hint>Loading…</Hint>
   if (access === null) return <Note>Only those the app lets see payments can use this page.</Note>
-  return <Page {...props} args={args} admin={access.level === 'admin'} />
+  // Whether a refund waits for approval is the server's adminApi({ skipApproval }), read from access, so the
+  // page can't offer a send the server would refuse as unapproved, or ask for an approval it doesn't need.
+  return <Page {...props} args={args} admin={access.level === 'admin'} skipApproval={access.skipApproval} />
 }
 
-function Page({ api, args, admin, skipApproval = false, refLink, refundQuestion, onStepUp, pageSize = 20 }: PaymentsAdminPageProps & { args: { auth?: PaymentsAuth }; admin: boolean }) {
+function Page({ api, args, admin, skipApproval, refLink, refundQuestion, onStepUp, pageSize = 20 }: PaymentsAdminPageProps & { args: { auth?: PaymentsAuth }; admin: boolean; skipApproval: boolean }) {
   const stepped = async <R,>(action: 'approve' | 'send', fn: () => Promise<R>): Promise<R> => {
     try {
       return await fn()
