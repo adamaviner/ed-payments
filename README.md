@@ -11,7 +11,7 @@ disputes and reconciliation. An app prices things, keeps its own records and dec
 means for them, in callbacks. It never calls Stripe or PayPal itself. The rules an app (and a
 coding agent working in it) follows are in [`AGENTS.md`](AGENTS.md), shipped in the package.
 
-**Status:** v0.9.0: payments in USD, one-off and monthly (schedules): hosted and embedded checkouts (Stripe Checkout, PayPal), saved
+**Status:** v0.9.2: payments in USD, one-off and monthly (schedules): hosted and embedded checkouts (Stripe Checkout, PayPal), saved
 methods charged off-session (Stripe cards and bank accounts, PayPal-vaulted cards and PayPal accounts), on-session retries. Not here: subscriptions, order models, emails.
 The plans it was built from are ed-schedule's `payments_library_plan.md` (v0.1) and the v0.2 plan
 ("own all payment paths, bids included").
@@ -20,7 +20,7 @@ The plans it was built from are ed-schedule's `payments_library_plan.md` (v0.1) 
 
 The example app (`example/convex`) is a complete host; these are its files.
 
-**1. Install and mount.** `npm install github:adamaviner/ed-payments#v0.9.0` (pnpm: `pnpm add ...`).
+**1. Install and mount.** `npm install github:adamaviner/ed-payments#v0.9.2` (pnpm: `pnpm add ...`).
 
 ```ts
 // convex/convex.config.ts
@@ -722,14 +722,8 @@ the webhooks registered on the live deployment:
 
 ## Upgrade notes
 
-### Next release
+### v0.9.2
 
-- **`registerCrons` adds the hourly `payments schedules` cron only when `on.scheduleCharged`,
-  `on.scheduleFailed` and `on.scheduleChanged` are wired.** Before, it added it for every app (the worker
-  reference always seems to have `schedules`), so an app without schedules had to export `schedules` from
-  `payments.worker()` or its deploys failed. That export can go now; keeping it does no harm.
-- **A `v.id()` in the context may have capital letters** (as ids made by convex-test do, ending in the table
-  name). v0.9.0 refused them, so a host's tests failed on tables named in mixed case; production ids were fine.
 - **`chargeSaved` no longer throws for a method that isn't saved for the payer** ("That payment method
   isn’t saved for this payer." / "This payer has no saved payment method here."). It returns a checkout
   id as usual, for a checkout already `failed` with `declineCode: 'METHOD_NOT_SAVED'` (`declined: false`,
@@ -738,6 +732,15 @@ the webhooks registered on the live deployment:
   payer can pay with another card or PayPal. An app that caught the throw (to ask for another method)
   drops that catch and lets its failed-charge path run; word `METHOD_NOT_SAVED` as "pay with another
   method", not as a declined card. A bad amount, a misused key or a wrong context still throws.
+
+### v0.9.1
+
+- **`registerCrons` adds the hourly `payments schedules` cron only when `on.scheduleCharged`,
+  `on.scheduleFailed` and `on.scheduleChanged` are wired.** Before, it added it for every app (the worker
+  reference always seems to have `schedules`), so an app without schedules had to export `schedules` from
+  `payments.worker()` or its deploys failed. That export can go now; keeping it does no harm.
+- **A `v.id()` in the context may have capital letters** (as ids made by convex-test do, ending in the table
+  name). v0.9.0 refused them, so a host's tests failed on tables named in mixed case; production ids were fine.
 
 ### v0.9.0 (audit fixes)
 
