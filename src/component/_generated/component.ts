@@ -972,6 +972,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         {
           amountCents?: number;
           disputeId: string;
+          lost?: boolean;
           now: number;
           outcome?: string;
           paymentRef: string;

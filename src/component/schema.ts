@@ -306,6 +306,24 @@ export default defineSchema({
     .index('by_status', ['status', 'updatedAt'])
     .index('by_processorRefundId', ['processorRefundId']),
 
+  /**
+   * Disputes (chargebacks), one row each, so a payment with two is disputed until both end, and what a
+   * lost one took back is off what is left to refund. Kept forever, with their payments.
+   */
+  disputes: defineTable({
+    checkoutId: v.id('checkouts'),
+    processor,
+    disputeId: v.string(),
+    status: v.union(v.literal('open'), v.literal('won'), v.literal('lost')),
+    amountCents: v.optional(v.number()),
+    /** How it ended, in the processor's words. */
+    outcome: v.optional(v.string()),
+    openedAt: v.number(),
+    closedAt: v.optional(v.number()),
+  })
+    .index('by_disputeId', ['processor', 'disputeId'])
+    .index('by_checkout', ['checkoutId']),
+
   /** Webhook deliveries seen, so a repeat is answered at once. Kept 30 days. */
   events: defineTable({
     processor,

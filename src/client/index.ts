@@ -65,7 +65,7 @@ import {
 } from './saved.js'
 import { savePaypalMethod, setupPaypalMethod } from './paypalVault.js'
 import { runSchedules, startSchedule, startScheduleCheckout, updateSchedule, type ScheduleView, type StartScheduleArgs, type StartScheduleCheckoutArgs } from './schedules.js'
-import { errorText, paypalRefundState, stripeRefundState } from './util.js'
+import { errorText, paypalRefundState, stripeRefundState, type RefundState } from './util.js'
 import {
   callbackArgs,
   paidReturns,
@@ -1111,26 +1111,29 @@ export class Payments<C extends GenericValidator = GenericValidator> {
   async pushRefund(ctx: RunActionCtx, r: { refundId: string; key: string; processor: Processor; paymentRef: string; amountCents: number }) {
     const finish = (x: { ok: boolean; done: boolean; unknown?: boolean; processorRefundId?: string; error?: string }) =>
       ctx.runMutation(this.component.refunds.finish, { refundId: r.refundId, ...x, now: Date.now() })
+    // Only the processor call is guarded: a failure recording its answer must not be taken for a refusal
+    // (which would send it again under a new key); it throws, and the refund stays sending for the sweep.
+    let made: { id: string; state: RefundState; error?: string }
     try {
       if (r.processor === 'stripe') {
         if (!r.paymentRef.startsWith('pi_')) throw new ConvexError('This Stripe payment has no PaymentIntent to refund; refund it in the Stripe dashboard.')
-        const made = await stripe.createRefund(
+        const s = await stripe.createRefund(
           this.stripeKeys(),
           { paymentIntent: r.paymentRef, amountCents: r.amountCents, app: this.app, refundId: r.refundId },
           { fetch: this.fetch, idempotencyKey: r.key },
         )
-        if (made.status === 'failed' || made.status === 'canceled')
-          await finish({ ok: false, done: false, processorRefundId: made.id, error: `Stripe: the refund ${made.status}${made.failure_reason ? ` (${made.failure_reason})` : ''}.` })
-        else await finish({ ok: true, done: made.status === 'succeeded', processorRefundId: made.id })
+        made = { id: s.id, state: stripeRefundState(s.status), error: `Stripe: the refund ${s.status}${s.failure_reason ? ` (${s.failure_reason})` : ''}.` }
       } else {
-        const made = await this.withPaypal(ctx, (call) => paypal.refundCapture(call, r.paymentRef, { amountCents: r.amountCents, customId: tagFor(this.app, r.refundId) }, r.key))
-        if (made.status === 'FAILED' || made.status === 'CANCELLED') await finish({ ok: false, done: false, processorRefundId: made.id, error: `PayPal: the refund ${made.status.toLowerCase()}.` })
-        else await finish({ ok: true, done: made.status === 'COMPLETED', processorRefundId: made.id })
+        const pp = await this.withPaypal(ctx, (call) => paypal.refundCapture(call, r.paymentRef, { amountCents: r.amountCents, customId: tagFor(this.app, r.refundId) }, r.key))
+        made = { id: pp.id, state: paypalRefundState(pp.status), error: `PayPal: the refund ${pp.status.toLowerCase()}.` }
       }
     } catch (err) {
       const unknown = !(err instanceof ConvexError) && !(err instanceof ProcessorError && !err.retryable)
       await finish({ ok: false, done: false, unknown, error: errorText(err) })
+      return
     }
+    if (made.state === 'failed') await finish({ ok: false, done: false, processorRefundId: made.id, error: made.error })
+    else await finish({ ok: true, done: made.state === 'done', processorRefundId: made.id })
   }
 
   /** Records a refund made outside the app (a dashboard, a cheque) as done. */

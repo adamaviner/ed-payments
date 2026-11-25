@@ -463,8 +463,12 @@ MERCHANT`). `savePaypalMethod` turns the approved token into a payment token and
   `hostData` (`requestRefund({ ..., hostData })`, a few short strings, e.g. an admin's answer), which
   `on.refunded` receives when it is done (also when that request was refunded in a dashboard instead: an
   untagged refund of the same amount closes it); refunds the library or a dashboard made on their own
-  have none. `on.refunded` can come twice for one refund (failed at the processor after sending, then
-  sent again), so act on it idempotently.
+  have none. A refund the processor fails after reporting it done comes to `on.refunded` again with
+  `reversed: true` (and `refundedCents` without it); sent again later, it comes once more, so act on it
+  idempotently. While a dispute is open on a payment, refunds of it are refused (requesting, sending and
+  marking done by hand); each dispute is kept, so a payment is disputed until all of its disputes end,
+  and a Stripe dispute lost is taken off what is left to refund (a PayPal one comes back as a refund
+  event). Marking a refund done by hand is checked against what is left after refunds in progress.
 - **Sweep** (every 10 minutes): PayPal approvals whose webhook never came are captured; expired
   checkouts are settled if paid after all, else ended at the processor and abandoned; quiet off-session
   charges are tried again; refunds left sending are checked.

@@ -418,3 +418,72 @@ describe('money on a closed checkout', () => {
     expect(await mutate(pay.checkouts.claimCapture, { id, now: NOW + 3 * 60 * 60_000 })).toEqual({ claimed: false, status: 'abandoned' })
   })
 })
+
+describe('the refund ledger and disputes', () => {
+  const dispute = (mutate: ReturnType<typeof setup>['mutate'], paymentRef: string, disputeId: string, status: 'opened' | 'closed', o: { lost?: boolean; amountCents?: number } = {}) =>
+    mutate(pay.disputes.record, { processor: 'stripe', paymentRef, disputeId, status, amountCents: o.amountCents ?? 1000, lost: o.lost, outcome: o.lost ? 'lost' : 'won', now: NOW })
+
+  test('refunds are refused while a dispute is open; one dispute closing leaves another open; a lost one comes off what is left', async () => {
+    const { t, mutate, paid, checkout } = setup()
+    const id = await paid()
+    await dispute(mutate, `pi_${id}`, 'dp_1', 'opened')
+    await expect(t.mutation(api.shop.requestRefund, { checkoutId: id, reason: 'Sorry' })).rejects.toThrow(/disputed/)
+    await dispute(mutate, `pi_${id}`, 'dp_2', 'opened')
+    await dispute(mutate, `pi_${id}`, 'dp_1', 'closed')
+    expect((await checkout(id)).disputed).toBe(true)
+    await dispute(mutate, `pi_${id}`, 'dp_2', 'closed', { lost: true })
+    expect((await checkout(id)).disputed).toBe(false)
+    await expect(t.mutation(api.shop.requestRefund, { checkoutId: id, amountCents: 2000, reason: 'Sorry' })).rejects.toThrow(/Only \$15\.00 is left/)
+    expect(await t.mutation(api.shop.requestRefund, { checkoutId: id, reason: 'Sorry' })).toEqual(expect.any(String))
+    expect((await t.query(api.shop.refundsFor, { checkoutId: id }))[0]).toMatchObject({ amountCents: 1500 })
+  })
+
+  test('a refund in progress is refused to send while a dispute opened after it is open', async () => {
+    const { t, mutate, paid } = setup()
+    const id = await paid()
+    const refundId = await t.mutation(api.shop.requestRefund, { checkoutId: id, reason: 'Sorry' })
+    await dispute(mutate, `pi_${id}`, 'dp_1', 'opened')
+    await expect(mutate(pay.refunds.begin, { refundId, skipApproval: true, now: NOW })).rejects.toThrow(/disputed/)
+  })
+
+  test('marking a refund done by hand counts refunds being sent', async () => {
+    const { t, mutate, paid } = setup()
+    const id = await paid()
+    const a = await t.mutation(api.shop.requestRefund, { checkoutId: id, amountCents: 1500, reason: 'Part' })
+    const b = await t.mutation(api.shop.requestRefund, { checkoutId: id, amountCents: 1000, reason: 'Rest' })
+    await mutate(pay.refunds.begin, { refundId: a, skipApproval: true, now: NOW })
+    await mutate(pay.refunds.recordExternal, { processor: 'stripe', paymentRef: `pi_${id}`, processorRefundId: 're_dash', amountCents: 900, state: 'done', now: NOW })
+    await expect(mutate(pay.refunds.markManual, { refundId: b, by: 'boss', now: NOW })).rejects.toThrow(/left/)
+  })
+
+  test('a refund that failed at the processor isn’t linked to one marked done by hand', async () => {
+    const { t, mutate, paid, read } = setup()
+    const id = await paid()
+    const b = await t.mutation(api.shop.requestRefund, { checkoutId: id, amountCents: 1000, reason: 'By cheque' })
+    await mutate(pay.refunds.markManual, { refundId: b, by: 'boss', now: NOW })
+    expect(await mutate(pay.refunds.recordExternal, { processor: 'stripe', paymentRef: `pi_${id}`, processorRefundId: 're_failed', amountCents: 1000, state: 'failed', now: NOW })).toBe('unchanged')
+    expect(await read(pay.refunds.get, { refundId: b })).toMatchObject({ status: 'manual', processorRefundId: null })
+  })
+
+  test('a refund the processor fails after it was sent: the host is told it was reversed', async () => {
+    const { t, mutate, paid, calls, checkout } = setup()
+    const id = await paid()
+    const refundId = await t.mutation(api.shop.requestRefund, { checkoutId: id, amountCents: 1000, reason: 'Sorry' })
+    await mutate(pay.refunds.begin, { refundId, skipApproval: true, now: NOW })
+    await mutate(pay.refunds.finish, { refundId, ok: true, done: true, processorRefundId: 're_1', now: NOW })
+    await mutate(pay.refunds.recordExternal, { processor: 'stripe', paymentRef: `pi_${id}`, processorRefundId: 're_1', amountCents: 1000, state: 'failed', now: NOW })
+    expect((await checkout(id)).refundedCents).toBe(0)
+    expect((await calls('onRefunded')).map((c) => [c.args.refundedCents, c.args.reversed])).toEqual([
+      [1000, undefined],
+      [0, true],
+    ])
+  })
+
+  test('settling keeps a fee already recorded when the processor doesn’t say one', async () => {
+    const { mutate, create, checkout } = setup()
+    const id = await create()
+    await mutate(pay.checkouts.recordFee, { id, processorFeeCents: 103 })
+    await mutate(pay.checkouts.settlePaid, { id, paymentRef: 'pi_1', paidCents: 2500, now: NOW })
+    expect((await checkout(id)).processorFeeCents).toBe(103)
+  })
+})

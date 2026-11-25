@@ -162,7 +162,15 @@ export const settlePaid = mutation({
     const loaded = await load(ctx, id)
     if (!SETTLEABLE.has(loaded.status)) return { outcome: 'already_handled' as const, status: loaded.status }
     const c = { ...loaded, method: method ?? loaded.method }
-    await ctx.db.patch(c._id, { paymentRef, paidCents, processorFeeCents, settledAt: now, lastError: undefined, method: c.method, processorCheckoutId: c.processorCheckoutId ?? processorCheckoutId })
+    await ctx.db.patch(c._id, {
+      paymentRef,
+      paidCents,
+      processorFeeCents: processorFeeCents ?? c.processorFeeCents,
+      settledAt: now,
+      lastError: undefined,
+      method: c.method,
+      processorCheckoutId: c.processorCheckoutId ?? processorCheckoutId,
+    })
     await resolveIssue(ctx, c._id, 'charge_unknown', now)
     // The buyer cancelled before the money arrived: they were told it wasn't taken, so it goes back.
     const cancelled = c.cancelledByBuyerAt !== undefined

@@ -64,6 +64,11 @@ export function callbackArgs<C extends GenericValidator>(context: C) {
       origin: v.union(v.literal('requested'), v.literal('needed'), v.literal('external')),
       /** What the app passed to requestRefund as hostData (e.g. its admin's answer to a question); unset for others. */
       hostData: v.optional(v.record(v.string(), v.string())),
+      /**
+       * true: the processor failed this refund after reporting it done, so the money didn't go back after
+       * all; take it off again (refundedCents is already without it). It may then be sent again.
+       */
+      reversed: v.optional(v.boolean()),
     },
     /** refundNeeded: money arrived for a sale the host refused; a refund for it is waiting. */
     refundNeeded: { ...b, amountCents: v.number(), paidCents: v.number(), paymentRef: v.string(), refundId: v.string(), reason: v.string() },
