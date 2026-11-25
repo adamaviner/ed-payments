@@ -16,6 +16,12 @@ const HOUR = 60 * 60 * 1000
 const DAY = 24 * HOUR
 /** Charges are never scheduled further ahead than this (a start date, a pause). */
 const MAX_AHEAD_MS = 2 * 366 * DAY
+/**
+ * How long a schedule waits for a PayPal token that is saved after its first payment (vault APPROVED)
+ * before the payer is asked for another method. PayPal sends it once the save is done, normally
+ * within minutes.
+ */
+const VAULT_WAIT_MS = 3 * DAY
 
 export const scheduleView = v.object({
   id: v.string(),
@@ -324,6 +330,17 @@ export const claim = mutation({
       await ctx.db.patch(s._id, { nextChargeAt: now + HOUR, updatedAt: now })
       return wait('The last charge hasn’t finished.')
     }
+    if (!s.paymentMethodId && s.paypalVaultPending) {
+      const deadline = s.paypalVaultPending.since + VAULT_WAIT_MS
+      if (now < deadline) {
+        await ctx.db.patch(s._id, { nextChargeAt: Math.min(now + DAY, deadline), updatedAt: now })
+        return wait('PayPal hasn’t sent the saved payment method yet.')
+      }
+      const reason = 'PayPal didn’t finish saving the payment method.'
+      await ctx.db.patch(s._id, { paypalVaultPending: undefined })
+      await failPeriod(ctx, { ...s, paypalVaultPending: undefined }, { period: s.period, reason, declineCode: METHOD_REMOVED, kind: 'hard', now })
+      return wait(reason)
+    }
     if (!(await methodUsable(ctx, s.paymentMethodId))) {
       await failPeriod(ctx, s, { period: s.period, reason: 'The saved payment method is gone.', declineCode: METHOD_REMOVED, kind: 'hard', now })
       return wait('The saved payment method is gone.')
@@ -419,6 +436,9 @@ async function advance(ctx: MutationCtx, s: Doc<'schedules'>, period: string, no
     return
   }
   const next = shiftPeriod(period, 1)
+  // A schedule still waiting for its PayPal token is looked at again when the wait is over, so the
+  // payer is asked for another method then rather than at the next charge.
+  const nextChargeAt = Math.min(chargeTimeOf(next, s), s.paypalVaultPending ? s.paypalVaultPending.since + VAULT_WAIT_MS : Infinity)
   await ctx.db.patch(s._id, {
     lastPaidPeriod,
     period: next,
@@ -427,7 +447,7 @@ async function advance(ctx: MutationCtx, s: Doc<'schedules'>, period: string, no
     firstFailedAt: undefined,
     lastError: undefined,
     // A paused or ended schedule keeps its own next time (or none).
-    ...(s.status === 'active' || s.status === 'past_due' || s.status === 'starting' ? { status: 'active' as const, nextChargeAt: chargeTimeOf(next, s) } : {}),
+    ...(s.status === 'active' || s.status === 'past_due' || s.status === 'starting' ? { status: 'active' as const, nextChargeAt } : {}),
     updatedAt: now,
   })
 }
@@ -503,6 +523,65 @@ async function notStarted(ctx: MutationCtx, s: Doc<'schedules'>, reason: string,
   await changed(ctx, s, ['not_started'], { reason, now })
 }
 
+const paypalSaved = v.object({
+  paypalCustomerId: v.string(),
+  paymentTokenId: v.string(),
+  kind: v.union(v.literal('card'), v.literal('paypal')),
+  label: v.string(),
+  usagePattern: v.optional(v.string()),
+  networkRef: v.optional(networkRef),
+})
+type PaypalSaved = Infer<typeof paypalSaved>
+
+/**
+ * Whether a schedule can still take the method its first payment saved: it is waiting for that
+ * payment, was never started and is revived by it, or started while PayPal finished saving.
+ */
+async function takesFirstMethod(ctx: QueryCtx, s: Doc<'schedules'>): Promise<boolean> {
+  if (s.paymentMethodId) return false
+  if (s.status === 'starting' || (s.paypalVaultPending && LIVE.has(s.status))) return true
+  const first = s.lastCheckoutId ? await ctx.db.get(s.lastCheckoutId) : null
+  return !!first && revivable(s, first)
+}
+
+/** The PayPal token as the owner's saved method (their PayPal customer made if they have none). Repeats change nothing. */
+async function keepPaypalMethod(ctx: MutationCtx, s: Doc<'schedules'>, paypal: PaypalSaved, now: number) {
+  const owned = await ctx.db
+    .query('paypalCustomers')
+    .withIndex('by_owner', (q) => q.eq('app', s.app).eq('owner.type', s.owner.type).eq('owner.id', s.owner.id))
+    .first()
+  const customerId = owned?._id ?? (await ctx.db.insert('paypalCustomers', { app: s.app, owner: s.owner, paypalCustomerId: paypal.paypalCustomerId, createdAt: now }))
+  const row = await ctx.db
+    .query('paypalMethods')
+    .withIndex('by_paymentTokenId', (q) => q.eq('paymentTokenId', paypal.paymentTokenId))
+    .first()
+  if (row) return
+  await ctx.db.insert('paypalMethods', {
+    customerId,
+    paymentTokenId: paypal.paymentTokenId,
+    kind: paypal.kind,
+    label: paypal.label,
+    usagePattern: paypal.usagePattern,
+    networkRef: paypal.networkRef,
+    createdAt: now,
+  })
+}
+
+/**
+ * The saved method becomes the schedule's. One that started while waiting for its PayPal token is
+ * due again at its period's own time (at once if that has passed), not at the end of the wait.
+ */
+async function attach(ctx: MutationCtx, s: Doc<'schedules'>, paymentMethodId: string, method: Doc<'schedules'>['method'], now: number) {
+  const waited = s.paypalVaultPending !== undefined && s.status === 'active'
+  await ctx.db.patch(s._id, {
+    paymentMethodId,
+    method,
+    paypalVaultPending: undefined,
+    ...(waited ? { nextChargeAt: Math.max(now, chargeTimeOf(s.period, s)) } : {}),
+    updatedAt: now,
+  })
+}
+
 /**
  * The method a starting schedule's first payment saved (Stripe's setup_future_usage, PayPal's vault
  * with purchase), recorded as the owner's saved method and the schedule's. Repeats change nothing.
@@ -511,25 +590,13 @@ export const attachMethod = mutation({
   args: {
     id: v.string(),
     stripe: v.optional(v.object({ stripeCustomerId: v.string(), stripePaymentMethodId: v.string(), kind: v.union(v.literal('card'), v.literal('ach')), label: v.string() })),
-    paypal: v.optional(
-      v.object({
-        paypalCustomerId: v.string(),
-        paymentTokenId: v.string(),
-        kind: v.union(v.literal('card'), v.literal('paypal')),
-        label: v.string(),
-        usagePattern: v.optional(v.string()),
-        networkRef: v.optional(networkRef),
-      }),
-    ),
+    paypal: v.optional(paypalSaved),
     now: v.number(),
   },
   returns: v.null(),
   handler: async (ctx, { id, stripe, paypal, now }) => {
     const s = await load(ctx, id)
-    if (s.paymentMethodId) return null
-    // Only a schedule its first payment can still start: waiting for it, or never started and revived by it.
-    const first = s.lastCheckoutId ? await ctx.db.get(s.lastCheckoutId) : null
-    if (s.status !== 'starting' && !(first && revivable(s, first))) return null
+    if (!(await takesFirstMethod(ctx, s))) return null
     if (stripe) {
       const customer = await ctx.db
         .query('customers')
@@ -541,31 +608,91 @@ export const attachMethod = mutation({
         .withIndex('by_stripePaymentMethodId', (q) => q.eq('stripePaymentMethodId', stripe.stripePaymentMethodId))
         .first()
       if (!row) await ctx.db.insert('paymentMethods', { customerId: customer._id, stripePaymentMethodId: stripe.stripePaymentMethodId, kind: stripe.kind, label: stripe.label, createdAt: now })
-      await ctx.db.patch(s._id, { paymentMethodId: stripe.stripePaymentMethodId, method: stripe.kind, updatedAt: now })
+      await attach(ctx, s, stripe.stripePaymentMethodId, stripe.kind, now)
     } else if (paypal) {
-      const owned = await ctx.db
-        .query('paypalCustomers')
-        .withIndex('by_owner', (q) => q.eq('app', s.app).eq('owner.type', s.owner.type).eq('owner.id', s.owner.id))
+      await keepPaypalMethod(ctx, s, paypal, now)
+      await attach(ctx, s, `paypal:${paypal.paymentTokenId}`, paypal.kind, now)
+    }
+    return null
+  },
+})
+
+/**
+ * A schedule's first PayPal payment was taken but PayPal answered vault status APPROVED (or nothing):
+ * the method is saved later, its token sent in VAULT.PAYMENT-TOKEN.CREATED. Recorded before the
+ * payment is settled, so the schedule starts knowing it waits. The PayPal customer is the order's
+ * when it names one, else the owner's (whose id the order was made with).
+ */
+export const awaitPaypalVault = mutation({
+  args: { id: v.string(), orderId: v.string(), paypalCustomerId: v.optional(v.string()), networkRef: v.optional(networkRef), now: v.number() },
+  returns: v.null(),
+  handler: async (ctx, { id, orderId, paypalCustomerId, networkRef, now }) => {
+    const s = await load(ctx, id)
+    if (s.paypalVaultPending || !(await takesFirstMethod(ctx, s))) return null
+    const owners = paypalCustomerId
+      ? null
+      : await ctx.db
+          .query('paypalCustomers')
+          .withIndex('by_owner', (q) => q.eq('app', s.app).eq('owner.type', s.owner.type).eq('owner.id', s.owner.id))
+          .first()
+    const customer = paypalCustomerId ?? owners?.paypalCustomerId
+    await ctx.db.patch(s._id, {
+      paypalVaultPending: { orderId, ...(customer ? { paypalCustomerId: customer } : {}), ...(networkRef ? { networkRef } : {}), since: now },
+      updatedAt: now,
+    })
+    return null
+  },
+})
+
+/**
+ * VAULT.PAYMENT-TOKEN.CREATED: the schedule whose first payment saved this token takes it. Found by
+ * the order the event names (the checkout's order), else by the PayPal customer among this app's
+ * schedules waiting for a token; with several waiting, none is guessed ('ambiguous'). A token for a
+ * schedule that can't take it any more (it lapsed waiting, was cancelled, or has a method) is still
+ * kept as the owner's saved method, so the app can offer it. 'saved': nothing new to attach (also a
+ * token this app saved another way); 'foreign': no schedule or saved method of this app has it.
+ */
+export const paypalTokenCreated = mutation({
+  args: { app: v.string(), orderId: v.optional(v.string()), paypal: paypalSaved, now: v.number() },
+  returns: v.union(v.literal('attached'), v.literal('saved'), v.literal('ambiguous'), v.literal('foreign')),
+  handler: async (ctx, { app, orderId, paypal, now }) => {
+    let s: Doc<'schedules'> | null = null
+    if (orderId) {
+      const c = await ctx.db
+        .query('checkouts')
+        .withIndex('by_processorCheckoutId', (q) => q.eq('processorCheckoutId', orderId))
         .first()
-      const customerId = owned?._id ?? (await ctx.db.insert('paypalCustomers', { app: s.app, owner: s.owner, paypalCustomerId: paypal.paypalCustomerId, createdAt: now }))
+      if (c && c.app === app && c.processor === 'paypal' && c.scheduleId) s = await ctx.db.get(c.scheduleId)
+    }
+    if (!s) {
+      const waiting = (
+        await ctx.db
+          .query('schedules')
+          .withIndex('by_app_paypalVaultCustomer', (q) => q.eq('app', app).eq('paypalVaultPending.paypalCustomerId', paypal.paypalCustomerId))
+          .take(10)
+      ).filter((x) => x.status !== 'cancelled' && !x.paymentMethodId)
+      if (waiting.length > 1) return 'ambiguous'
+      s = waiting[0] ?? null
+    }
+    if (!s || s.app !== app) {
       const row = await ctx.db
         .query('paypalMethods')
         .withIndex('by_paymentTokenId', (q) => q.eq('paymentTokenId', paypal.paymentTokenId))
         .first()
-      if (!row) {
-        await ctx.db.insert('paypalMethods', {
-          customerId,
-          paymentTokenId: paypal.paymentTokenId,
-          kind: paypal.kind,
-          label: paypal.label,
-          usagePattern: paypal.usagePattern,
-          networkRef: paypal.networkRef,
-          createdAt: now,
-        })
-      }
-      await ctx.db.patch(s._id, { paymentMethodId: `paypal:${paypal.paymentTokenId}`, method: paypal.kind, updatedAt: now })
+      const customer = row ? await ctx.db.get(row.customerId) : null
+      return customer?.app === app ? 'saved' : 'foreign'
     }
-    return null
+    const methodId = `paypal:${paypal.paymentTokenId}`
+    if (s.paymentMethodId === methodId) return 'saved'
+    const takes = await takesFirstMethod(ctx, s)
+    // The capture's network reference is the first payment's; a token may not carry one.
+    await keepPaypalMethod(ctx, s, { ...paypal, networkRef: s.paypalVaultPending?.networkRef ?? paypal.networkRef }, now)
+    if (!takes) {
+      if (s.paypalVaultPending) await ctx.db.patch(s._id, { paypalVaultPending: undefined, updatedAt: now })
+      return 'saved'
+    }
+    await attach(ctx, s, methodId, paypal.kind, now)
+    return 'attached'
   },
 })
 

@@ -386,6 +386,15 @@ await payments.schedulesFor(ctx, owner) // also schedulesForRef(ref), getSchedul
   - **PayPal `card`:** the order saves the card and marks its payment the first of a recurring
     series. `embedded.only === 'card'`; show it with `PaypalCardPayment` (PayPal's Card Fields).
     Later charges are marked RECURRING with the first payment's network reference.
+  - **PayPal saving after the payment.** PayPal may answer the capture with vault status
+    `APPROVED` instead of `VAULTED`: paid, but the token comes later in
+    `VAULT.PAYMENT-TOKEN.CREATED`. The schedule then starts with `paymentMethodId: null` and waits
+    for it instead of failing. The event's token goes to the schedule whose first order it names
+    (`metadata.order_id`), or else to the one schedule of this app waiting with that PayPal customer
+    (several waiting: none is guessed). If no token comes within three days, the schedule's charge
+    fails as `METHOD_REMOVED` (lapsed, `scheduleFailed` with `final: true`) without charging, so
+    the app asks the payer for another method. A token that comes later still is kept as the payer's
+    saved method for `updateSchedule`.
 - **Removed at the processor.** `payment_method.detached` (Stripe) or `VAULT.PAYMENT-TOKEN.DELETED`
   (PayPal) cancels every schedule using the method, with `scheduleChanged` showing `by:
 'processor'` and a reason. Run the webhook CLI again after upgrading: both events are new.
@@ -720,6 +729,9 @@ Nothing to migrate; these change what a host sees:
   `limitKey`, which now counts instead of the signed-in user too (`start`'s did only for signed-out payers).
 - **A `v.id()` in the context** must look like a Convex id (it was any string).
 - **PayPal webhooks** sent more than ten minutes before they arrive are refused (400) without asking PayPal.
+- **Register the webhooks again** (`npx ed-payments webhooks --paypal …`): `VAULT.PAYMENT-TOKEN.CREATED` is
+  new. A schedule whose first PayPal payment saves the method after the capture (vault `APPROVED`) waits up to
+  three days for that event instead of lapsing at its next charge.
 - `PaymentsAdminPage` has no `skipApproval` prop: it reads the server's `adminApi({ skipApproval })`
   through the `access` query, so the page and the server can't disagree. Remove the prop (TypeScript
   refuses it now).

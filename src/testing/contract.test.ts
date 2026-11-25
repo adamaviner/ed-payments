@@ -322,6 +322,27 @@ describe('fake PayPal answers in PayPal’s shapes', () => {
     expect(drift(recurring, fixture(paypalObjectFixtures.vaultOrderRecurring))).toEqual([])
   })
 
+  test('vault with purchase saved later: the capture says APPROVED, then VAULT.PAYMENT-TOKEN.CREATED brings the token', async () => {
+    const pp = fakePaypal()
+    const make = async (kind: 'card' | 'paypal') => {
+      pp.savesWithPurchaseLater()
+      const order = (await json(
+        await send(pp, '/v2/checkout/orders', {
+          purchase_units: [{ custom_id: 'a:1', amount: { currency_code: 'USD', value: '25.00' } }],
+          payment_source: { [kind]: { attributes: { vault: { store_in_vault: 'ON_SUCCESS' } } } },
+        }),
+      )) as { id: string }
+      pp.approve(order.id)
+      return { id: order.id, captured: await json(await send(pp, `/v2/checkout/orders/${order.id}/capture`)) }
+    }
+    const card = await make('card')
+    expect(drift(card.captured, fixture(paypalObjectFixtures.orderVaultApprovedCaptured))).toEqual([])
+    expect(paypalHook(pp.deliverVault(card.id), 'VAULT.PAYMENT-TOKEN.CREATED')).toEqual([])
+    expect(drift(await json(await pp.fetch(`${B}/v2/checkout/orders/${card.id}`)), fixture(paypalObjectFixtures.orderVaultCardCaptured))).toEqual([])
+    const account = await make('paypal')
+    expect(paypalHook(pp.deliverVault(account.id), 'VAULT.PAYMENT-TOKEN.CREATED-paypal')).toEqual([])
+  })
+
   test('Transaction Search: rows, and the refusal when it isn’t enabled', async () => {
     const pp = fakePaypal()
     const range = `start_date=${new Date(Date.now() - 86_400_000).toISOString()}&end_date=${new Date(Date.now() + 86_400_000).toISOString()}`

@@ -209,6 +209,14 @@ export default defineSchema({
      * anyone: a first payment that arrives anyway, on a checkout the payer didn't cancel, starts it.
      */
     neverStarted: v.optional(v.boolean()),
+    /**
+     * PayPal took the first payment but answered vault status APPROVED, not VAULTED: the method is
+     * saved later and its token comes in VAULT.PAYMENT-TOKEN.CREATED. Until then (at most three days)
+     * the schedule waits for it instead of failing for want of a method. orderId is the first
+     * payment's order; paypalCustomerId the PayPal customer the token will belong to, when known;
+     * networkRef the card's reference from that capture, for later recurring charges.
+     */
+    paypalVaultPending: v.optional(v.object({ orderId: v.string(), paypalCustomerId: v.optional(v.string()), networkRef: v.optional(networkRef), since: v.number() })),
     callbacks: scheduleCallbacks,
     /** Passed to every charge's callbacks and the schedule's own. */
     context: v.optional(v.any()),
@@ -218,7 +226,8 @@ export default defineSchema({
     .index('by_app_status_nextChargeAt', ['app', 'status', 'nextChargeAt'])
     .index('by_owner', ['app', 'owner.type', 'owner.id'])
     .index('by_ref', ['ref.type', 'ref.id'])
-    .index('by_paymentMethodId', ['paymentMethodId']),
+    .index('by_paymentMethodId', ['paymentMethodId'])
+    .index('by_app_paypalVaultCustomer', ['app', 'paypalVaultPending.paypalCustomerId']),
 
   /** One Stripe Customer per payer of the app (owner: e.g. { type: 'user', id }), for saved payment methods. */
   customers: defineTable({

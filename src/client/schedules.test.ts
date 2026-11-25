@@ -356,6 +356,91 @@ describe('a schedule started with a payment that saves the method', () => {
   })
 })
 
+describe('PayPal saves the method after the first payment (vault APPROVED)', () => {
+  const startSavedLater = async (t: ReturnType<typeof setup>['t'], method: 'card' | 'paypal' = 'paypal') => {
+    pp.savesWithPurchaseLater()
+    const started = await t.action(api.monthly.startCheckout, { donor: 'd1', processor: 'paypal', method })
+    if (!('embedded' in started) || started.embedded.processor !== 'paypal') throw new Error('expected an embedded PayPal checkout')
+    await t.fetch('/paypal/webhook', pp.approve(started.embedded.orderId))
+    return { scheduleId: started.scheduleId, orderId: started.embedded.orderId }
+  }
+  const hook = async (t: ReturnType<typeof setup>['t'], init: RequestInit) => await (await t.fetch('/paypal/webhook', init)).text()
+
+  test('the schedule starts and waits; VAULT.PAYMENT-TOKEN.CREATED brings the account, and next month charges it', async () => {
+    const { t, calls, schedule, runAt } = setup()
+    const { scheduleId, orderId } = await startSavedLater(t)
+    expect(await schedule(scheduleId)).toMatchObject({ status: 'active', paymentMethodId: null, lastPaidPeriod: '2030-01' })
+    expect(await calls('scheduleCharged')).toMatchObject([{ first: true, period: '2030-01' }])
+    expect(await hook(t, pp.deliverVault(orderId))).toBe('handled')
+    const s = await schedule(scheduleId)
+    expect(s).toMatchObject({ status: 'active', method: 'paypal', paymentMethodId: expect.stringMatching(/^paypal:/), nextChargeAt: at('2030-02-01T15:00:00Z') })
+    await runAt('2030-02-01T15:05:00Z')
+    expect(pp.vaultCharges).toHaveLength(1)
+    expect((pp.vaultCharges[0].body as { payment_source: unknown }).payment_source).toEqual({
+      paypal: { vault_id: s.paymentMethodId!.slice('paypal:'.length), stored_credential: { payment_initiator: 'MERCHANT', usage: 'SUBSEQUENT', usage_pattern: 'RECURRING_PREPAID' } },
+    })
+    expect(await schedule(scheduleId)).toMatchObject({ lastPaidPeriod: '2030-02' })
+    expect(await calls('scheduleFailed')).toEqual([])
+  })
+
+  test('a card saved later keeps the first payment’s network reference; the same event again, or another for the same token, changes nothing', async () => {
+    const { t, schedule, runAt } = setup()
+    const { scheduleId, orderId } = await startSavedLater(t, 'card')
+    const delivered = pp.deliverVault(orderId, { eventId: 'WH-SAME' })
+    expect(await hook(t, delivered)).toBe('handled')
+    const s = await schedule(scheduleId)
+    expect(await hook(t, pp.deliverVault(orderId, { eventId: 'WH-SAME' }))).toBe('Already handled')
+    expect(await hook(t, pp.deliverVault(orderId))).toBe('handled')
+    expect(await schedule(scheduleId)).toMatchObject({ paymentMethodId: s.paymentMethodId, method: 'card' })
+    await runAt('2030-02-01T15:05:00Z')
+    expect(pp.vaultCharges).toHaveLength(1)
+    expect((pp.vaultCharges[0].body as { payment_source: { card: { stored_credential: unknown } } }).payment_source.card.stored_credential).toMatchObject({
+      previous_network_transaction_reference: { id: expect.stringMatching(/^FAKENTR/), network: 'VISA' },
+    })
+  })
+
+  test('the token never comes: three days on the payer is asked for another method, and nothing is charged', async () => {
+    const { t, calls, schedule, runAt } = setup()
+    const { scheduleId, orderId } = await startSavedLater(t)
+    await runAt('2030-01-03T12:05:00Z')
+    expect(await calls('scheduleFailed')).toEqual([])
+    await runAt('2030-01-04T12:05:00Z')
+    expect(await calls('scheduleFailed')).toMatchObject([{ attempt: 1, final: true, declineCode: 'METHOD_REMOVED', reason: 'PayPal didn’t finish saving the payment method.' }])
+    expect(await schedule(scheduleId)).toMatchObject({ status: 'lapsed', paymentMethodId: null })
+    await runAt('2030-02-01T15:05:00Z')
+    expect(pp.vaultCharges).toHaveLength(0)
+    // A token that arrives after all is kept as the donor's, for the app to offer; it doesn't revive the schedule by itself.
+    expect(await hook(t, pp.deliverVault(orderId))).toBe('handled')
+    expect(await schedule(scheduleId)).toMatchObject({ status: 'lapsed', paymentMethodId: null })
+    const token = pp.vault().at(-1)!.id
+    expect(await t.mutation(api.monthly.update, { scheduleId, paymentMethodId: `paypal:${token}` })).toMatchObject({ status: 'active' })
+  })
+
+  test('a token for an order and customer this app doesn’t know is foreign', async () => {
+    const { t } = setup()
+    expect(await hook(t, pp.event('VAULT.PAYMENT-TOKEN.CREATED', { id: 'stranger', customer: { id: 'NOBODY' }, metadata: { order_id: 'NOT-OURS' } }))).toBe('foreign')
+  })
+
+  test('without an order id it is matched by PayPal customer, and never guessed between two schedules', async () => {
+    const { t, schedule } = setup()
+    // A first schedule saved at once gives the donor a PayPal customer, which later orders carry.
+    const first = await t.action(api.monthly.startCheckout, { donor: 'd1', processor: 'paypal', method: 'paypal' })
+    if (!('embedded' in first) || first.embedded.processor !== 'paypal') throw new Error('expected an embedded PayPal checkout')
+    await t.fetch('/paypal/webhook', pp.approve(first.embedded.orderId))
+    const a = await startSavedLater(t)
+    const b = await startSavedLater(t)
+    expect(await hook(t, pp.deliverVault(a.orderId, { withOrderId: false }))).toBe('ignored')
+    expect(await schedule(a.scheduleId)).toMatchObject({ paymentMethodId: null })
+    expect(await schedule(b.scheduleId)).toMatchObject({ paymentMethodId: null })
+    expect(await hook(t, pp.deliverVault(a.orderId))).toBe('handled')
+    expect(await hook(t, pp.deliverVault(b.orderId, { withOrderId: false }))).toBe('handled')
+    const [sa, sb] = [await schedule(a.scheduleId), await schedule(b.scheduleId)]
+    expect(sa.paymentMethodId).toMatch(/^paypal:/)
+    expect(sb.paymentMethodId).toMatch(/^paypal:/)
+    expect(sa.paymentMethodId).not.toBe(sb.paymentMethodId)
+  })
+})
+
 describe('one payment per period', () => {
   test('an on-session retry of a refused period pays that period, and the schedule moves on', async () => {
     const { t, calls, schedule, status, saved, runAt, start, charges } = setup()

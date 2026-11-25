@@ -57,9 +57,18 @@ permit_multiple_payment_tokens, description}` plus `experience_context`.
   - The account needs PayPal's approval for billing agreements (reference transactions), the same
     as for bids.
   - If the capture says `APPROVED` rather than `VAULTED`, the token isn't saved yet and comes
-    later in `VAULT.PAYMENT-TOKEN.CREATED`. The library doesn't handle that case. The schedule then
-    starts without a method, its next charge fails as `METHOD_REMOVED`, and the app asks the payer
-    for another method.
+    later in `VAULT.PAYMENT-TOKEN.CREATED`. PayPal documents the APPROVED vault as only
+    `{status, links: [up]}` (no id, no customer), and its event samples carry `resource.id` (the
+    token), `customer.id` and `payment_source`, but **no order id**. Shopware's PayPal plugin reads
+    the order from `resource.metadata.order_id` (SwagPayPal #845/#849), which is unconfirmed here: the
+    sandbox always answered VAULTED, and delivering the event needs a public webhook URL.
+  - **Handled:** the schedule records `paypalVaultPending` (order, PayPal customer when known, the
+    capture's network reference), starts, and waits. The event's token is matched by
+    `metadata.order_id` (the checkout's order), else by PayPal customer among this app's waiting
+    schedules (never guessing between several). No token within three days: the charge fails as
+    `METHOD_REMOVED` without charging, and the app asks the payer for another method. Fixtures built
+    from PayPal's samples: `VAULT.PAYMENT-TOKEN.CREATED.json`, `-paypal.json`,
+    `order-vault-approved-captured.json`.
 - **Removal at PayPal.** `VAULT.PAYMENT-TOKEN.DELETED` is listed as an event, but PayPal publishes
   no payload. Whether it fires when a buyer cancels the agreement from their PayPal account is **not
   documented**.

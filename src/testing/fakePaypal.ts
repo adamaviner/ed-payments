@@ -41,6 +41,8 @@ interface Order {
   /** Vault with purchase: what pays it is saved when it is captured (the token's id once saved). */
   save?: { kind: 'card' | 'paypal'; customerId?: string }
   vaultId?: string
+  /** Saved after the capture: the order shows vault APPROVED until VAULT.PAYMENT-TOKEN.CREATED is sent. */
+  vaultLater?: 'waiting' | 'delivered'
 }
 
 export interface FakePaypalOptions {
@@ -65,6 +67,7 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
   let declineNext = false
   /** How the next method saved with a purchase behaves when charged later. */
   let nextSavedBehaviour: VaultBehaviour = 'ok'
+  let nextSavedLater = false
   let refuse: ((call: { method: string; path: string }) => Response | undefined) | undefined
   let searchEnabled = search
   const activity: { at: number; detail: unknown }[] = []
@@ -113,7 +116,11 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
   function savedSource(o: Order): NonNullable<PaypalOrder['payment_source']> {
     const v = o.vaultId ? vault.get(o.vaultId) : undefined
     if (!v) return {}
-    const attributes = { vault: { id: v.id, status: 'VAULTED', customer: { id: v.customerId } } }
+    // PayPal's documented APPROVED answer: no token or customer yet, only the link to the order.
+    const attributes =
+      o.vaultLater === 'waiting'
+        ? { vault: { status: 'APPROVED', links: [{ href: `${apiBase}/v2/checkout/orders/${o.id}`, rel: 'up', method: 'GET' }] } }
+        : { vault: { id: v.id, status: 'VAULTED', customer: { id: v.customerId } } }
     if (v.kind === 'paypal') return { paypal: { email_address: v.source?.paypal?.email_address ?? 'buyer@example.org', attributes } }
     const card = v.source?.card
     return { card: { brand: card?.brand ?? 'VISA', last_digits: card?.last_digits ?? '0004', attributes } }
@@ -289,7 +296,9 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
           }
           vault.set(token.id, token)
           o.vaultId = token.id
+          if (nextSavedLater) o.vaultLater = 'waiting'
           nextSavedBehaviour = 'ok'
+          nextSavedLater = false
         }
         return remember(orderJson(o))
       }
@@ -459,6 +468,45 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
     /** The next method saved with a purchase (vault with purchase) behaves as this when charged later. */
     savedWithPurchaseBehaves(behaviour: VaultBehaviour) {
       nextSavedBehaviour = behaviour
+    },
+    /**
+     * The next order saved with a purchase is saved only after its capture, as PayPal does when it
+     * answers vault status APPROVED: the capture names no token, and deliverVault makes the
+     * VAULT.PAYMENT-TOKEN.CREATED that brings it.
+     */
+    savesWithPurchaseLater() {
+      nextSavedLater = true
+    },
+    /**
+     * VAULT.PAYMENT-TOKEN.CREATED for an order saved later (savesWithPurchaseLater); from then on the
+     * order shows the token. withOrderId false leaves out metadata.order_id, which PayPal's own sample doesn't show.
+     */
+    deliverVault(orderId: string, opts: { withOrderId?: boolean; eventId?: string } = {}) {
+      const o = order(orderId)
+      const v = o.vaultId ? vault.get(o.vaultId) : undefined
+      if (!v || !o.vaultLater) throw new Error(`fakePaypal: order ${orderId} wasn’t saved later`)
+      o.vaultLater = 'delivered'
+      const tokenUrl = `${apiBase}/v3/vault/payment-tokens/${v.id}`
+      const card = v.source?.card
+      const event = paypalEvent(
+        v.kind === 'card' ? 'VAULT.PAYMENT-TOKEN.CREATED' : 'VAULT.PAYMENT-TOKEN.CREATED-paypal',
+        {
+          id: v.id,
+          time_created: new Date().toISOString(),
+          links: [
+            { href: tokenUrl, rel: 'self', method: 'GET', encType: 'application/json' },
+            { href: tokenUrl, rel: 'delete', method: 'DELETE', encType: 'application/json' },
+          ],
+          payment_source: card
+            ? { card: { last_digits: card.last_digits, brand: card.brand, expiry: card.expiry } }
+            : { paypal: { usage_type: 'MERCHANT', customer_type: 'CONSUMER', permit_multiple_payment_tokens: false, email_address: v.source?.paypal?.email_address ?? 'buyer@example.org' } },
+          customer: { id: v.customerId },
+          metadata: { order_id: o.id },
+        },
+        opts.eventId,
+      )
+      if (opts.withOrderId === false) delete event.resource.metadata
+      return webhook(event)
     },
     /** The payer removes a saved method at PayPal: gone from the vault, and VAULT.PAYMENT-TOKEN.DELETED. */
     deleteToken(tokenId: string) {

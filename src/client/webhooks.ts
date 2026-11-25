@@ -2,8 +2,19 @@
 // if it was handled before), then act. Events for objects that aren't this app's checkouts, or that
 // the component doesn't know, are answered 200 and counted as foreign, never retried forever (fix c).
 // A real failure after the signature check answers 500, so the processor tries again later.
-import type { PaypalCapture, PaypalDispute, PaypalEvent, PaypalOrder, PaypalRefund } from '../core/paypal.js'
-import { captureOrderId, moneyCents, orderCustomId, parsePaypalEvent, paypalMethodId, paypalTokenOf, refundCaptureId, verifyPaypalWebhook } from '../core/paypal.js'
+import type { PaypalCapture, PaypalDispute, PaypalEvent, PaypalOrder, PaypalPaymentToken, PaypalRefund } from '../core/paypal.js'
+import {
+  RECURRING_USAGE_PATTERN,
+  captureOrderId,
+  moneyCents,
+  orderCustomId,
+  parsePaypalEvent,
+  paymentTokenLabel,
+  paypalMethodId,
+  paypalTokenOf,
+  refundCaptureId,
+  verifyPaypalWebhook,
+} from '../core/paypal.js'
 import type { StripeCharge, StripeDispute, StripeEvent, StripeRefund, StripeSession } from '../core/stripe.js'
 import { STRIPE_EVENTS, parseStripeEvent, paymentIntentId, stripe, verifyStripeSignature, type StripePaymentIntent } from '../core/stripe.js'
 import { parseTag } from '../core/types.js'
@@ -243,6 +254,8 @@ async function actOnPaypal(p: Payments, ctx: RunActionCtx, event: PaypalEvent): 
       const id = typeof event.resource.id === 'string' ? event.resource.id : null
       return id ? await onMethodGone(p, ctx, paypalMethodId(id), 'The payer removed this payment method at PayPal.') : 'foreign'
     }
+    case 'VAULT.PAYMENT-TOKEN.CREATED':
+      return await onPaypalTokenCreated(p, ctx, event.resource as unknown as PaypalPaymentToken)
     case 'CUSTOMER.DISPUTE.CREATED':
     case 'CUSTOMER.DISPUTE.RESOLVED': {
       const d = event.resource as unknown as PaypalDispute
@@ -264,4 +277,36 @@ async function actOnPaypal(p: Payments, ctx: RunActionCtx, event: PaypalEvent): 
     default:
       return 'ignored'
   }
+}
+
+/**
+ * A PayPal method saved after the payment that asked for it (the capture said vault APPROVED): the
+ * schedule waiting for it takes it (schedules.paypalTokenCreated says how it is found). PayPal sends
+ * this event for every token, so one this app saved another way (a setup token, a VAULTED capture)
+ * is simply handled. With no order named and several schedules of the same PayPal customer waiting,
+ * none is guessed: each one's wait runs out and its payer is asked for another method.
+ */
+async function onPaypalTokenCreated(p: Payments, ctx: RunActionCtx, t: PaypalPaymentToken): Promise<Outcome> {
+  const what = paymentTokenLabel(t)
+  const customerId = t.customer?.id
+  if (typeof t.id !== 'string' || !customerId || !what) return 'foreign'
+  const ntr = t.payment_source?.card?.network_transaction_reference
+  const res = await ctx.runMutation(p.component.schedules.paypalTokenCreated, {
+    app: p.app,
+    orderId: t.metadata?.order_id,
+    paypal: {
+      paypalCustomerId: customerId,
+      paymentTokenId: t.id,
+      kind: what.kind,
+      label: what.label,
+      usagePattern: what.kind === 'paypal' ? RECURRING_USAGE_PATTERN : undefined,
+      networkRef: ntr?.id ? { id: ntr.id, ...(ntr.network ? { network: ntr.network } : {}) } : undefined,
+    },
+    now: Date.now(),
+  })
+  if (res === 'ambiguous') {
+    console.warn(`payments: PayPal token ${t.id} names no order, and more than one schedule of its customer waits for one; none was given it`)
+    return 'ignored'
+  }
+  return res === 'foreign' ? 'foreign' : 'handled'
 }

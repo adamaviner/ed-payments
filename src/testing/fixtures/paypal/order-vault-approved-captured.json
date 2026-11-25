@@ -1,0 +1,118 @@
+{
+  "_source": "Built 2026-11-24 from order-vault-card-captured.json (sandbox) with attributes.vault as PayPal documents it when the method is saved after the capture (status APPROVED, only an up link to the order: https://developer.paypal.com/docs/checkout/save-payment-methods/during-purchase/orders-api/cards/). The sandbox always answered VAULTED, so this shape is not captured.",
+  "id": "FAKEID1",
+  "intent": "CAPTURE",
+  "status": "COMPLETED",
+  "payment_source": {
+    "card": {
+      "name": "Sandbox Donor",
+      "last_digits": "0004",
+      "expiry": "2030-12",
+      "brand": "VISA",
+      "available_networks": ["VISA"],
+      "type": "CREDIT",
+      "attributes": {
+        "vault": {
+          "status": "APPROVED",
+          "links": [
+            {
+              "href": "https://api.sandbox.paypal.com/v2/checkout/orders/FAKEID1",
+              "rel": "up",
+              "method": "GET"
+            }
+          ]
+        }
+      }
+    }
+  },
+  "purchase_units": [
+    {
+      "reference_id": "default",
+      "amount": {
+        "currency_code": "USD",
+        "value": "25.00"
+      },
+      "payee": {
+        "email_address": "merchant@example.org",
+        "merchant_id": "FAKEMERCHANT"
+      },
+      "description": "Monthly gift",
+      "custom_id": "sandbox:fixture",
+      "invoice_id": "sandbox:fixture",
+      "soft_descriptor": "TESTFACILIT",
+      "supplementary_data": {
+        "risk": {
+          "risk_level_indicator": "LOW_RISK"
+        }
+      },
+      "payments": {
+        "captures": [
+          {
+            "id": "FAKEID3",
+            "status": "COMPLETED",
+            "amount": {
+              "currency_code": "USD",
+              "value": "25.00"
+            },
+            "final_capture": true,
+            "seller_protection": {
+              "status": "NOT_ELIGIBLE"
+            },
+            "seller_receivable_breakdown": {
+              "gross_amount": {
+                "currency_code": "USD",
+                "value": "25.00"
+              },
+              "paypal_fee": {
+                "currency_code": "USD",
+                "value": "1.14"
+              },
+              "net_amount": {
+                "currency_code": "USD",
+                "value": "23.86"
+              }
+            },
+            "invoice_id": "sandbox:fixture",
+            "custom_id": "sandbox:fixture",
+            "links": [
+              {
+                "href": "https://api.sandbox.paypal.com/v2/payments/captures/FAKEID3",
+                "rel": "self",
+                "method": "GET"
+              },
+              {
+                "href": "https://api.sandbox.paypal.com/v2/payments/captures/FAKEID3/refund",
+                "rel": "refund",
+                "method": "POST"
+              },
+              {
+                "href": "https://api.sandbox.paypal.com/v2/checkout/orders/FAKEID1",
+                "rel": "up",
+                "method": "GET"
+              }
+            ],
+            "create_time": "2026-11-22T00:08:20Z",
+            "update_time": "2026-11-22T00:08:20Z",
+            "network_transaction_reference": {
+              "id": "FAKEID7",
+              "network": "VISA"
+            },
+            "processor_response": {
+              "cvv_code": "M",
+              "response_code": "0000"
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "create_time": "2026-11-22T00:08:20Z",
+  "update_time": "2026-11-22T00:08:20Z",
+  "links": [
+    {
+      "href": "https://api.sandbox.paypal.com/v2/checkout/orders/FAKEID1",
+      "rel": "self",
+      "method": "GET"
+    }
+  ]
+}

@@ -1474,6 +1474,19 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         null,
         Name
       >;
+      awaitPaypalVault: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          id: string;
+          networkRef?: { date?: string; id: string; network?: string };
+          now: number;
+          orderId: string;
+          paypalCustomerId?: string;
+        },
+        null,
+        Name
+      >;
       cancel: FunctionReference<
         "mutation",
         "internal",
@@ -1752,6 +1765,25 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             | "cancelled";
           updatedAt: number;
         },
+        Name
+      >;
+      paypalTokenCreated: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          app: string;
+          now: number;
+          orderId?: string;
+          paypal: {
+            kind: "card" | "paypal";
+            label: string;
+            networkRef?: { date?: string; id: string; network?: string };
+            paymentTokenId: string;
+            paypalCustomerId: string;
+            usagePattern?: string;
+          };
+        },
+        "attached" | "saved" | "ambiguous" | "foreign",
         Name
       >;
       resume: FunctionReference<

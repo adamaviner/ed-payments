@@ -3,7 +3,7 @@
 // sweep), capturing an approved PayPal order, and the buyer closing one they won't pay. Payments
 // (index.ts) is the facade; these take it as `p`.
 import { ConvexError } from 'convex/values'
-import { RECURRING_USAGE_PATTERN, approveUrl, captureFee, getOrderOrNull, moneyCents, orderCapture, orderVault, paypal, type PaypalOrder } from '../core/paypal.js'
+import { RECURRING_USAGE_PATTERN, approveUrl, captureFee, getOrderOrNull, moneyCents, orderCapture, orderVault, orderVaultWaiting, paypal, type PaypalOrder } from '../core/paypal.js'
 import { paymentIntentId, savedMethodKind, savedMethodLabel, sessionState, stripe, stripeFee, type StripeSession } from '../core/stripe.js'
 import { ProcessorError, isMethodFor, tagFor, type Processor, type Ref } from '../core/types.js'
 import type { CheckoutStatus, EmbeddedPayment, Payments, RunActionCtx, StartArgs, StartedEmbedded, StartedRedirect } from './index.js'
@@ -183,8 +183,9 @@ export async function settlePaypalOrder(p: Payments, ctx: RunActionCtx, checkout
  * @internal Before a schedule's first payment is settled: the method it saved (Stripe's
  * setup_future_usage, PayPal's vault with purchase) becomes the schedule's, so settling starts it
  * with something to charge. A webhook's PayPal capture carries no payment_source, so the order is
- * read again. Best effort: a schedule left without a method fails its next charge, and the app's
- * scheduleFailed asks the payer for another.
+ * read again. When PayPal says the save isn't finished (vault APPROVED, no token), the schedule is
+ * marked as waiting for VAULT.PAYMENT-TOKEN.CREATED. Best effort: a schedule left without a method
+ * fails its next charge, and the app's scheduleFailed asks the payer for another.
  */
 export async function saveForSchedule(p: Payments, ctx: RunActionCtx, checkoutId: string, from: { stripePaymentIntent?: string; paypalOrder?: PaypalOrder }) {
   const c = await ctx.runQuery(p.component.checkouts.get, { id: checkoutId })
@@ -208,7 +209,17 @@ export async function saveForSchedule(p: Payments, ctx: RunActionCtx, checkoutId
       const orderId = from.paypalOrder.id || c.processorCheckoutId
       const order = from.paypalOrder.payment_source || !orderId ? from.paypalOrder : await p.withPaypal(ctx, (call) => paypal.getOrder(call, orderId))
       const saved = orderVault(order)
-      if (!saved) throw new Error(`PayPal's order ${order.id} saved nothing in the vault (yet).`)
+      if (!saved) {
+        const waiting = orderVaultWaiting(order)
+        await ctx.runMutation(p.component.schedules.awaitPaypalVault, {
+          id: s.id,
+          orderId: order.id || orderId || '',
+          paypalCustomerId: waiting.customerId,
+          networkRef: waiting.networkRef,
+          now: Date.now(),
+        })
+        return
+      }
       await ctx.runMutation(p.component.schedules.attachMethod, {
         id: s.id,
         paypal: {

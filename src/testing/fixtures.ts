@@ -67,6 +67,9 @@ import pVaultPaymentToken from './fixtures/paypal/vault-payment-token-card.json'
 import pVaultOrder from './fixtures/paypal/vault-order-captured.json' with { type: 'json' }
 import pErrorInvalidSource from './fixtures/paypal/error-invalid-payment-source.json' with { type: 'json' }
 import pVaultDeleted from './fixtures/paypal/VAULT.PAYMENT-TOKEN.DELETED.json' with { type: 'json' }
+import pVaultCreated from './fixtures/paypal/VAULT.PAYMENT-TOKEN.CREATED.json' with { type: 'json' }
+import pVaultCreatedPaypal from './fixtures/paypal/VAULT.PAYMENT-TOKEN.CREATED-paypal.json' with { type: 'json' }
+import pOrderVaultApproved from './fixtures/paypal/order-vault-approved-captured.json' with { type: 'json' }
 import pOrderVaultCard from './fixtures/paypal/order-vault-card-captured.json' with { type: 'json' }
 import pVaultOrderRecurring from './fixtures/paypal/vault-order-recurring.json' with { type: 'json' }
 import pOauthToken from './fixtures/paypal/oauth-token.json' with { type: 'json' }
@@ -132,6 +135,8 @@ export const paypalEventFixtures = {
   'CUSTOMER.DISPUTE.CREATED': pDisputeCreated,
   'CUSTOMER.DISPUTE.RESOLVED': pDisputeResolved,
   'VAULT.PAYMENT-TOKEN.DELETED': pVaultDeleted,
+  'VAULT.PAYMENT-TOKEN.CREATED': pVaultCreated,
+  'VAULT.PAYMENT-TOKEN.CREATED-paypal': pVaultCreatedPaypal,
 }
 
 export const paypalObjectFixtures = {
@@ -149,6 +154,7 @@ export const paypalObjectFixtures = {
   vaultOrderCaptured: pVaultOrder,
   errorInvalidPaymentSource: pErrorInvalidSource,
   orderVaultCardCaptured: pOrderVaultCard,
+  orderVaultApprovedCaptured: pOrderVaultApproved,
   vaultOrderRecurring: pVaultOrderRecurring,
   oauthToken: pOauthToken,
   webhooksList: pWebhooksList,
