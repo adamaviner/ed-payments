@@ -86,6 +86,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           payer: { email: string; name?: string };
           paymentMethodId: string | null;
           paymentRef: string | null;
+          paypalDeclinedAt: number | null;
           processor: "stripe" | "paypal";
           processorCheckoutId: string | null;
           processorFeeCents: number | null;
@@ -135,6 +136,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           payer: { email: string; name?: string };
           paymentMethodId: string | null;
           paymentRef: string | null;
+          paypalDeclinedAt: number | null;
           processor: "stripe" | "paypal";
           processorCheckoutId: string | null;
           processorFeeCents: number | null;
@@ -184,6 +186,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           payer: { email: string; name?: string };
           paymentMethodId: string | null;
           paymentRef: string | null;
+          paypalDeclinedAt: number | null;
           processor: "stripe" | "paypal";
           processorCheckoutId: string | null;
           processorFeeCents: number | null;
@@ -233,6 +236,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           payer: { email: string; name?: string };
           paymentMethodId: string | null;
           paymentRef: string | null;
+          paypalDeclinedAt: number | null;
           processor: "stripe" | "paypal";
           processorCheckoutId: string | null;
           processorFeeCents: number | null;
@@ -367,6 +371,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           payer: { email: string; name?: string };
           paymentMethodId: string | null;
           paymentRef: string | null;
+          paypalDeclinedAt: number | null;
           processor: "stripe" | "paypal";
           processorCheckoutId: string | null;
           processorFeeCents: number | null;
@@ -416,6 +421,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           payer: { email: string; name?: string };
           paymentMethodId: string | null;
           paymentRef: string | null;
+          paypalDeclinedAt: number | null;
           processor: "stripe" | "paypal";
           processorCheckoutId: string | null;
           processorFeeCents: number | null;
@@ -472,6 +478,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           payer: { email: string; name?: string };
           paymentMethodId: string | null;
           paymentRef: string | null;
+          paypalDeclinedAt: number | null;
           processor: "stripe" | "paypal";
           processorCheckoutId: string | null;
           processorFeeCents: number | null;
@@ -533,6 +540,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             payer: { email: string; name?: string };
             paymentMethodId: string | null;
             paymentRef: string | null;
+            paypalDeclinedAt: number | null;
             processor: "stripe" | "paypal";
             processorCheckoutId: string | null;
             processorFeeCents: number | null;
@@ -599,7 +607,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
       noteError: FunctionReference<
         "mutation",
         "internal",
-        { error: string; id: string },
+        { error: string; id: string; paypalDeclinedAt?: number },
         null,
         Name
       >;
@@ -661,6 +669,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             payer: { email: string; name?: string };
             paymentMethodId: string | null;
             paymentRef: string | null;
+            paypalDeclinedAt: number | null;
             processor: "stripe" | "paypal";
             processorCheckoutId: string | null;
             processorFeeCents: number | null;
@@ -727,6 +736,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           payer: { email: string; name?: string };
           paymentMethodId: string | null;
           paymentRef: string | null;
+          paypalDeclinedAt: number | null;
           processor: "stripe" | "paypal";
           processorCheckoutId: string | null;
           processorFeeCents: number | null;

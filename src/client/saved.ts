@@ -9,7 +9,7 @@ import { customerOf, intentState, savedMethodKind, savedMethodLabel, stripe, str
 import { paypal, paypalTokenOf } from '../core/paypal.js'
 import { ProcessorError, tagFor, type Payer, type Processor, type Ref, type SavedMethodKind } from '../core/types.js'
 import { declineCodeOf, declineKind, type DeclineInfo } from '../core/declines.js'
-import { PAYPAL_DECLINED, type Checkout, type Payments, type RunActionCtx } from './index.js'
+import type { Checkout, Payments, RunActionCtx } from './index.js'
 import { chargePaypalNow, paypalMethods, removePaypalMethod, verifyPaypalOwner } from './paypalVault.js'
 import { errorText } from './util.js'
 
@@ -336,7 +336,7 @@ async function retryable(p: Payments, ctx: RunActionCtx, checkoutId: string, wan
         throw new ConvexError('This payment is already being processed.')
       }
       // Approved but declined at capture: only the buyer captures it after that (capturePaypal), so it can be closed.
-      const declinedThere = r.lastError === PAYPAL_DECLINED
+      const declinedThere = r.paypalDeclinedAt !== null
       if (order?.status === 'APPROVED' && want !== 'paypal' && !declinedThere) throw new ConvexError('A PayPal payment for this was just approved. Reload the page in a moment.')
       if (want === 'paypal' && order && order.status !== 'VOIDED' && r.expiresAt > Date.now()) return { original, reuse: { checkoutId: r.id, orderId } }
       await abandon()

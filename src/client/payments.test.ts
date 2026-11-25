@@ -680,3 +680,17 @@ describe('a PayPal capture and the buyer’s cancel', () => {
     expect(await calls('onPaid')).toHaveLength(1)
   })
 })
+
+test('declined at capture: only the buyer captures it after that, even once its last error is overwritten', async () => {
+  const { t, status, later } = setup()
+  const started = await t.action(api.shop.buyEmbedded, { processor: 'paypal', method: 'card' })
+  if (started.embedded.processor !== 'paypal') throw new Error('expected PayPal')
+  pp.approve(started.embedded.orderId)
+  pp.declineNextCapture()
+  expect(await t.action(api.shop.back, { processor: 'paypal', token: started.embedded.orderId })).toMatchObject({ declined: true })
+  await t.run(async (ctx) => await ctx.runMutation(app.components.payments.checkouts.noteError, { id: started.checkoutId, error: 'Something else went wrong.' }))
+  later(10 * MIN)
+  await t.action(internal.paymentsWorker.sweep, {})
+  expect(pp.calls.filter((x) => x.path.endsWith('/capture'))).toHaveLength(1)
+  expect((await status(started.checkoutId)).status).toBe('pending')
+})

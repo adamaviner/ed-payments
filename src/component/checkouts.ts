@@ -273,13 +273,17 @@ export const reopenCharge = mutation({
   },
 })
 
-/** An on-session payment the bank refused: the buyer may try again on the same page, so the checkout stays open. */
+/**
+ * An on-session payment the bank refused: the buyer may try again on the same page, so the checkout
+ * stays open. `paypalDeclinedAt`: PayPal declined what the buyer chose at capture, so only the buyer
+ * captures it from now on (kept whatever later writes lastError).
+ */
 export const noteError = mutation({
-  args: { id: v.string(), error: v.string() },
+  args: { id: v.string(), error: v.string(), paypalDeclinedAt: v.optional(v.number()) },
   returns: v.null(),
-  handler: async (ctx, { id, error }) => {
+  handler: async (ctx, { id, error, paypalDeclinedAt }) => {
     const c = await load(ctx, id)
-    if (c.status === 'pending' || c.status === 'created') await ctx.db.patch(c._id, { lastError: error })
+    if (c.status === 'pending' || c.status === 'created') await ctx.db.patch(c._id, { lastError: error, ...(paypalDeclinedAt === undefined ? {} : { paypalDeclinedAt }) })
     return null
   },
 })

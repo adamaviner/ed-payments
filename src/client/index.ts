@@ -303,7 +303,7 @@ const REFUND_STUCK_MS = 10 * 60_000
 
 const FINAL: ReadonlySet<CheckoutStatus> = new Set(['paid', 'refund_needed', 'failed', 'abandoned'])
 
-/** A PayPal checkout's lastError once PayPal declined what the buyer chose: only the buyer captures it after that (capturePaypal). */
+/** What a PayPal checkout's lastError says once PayPal declined what the buyer chose (paypalDeclinedAt marks it; capturePaypal). */
 export const PAYPAL_DECLINED = 'PayPal declined the card or account the buyer chose; waiting for them to choose another.'
 
 /**
@@ -687,7 +687,7 @@ export class Payments<C extends GenericValidator = GenericValidator> {
   async capturePaypal(ctx: RunActionCtx, checkoutId: string, orderId: string, by: 'buyer' | 'background'): Promise<'declined' | undefined> {
     const c = await ctx.runQuery(this.component.checkouts.get, { id: checkoutId })
     if (c?.status !== 'pending' && c?.status !== 'created') return undefined
-    if (by === 'background' && c.lastError === PAYPAL_DECLINED) return 'declined'
+    if (by === 'background' && c.paypalDeclinedAt !== null) return 'declined'
     // Taken before PayPal is asked, so the buyer's cancel can't close it while the money is being
     // taken; another capture under way (or a closed checkout) means there is nothing to do here.
     if (!(await ctx.runMutation(this.component.checkouts.claimCapture, { id: checkoutId, now: Date.now() })).claimed) return undefined
@@ -706,7 +706,7 @@ export class Payments<C extends GenericValidator = GenericValidator> {
     // stale, cancel asks PayPal before closing the checkout.
     if (order === 'declined' || !order) await ctx.runMutation(this.component.checkouts.releaseCapture, { id: checkoutId })
     if (order === 'declined') {
-      await ctx.runMutation(this.component.checkouts.noteError, { id: checkoutId, error: PAYPAL_DECLINED })
+      await ctx.runMutation(this.component.checkouts.noteError, { id: checkoutId, error: PAYPAL_DECLINED, paypalDeclinedAt: Date.now() })
       return order
     }
     if (order) await this.settlePaypalOrder(ctx, checkoutId, order)

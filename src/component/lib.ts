@@ -30,6 +30,8 @@ export const checkoutView = v.object({
   lastTriedAt: v.union(v.number(), v.null()),
   processorCheckoutId: v.union(v.string(), v.null()),
   paymentRef: v.union(v.string(), v.null()),
+  /** PayPal declined at capture what the buyer chose: only the buyer captures it now. */
+  paypalDeclinedAt: v.union(v.number(), v.null()),
   paidCents: v.union(v.number(), v.null()),
   refundedCents: v.number(),
   processorFeeCents: v.union(v.number(), v.null()),
@@ -69,6 +71,7 @@ export function view(c: Doc<'checkouts'>): CheckoutView {
     lastTriedAt: c.lastTriedAt ?? null,
     processorCheckoutId: c.processorCheckoutId ?? null,
     paymentRef: c.paymentRef ?? null,
+    paypalDeclinedAt: c.paypalDeclinedAt ?? null,
     paidCents: c.paidCents ?? null,
     refundedCents: c.refundedCents,
     processorFeeCents: c.processorFeeCents ?? null,

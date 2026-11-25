@@ -122,6 +122,11 @@ export default defineSchema({
     /** What the processor actually kept, when it says. */
     processorFeeCents: v.optional(v.number()),
     disputed: v.optional(v.boolean()),
+    /**
+     * PayPal declined the card or account the buyer chose at capture: from then on only the buyer
+     * captures it (completeReturn), never the webhook or the sweep. lastError says it for people.
+     */
+    paypalDeclinedAt: v.optional(v.number()),
     /** The buyer closed it (cancelCheckout): money that arrives anyway is owed back, not kept. */
     cancelledByBuyerAt: v.optional(v.number()),
     /**
