@@ -339,12 +339,17 @@ export const claim = mutation({
       return wait('The last charge hasn’t finished.')
     }
     if (!s.paymentMethodId && s.paypalVaultPending) {
-      const deadline = s.paypalVaultPending.since + VAULT_WAIT_MS
-      if (now < deadline) {
+      const pending = s.paypalVaultPending
+      const deadline = pending.since + VAULT_WAIT_MS
+      // Past the wait, the order is still read once more unless it was read in the last two hours: a
+      // schedule paused while waiting wasn't looked at during the pause.
+      const readLately = pending.lastCheckAt !== undefined && now - pending.lastCheckAt <= 2 * VAULT_CHECK_MS
+      if (now < deadline || !readLately) {
         // The worker reads the order now (paypalTokenCreated attaches what it finds); whatever it
         // finds, or if PayPal can't be reached, it is looked at again within the hour.
-        await ctx.db.patch(s._id, { nextChargeAt: Math.min(now + VAULT_CHECK_MS, deadline), updatedAt: now })
-        return { action: 'check_vault' as const, orderId: s.paypalVaultPending.orderId }
+        const nextChargeAt = now < deadline ? Math.min(now + VAULT_CHECK_MS, deadline) : now + VAULT_CHECK_MS
+        await ctx.db.patch(s._id, { paypalVaultPending: { ...pending, lastCheckAt: now }, nextChargeAt, updatedAt: now })
+        return { action: 'check_vault' as const, orderId: pending.orderId }
       }
       const reason = 'PayPal didn’t finish saving the payment method.'
       await ctx.db.patch(s._id, { paypalVaultPending: undefined })

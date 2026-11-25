@@ -217,7 +217,9 @@ export default defineSchema({
      * payment's order; paypalCustomerId the PayPal customer the token will belong to, when known;
      * networkRef the card's reference from that capture, for later recurring charges.
      */
-    paypalVaultPending: v.optional(v.object({ orderId: v.string(), paypalCustomerId: v.optional(v.string()), networkRef: v.optional(networkRef), since: v.number() })),
+    paypalVaultPending: v.optional(
+      v.object({ orderId: v.string(), paypalCustomerId: v.optional(v.string()), networkRef: v.optional(networkRef), since: v.number(), lastCheckAt: v.optional(v.number()) }),
+    ),
     callbacks: scheduleCallbacks,
     /** Passed to every charge's callbacks and the schedule's own. */
     context: v.optional(v.any()),
