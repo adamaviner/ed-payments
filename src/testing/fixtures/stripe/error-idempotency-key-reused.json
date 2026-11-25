@@ -1,0 +1,8 @@
+{
+  "_source": "Stripe test mode, API account default version, captured 2026-11-24 (400: the same Idempotency-Key sent with other parameters)",
+  "error": {
+    "message": "Keys for idempotent requests can only be used with the same parameters they were first used with. Try using a key other than 'edp-idem-1' if you meant to execute a different request.",
+    "request_log_url": "https://dashboard.stripe.com/acct_TEST/test/workbench/logs?object=req_TEST",
+    "type": "idempotency_error"
+  }
+}

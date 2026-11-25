@@ -64,6 +64,11 @@ export function callbackArgs<C extends GenericValidator>(context: C) {
       origin: v.union(v.literal('requested'), v.literal('needed'), v.literal('external')),
       /** What the app passed to requestRefund as hostData (e.g. its admin's answer to a question); unset for others. */
       hostData: v.optional(v.record(v.string(), v.string())),
+      /**
+       * true: the processor failed this refund after reporting it done, so the money didn't go back after
+       * all; take it off again (refundedCents is already without it). It may then be sent again.
+       */
+      reversed: v.optional(v.boolean()),
     },
     /** refundNeeded: money arrived for a sale the host refused; a refund for it is waiting. */
     refundNeeded: { ...b, amountCents: v.number(), paidCents: v.number(), paymentRef: v.string(), refundId: v.string(), reason: v.string() },
@@ -123,8 +128,9 @@ export function scheduleCallbackArgs<C extends GenericValidator>(context: C) {
     /** scheduleCharged: one period's charge was paid (paid is called for its checkout too). first: the payment that started the schedule. */
     scheduleCharged: { ...b, checkoutId: v.string(), period: v.string(), paidCents: v.number(), paymentRef: v.string(), first: v.boolean() },
     /**
-     * scheduleFailed: a charge was refused (or the saved method is gone: checkoutId null, declineCode
-     * METHOD_REMOVED). attempt: refusals in this period so far. final: no more retries, the schedule
+     * scheduleFailed: a charge was refused (or nothing was charged, checkoutId null: the saved method is
+     * gone, declineCode METHOD_REMOVED, or PayPal never finished saving the first payment's method,
+     * METHOD_NOT_SAVED). attempt: refusals in this period so far. final: no more retries, the schedule
      * lapsed (hard declines are final at once). nextRetryAt: when it is tried again.
      */
     scheduleFailed: {

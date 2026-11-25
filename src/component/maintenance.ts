@@ -22,19 +22,27 @@ export const cleanup = mutation({
       // expiresAt is never later than a checkout's end, so "expired before the cutoff" is old enough.
       const old = await ctx.db
         .query('checkouts')
-        .withIndex('by_status_expiresAt', (q) => q.eq('status', status).lt('expiresAt', now - retentionDays * DAY))
+        .withIndex('by_status_parked_expiresAt', (q) =>
+          q
+            .eq('status', status)
+            .eq('parkedAt', undefined)
+            .lt('expiresAt', now - retentionDays * DAY),
+        )
         .take(batch)
       for (const c of old) {
-        // A failed checkout with a refund row (a failure after money moved) stays with its refund.
+        // A failed checkout with a refund row (a failure after money moved) stays with its refund,
+        // parked out of this range so it never fills the batch again.
         const refund = await ctx.db
           .query('refunds')
           .withIndex('by_checkout', (q) => q.eq('checkoutId', c._id))
           .first()
-        if (refund) continue
-        await ctx.db.delete(c._id)
-        deleted++
+        if (refund) await ctx.db.patch(c._id, { parkedAt: now })
+        else {
+          await ctx.db.delete(c._id)
+          deleted++
+        }
       }
-      more ||= old.length === batch && deleted > 0
+      more ||= old.length === batch
     }
     const events = await ctx.db
       .query('events')

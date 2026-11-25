@@ -175,7 +175,7 @@ describe('charging a PayPal method with nobody present', () => {
     expect(await status(id)).toMatchObject({ status: 'paid' })
   })
 
-  test('PayPal down for every try: a person is asked, and giving up fails it', async () => {
+  test('PayPal down for every try: a person is asked, and giving up (once PayPal’s search would show a payment) fails it', async () => {
     const { t, status, save, charge } = setup()
     await t.mutation(api.host.addAdmin, { token: 'boss', name: 'Bo' })
     const card = await save()
@@ -184,6 +184,7 @@ describe('charging a PayPal method with nobody present', () => {
     expect(await status(id)).toMatchObject({ status: 'pending', chargeAttempts: 5 })
     expect(await t.query(api.shop.issues, {})).toMatchObject([{ kind: 'charge_unknown', processor: 'paypal' }])
     pp.refuse()
+    vi.setSystemTime((await status(id)).lastTriedAt! + 3 * 60 * 60_000)
     expect(await t.action(api.payments.giveUpCharge, { auth: 'boss', checkoutId: id })).toEqual({ status: 'failed' })
     expect(pp.vaultCharges).toHaveLength(0)
   })

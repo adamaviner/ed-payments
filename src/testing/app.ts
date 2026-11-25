@@ -367,6 +367,10 @@ export const defined = app.defineModules({
       args: { donor: v.string(), paymentMethodId: v.string() },
       handler: async (ctx, a) => await payments.verifyMethodOwner(ctx, { owner: { type: 'donor', id: a.donor }, paymentMethodId: a.paymentMethodId }),
     }),
+    methods: app.action({
+      args: { donor: v.string() },
+      handler: async (ctx, a) => await payments.savedMethods(ctx, { owner: { type: 'donor', id: a.donor } }),
+    }),
     remove: app.action({
       args: { donor: v.string(), paymentMethodId: v.string() },
       handler: async (ctx, a): Promise<null> => {

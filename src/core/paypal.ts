@@ -59,7 +59,7 @@ export interface PaypalOrder {
     card?: { brand?: string; last_digits?: string; attributes?: { vault?: PaypalVaultAttribute } }
     paypal?: { email_address?: string; attributes?: { vault?: PaypalVaultAttribute } }
   }
-  purchase_units?: { custom_id?: string; reference_id?: string; amount?: PaypalMoney; payments?: { captures?: PaypalCapture[] } }[]
+  purchase_units?: { custom_id?: string; reference_id?: string; amount?: PaypalMoney; payments?: { captures?: PaypalCapture[]; refunds?: PaypalRefund[] } }[]
 }
 
 export interface PaypalRefund {
@@ -242,9 +242,18 @@ export interface PaypalPaymentToken {
   id: string
   customer?: { id?: string; merchant_customer_id?: string }
   payment_source?: {
-    card?: { brand?: string; last_digits?: string; expiry?: string; /** VERIFIED or FAILED (the $0 check at saving). */ verification_status?: string }
+    card?: {
+      brand?: string
+      last_digits?: string
+      expiry?: string
+      /** VERIFIED or FAILED (the $0 check at saving). */
+      verification_status?: string
+      network_transaction_reference?: { id?: string; network?: string }
+    }
     paypal?: { email_address?: string; payer_id?: string }
   }
+  /** In VAULT.PAYMENT-TOKEN.CREATED for a method saved with a purchase: the order that saved it (not in PayPal's published sample). */
+  metadata?: { order_id?: string }
 }
 
 export interface PaypalSetupToken {
@@ -455,7 +464,18 @@ export const PAYPAL_EVENTS = [
   'CUSTOMER.DISPUTE.CREATED',
   'CUSTOMER.DISPUTE.RESOLVED',
   'VAULT.PAYMENT-TOKEN.DELETED',
+  'VAULT.PAYMENT-TOKEN.CREATED',
 ] as const
+
+/** The order, or null when PayPal doesn't know it (it forgets orders nobody approved after a while). */
+export async function getOrderOrNull(c: Call, id: string): Promise<PaypalOrder | null> {
+  try {
+    return await paypal.getOrder(c, id)
+  } catch (err) {
+    if (err instanceof ProcessorError && err.status === 404) return null
+    throw err
+  }
+}
 
 /** The capture of a captured order (the first unit's first capture). */
 export function orderCapture(order: PaypalOrder): PaypalCapture | null {
@@ -479,14 +499,25 @@ export function orderVault(order: PaypalOrder): {
   if (!vault?.id || !vault.customer?.id || vault.status !== 'VAULTED') return null
   const what = paymentTokenLabel({ payment_source: card ? { card } : { paypal: pp } })
   if (!what) return null
-  const ntr = orderCapture(order)?.network_transaction_reference
-  return {
-    paymentTokenId: vault.id,
-    customerId: vault.customer.id,
-    kind: what.kind,
-    label: what.label,
-    ...(card && ntr?.id ? { networkRef: { id: ntr.id, ...(ntr.network ? { network: ntr.network } : {}), ...(ntr.date ? { date: ntr.date } : {}) } } : {}),
-  }
+  const networkRef = orderNetworkRef(order)
+  return { paymentTokenId: vault.id, customerId: vault.customer.id, kind: what.kind, label: what.label, ...(networkRef ? { networkRef } : {}) }
+}
+
+/** A card's network reference from an order's capture, which later recurring charges quote. */
+export function orderNetworkRef(order: PaypalOrder): { id: string; network?: string; date?: string } | null {
+  const ntr = order.payment_source?.card ? orderCapture(order)?.network_transaction_reference : undefined
+  return ntr?.id ? { id: ntr.id, ...(ntr.network ? { network: ntr.network } : {}), ...(ntr.date ? { date: ntr.date } : {}) } : null
+}
+
+/**
+ * What an order says about a save PayPal hasn't finished: its customer, when it names one (the
+ * documented APPROVED answer doesn't), and the card's network reference, which the token sent later
+ * by VAULT.PAYMENT-TOKEN.CREATED may not carry.
+ */
+export function orderVaultWaiting(order: PaypalOrder): { customerId?: string; networkRef?: { id: string; network?: string; date?: string } } {
+  const vault = order.payment_source?.card?.attributes?.vault ?? order.payment_source?.paypal?.attributes?.vault
+  const networkRef = orderNetworkRef(order)
+  return { ...(vault?.customer?.id ? { customerId: vault.customer.id } : {}), ...(networkRef ? { networkRef } : {}) }
 }
 
 export function orderCustomId(order: PaypalOrder): string | null {

@@ -57,9 +57,25 @@ permit_multiple_payment_tokens, description}` plus `experience_context`.
   - The account needs PayPal's approval for billing agreements (reference transactions), the same
     as for bids.
   - If the capture says `APPROVED` rather than `VAULTED`, the token isn't saved yet and comes
-    later in `VAULT.PAYMENT-TOKEN.CREATED`. The library doesn't handle that case. The schedule then
-    starts without a method, its next charge fails as `METHOD_REMOVED`, and the app asks the payer
-    for another method.
+    later in `VAULT.PAYMENT-TOKEN.CREATED`. PayPal documents the APPROVED vault as only
+    `{status, links: [up]}` (no id, no customer), and its event samples carry `resource.id` (the
+    token), `customer.id` and `payment_source`, but **no order id**. Shopware's PayPal plugin reads
+    the order from `resource.metadata.order_id` (SwagPayPal #845/#849), which is unconfirmed here: the
+    sandbox always answered VAULTED, and delivering the event needs a public webhook URL.
+  - **Handled:** the schedule records `paypalVaultPending` (order, PayPal customer when known, the
+    capture's network reference), starts, and waits. The library doesn't depend on the event: the
+    schedules worker reads the order again (`GET /v2/checkout/orders/{id}`, five minutes after the
+    capture, then hourly), and once `payment_source.<card|paypal>.attributes.vault` is
+    `{id, status: VAULTED, customer.id}` it saves and attaches the token through the same mutation as
+    the event. A failed read (network, 404) just waits for the next run. The event, if it arrives
+    first, is matched by `metadata.order_id` when present (now optional), else by PayPal customer
+    among this app's waiting schedules (never guessing between several); a brand-new payer's event
+    with neither is left to the order read. No token within three days: the schedule fails as
+    `METHOD_NOT_SAVED` (`checkoutId: null`) without charging, and the app asks the payer for another
+    method. That the order shows the token VAULTED after an APPROVED capture is PayPal's documented
+    order shape (the `up` link points at the order), but unconfirmed here, like the APPROVED answer itself. Fixtures built
+    from PayPal's samples: `VAULT.PAYMENT-TOKEN.CREATED.json`, `-paypal.json`,
+    `order-vault-approved-captured.json`.
 - **Removal at PayPal.** `VAULT.PAYMENT-TOKEN.DELETED` is listed as an event, but PayPal publishes
   no payload. Whether it fires when a buyer cancels the agreement from their PayPal account is **not
   documented**.

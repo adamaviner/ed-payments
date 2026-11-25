@@ -1,0 +1,9 @@
+{
+  "_source": "PayPal sandbox, captured 2026-11-24 (client credentials; token, app id, nonce and scopes scrubbed)",
+  "scope": "https://uri.paypal.com/services/payments/payment",
+  "access_token": "A21-scrubbed",
+  "token_type": "Bearer",
+  "app_id": "APP-00000000000000000",
+  "expires_in": 32400,
+  "nonce": "2026-11-24T00:00:00Zscrubbed"
+}

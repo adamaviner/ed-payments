@@ -11,7 +11,7 @@ disputes and reconciliation. An app prices things, keeps its own records and dec
 means for them, in callbacks. It never calls Stripe or PayPal itself. The rules an app (and a
 coding agent working in it) follows are in [`AGENTS.md`](AGENTS.md), shipped in the package.
 
-**Status:** v0.6: payments in USD, one-off and monthly (schedules): hosted and embedded checkouts (Stripe Checkout, PayPal), saved
+**Status:** v0.8.0: payments in USD, one-off and monthly (schedules): hosted and embedded checkouts (Stripe Checkout, PayPal), saved
 methods charged off-session (Stripe cards and bank accounts, PayPal-vaulted cards and PayPal accounts), on-session retries. Not here: subscriptions, order models, emails.
 The plans it was built from are ed-schedule's `payments_library_plan.md` (v0.1) and the v0.2 plan
 ("own all payment paths, bids included").
@@ -20,7 +20,7 @@ The plans it was built from are ed-schedule's `payments_library_plan.md` (v0.1) 
 
 The example app (`example/convex`) is a complete host; these are its files.
 
-**1. Install and mount.** `npm install github:adamaviner/ed-payments#v0.2.1` (pnpm: `pnpm add ...`).
+**1. Install and mount.** `npm install github:adamaviner/ed-payments#v0.8.0` (pnpm: `pnpm add ...`).
 
 ```ts
 // convex/convex.config.ts
@@ -119,7 +119,16 @@ Then register the webhooks: `npx ed-payments webhooks --stripe https://<deployme
 
 ## The React package (`@earthdance/payments/react`)
 
-Two pieces for an app's React code, over the functions it exported in steps 2 and 4. Its `react` peer
+The browser side of the payment paths, for an app's React code, over the functions it exported in steps 2 and 4:
+
+- paying on the app's own page: `PaypalButtons` and `StripeEmbeddedCheckout` (an embedded checkout),
+  `PaypalCardPayment` (a schedule's first payment by card at PayPal), `StripeRetryPayment` (a retry after a decline);
+- saving a method to charge later: `PaypalCardFields`, `PaypalSaveButton`, `StripeSaveMethod`, and
+  `useStripeSetupReturn` for a save that needed a redirect;
+- the return page: `checkoutReturnToken` and `useCheckoutReturn`;
+- Admin → Payments: `PaymentsAdminPage`, with `parseRefundAmount`, `refundableCents` and `errorMessage`.
+
+Its `react` peer
 dependency is optional, so an app with no React (or its own pages) needs nothing more. It brings its
 own few primitives (plain `button` and `input`, no UI library), styled with Tailwind classes on the
 shadcn theme tokens (`bg-muted`, `text-destructive`, ...), so colours come from the app's theme. Add to
@@ -163,6 +172,10 @@ embedded.processor === 'paypal' ? (
   the app's own action) with the id `start` returned. The Stripe session is expired at Stripe, the
   checkout is abandoned at once (a PayPal order is then never captured), and the start is given back
   to the buyer's own rate limit, once. A checkout paid in the meantime is settled as paid instead.
+  Money that still arrives after the buyer cancelled (a Stripe payment racing the cancel) is owed back:
+  `refund_needed`, never kept. While a PayPal capture is under way the cancel is refused with the
+  sentence "This payment is being paid right now…" (show it, then check the checkout again); a
+  capture that died more than five minutes ago doesn't block it, PayPal being asked first.
   Call it for the unused embedded checkout after `onFallback` too.
 - Webhooks, refunds, the sweep and the comparison treat these checkouts like any other.
 
@@ -220,7 +233,7 @@ merely opening forms use up a payer's tries.
   payer who just paid. For a save, `useStripeSetupReturn(publishableKey, search)` says `saved` (with the
   `paymentMethodId`), `processing`, `failed` or `unknown` (Stripe couldn't say; don't invite another
   save before checking). Pass `search` from the router in a server-rendered app; without it the address is
-  read after mounting. On `saved`: Stripe saved the method, but what `onSaved` was to do with it (place
+  read from `window.location` (none on the server, so hydration matches). On `saved`: Stripe saved the method, but what `onSaved` was to do with it (place
   the bid) didn't happen, so say so and let the payer finish with it; `savedMethods` lists it.
 
 **The return page: `useCheckoutReturn(completeReturn, { processor, token })`.** The app reads the
@@ -264,7 +277,6 @@ ledger, passed to `on.refunded`).
 <PaymentsAdminPage
   api={api.paymentsAdmin} // the module from step 4, checked against the library's adminApi
   auth={{ token }} // only for apps with their own session tokens; leave out on Convex auth
-  skipApproval // the same as adminApi({ skipApproval }) on the server
   refLink={(ref) => (ref.type === 'item' ? <Link to={`/items/${ref.id}`}>The item</Link> : null)}
   refundQuestion={(checkout, amountCents, leftCents) =>
     amountCents === leftCents
@@ -284,16 +296,18 @@ ledger, passed to `on.refunded`).
 **Who may do what on the admin page.** `authorize.admin` may do everything. An optional
 `authorize.request` query (same shape) may see payments and issues and ask for refunds, nothing
 more: the page shows it only the refund form (always "Ask to refund") and the list of open refunds.
-The page asks `api.paymentsAdmin.access` (`{ level: 'admin' | 'request', name } | null`), so
-export `access` too. An optional `authorize.stepUp` query (`{ auth, action: 'approve' | 'send',
+The page asks `api.paymentsAdmin.access` (`{ level: 'admin' | 'request', name, skipApproval } | null`), so
+export `access` too; whether a refund waits for approval is the server's `adminApi({ skipApproval })`, read from there. An optional `authorize.stepUp` query (`{ auth, action: 'approve' | 'send',
 refundId }` → null, or a sentence) runs right before a refund is approved or sent. A sentence
 refuses with `ConvexError({ code: 'step_up', message })`. Give the page `onStepUp={(action) =>
 askForPasskey()}` and it runs the app's check, then tries once more.
 
 **Paying a schedule's first payment by card at PayPal: `<PaypalCardPayment payment={embedded}
 completeReturn={api.payments.completeReturn} submitLabel="Give $25 monthly" />`.** It uses PayPal's
-Card Fields, loaded under their own namespace. It captures through `completeReturn`, then goes to
-`returnUrl`; a declined card is said under the fields.
+Card Fields, loaded under their own namespace, styled like `PaypalCardFields` (`style` for the frames' colors). It
+captures through `completeReturn`, then goes to `returnUrl`. Only a declined card is said under the fields: once
+the capture has started, anything else (an error, no answer) also goes to `returnUrl`, whose page asks the server
+how it stands, because a capture whose answer was lost may have taken the money.
 
 Also exported: `parseRefundAmount(text, leftCents)`, `refundableCents(checkout, openRefunds)`,
 `errorMessage(err)`, and the types (`PaymentsAdminApi`, `CompleteReturnRef`, `OpenRefund`,
@@ -352,17 +366,23 @@ await payments.schedulesFor(ctx, owner) // also schedulesForRef(ref), getSchedul
 - **Refusals.** The schedule goes `past_due` and the period is retried 3, 5 and 7 days after the
   first refusal; after the last, the schedule is `lapsed` (`scheduleFailed` with `final: true`).
   - Hard declines lapse it at once: lost, stolen or expired cards, closed bank accounts, revoked
-    authorizations, `advice_code: do_not_try_again`, and a method that is gone (`METHOD_REMOVED`).
+    authorizations, `advice_code: do_not_try_again`, a method that is gone (`METHOD_REMOVED`), and a
+    method PayPal never finished saving (`METHOD_NOT_SAVED`, below).
   - An insufficient-funds retry moves to the 1st or 15th when one falls within four days after it.
   - `scheduleFailed` gives `attempt`, `final`, `declineCode`, `declineKind` and `nextRetryAt`.
     The app sends its failed-charge email on `attempt === 1`.
+  - Two codes mean nothing was charged (`checkoutId: null`), and are exported from
+    `@earthdance/payments/core`: `METHOD_REMOVED` (the saved method is gone: ask for another) and
+    `METHOD_NOT_SAVED` (PayPal took the first payment but never finished saving the method: word it
+    as "we couldn't save your payment method", not as a failed payment).
   - A new method (`updateSchedule`) on a `past_due` schedule charges the refused period at once.
     On a `lapsed` one, it starts again at the next charge date, like `resumeSchedule`.
 - **First payment that saves the method** (`startScheduleCheckout`, embedded by default). The
   schedule is `starting` until that payment is paid (or, for a bank account, on its way). Then
   `scheduleChanged` says `started` and `scheduleCharged` has `first: true`. If the payment never
   completes (the payer pressed Edit and `cancelCheckout` ran, or it expired), `scheduleChanged`
-  says `not_started`.
+  says `not_started`. If the first payment arrives anyway after the checkout expired (not after the
+  payer cancelled it, when it is owed back), the schedule starts after all (`started`).
   - **Stripe** (card or `ach`): an embedded Checkout session for the payer's Customer, with
     `setup_future_usage: off_session` (bank accounts verified at once). Checkout tells the payer the
     method is saved, and shows a bank account's mandate. Show it with `StripeEmbeddedCheckout`.
@@ -371,12 +391,28 @@ await payments.schedulesFor(ctx, owner) // also schedulesForRef(ref), getSchedul
   - **PayPal `card`:** the order saves the card and marks its payment the first of a recurring
     series. `embedded.only === 'card'`; show it with `PaypalCardPayment` (PayPal's Card Fields).
     Later charges are marked RECURRING with the first payment's network reference.
+  - **PayPal saving after the payment.** PayPal may answer the capture with vault status
+    `APPROVED` instead of `VAULTED`: paid, but the token comes later in
+    `VAULT.PAYMENT-TOKEN.CREATED`. The schedule then starts with `paymentMethodId: null` and waits
+    for it instead of failing. The schedules worker reads the first payment's order again (five
+    minutes after the capture, then at each hourly run), and attaches the token once the order shows
+    it `VAULTED`; it doesn't need the webhook. The event, when it comes first, attaches it too (the
+    two together save it once): its token goes to the schedule whose first order it names
+    (`metadata.order_id`, not in PayPal's docs), or else to the one schedule of this app waiting
+    with that PayPal customer (several waiting: none is guessed). An order that can't be read is
+    tried again at the next run. If no token comes within three days, the schedule fails as
+    `METHOD_NOT_SAVED` (lapsed, `scheduleFailed` with `checkoutId: null`, `final: true`)
+    without charging, so the app asks the payer for another method. A token that comes later still
+    is kept as the payer's saved method for `updateSchedule`.
 - **Removed at the processor.** `payment_method.detached` (Stripe) or `VAULT.PAYMENT-TOKEN.DELETED`
   (PayPal) cancels every schedule using the method, with `scheduleChanged` showing `by:
 'processor'` and a reason. Run the webhook CLI again after upgrading: both events are new.
   `removeSavedMethod` refuses a method a schedule still uses.
 - **Statuses:** `starting`, `active`, `paused` (until `pausedUntil`, then active again by
   itself), `past_due`, `lapsed`, `cancelled`. Schedules are kept forever (one row per agreement).
+  A charge already on its way when the payer pauses that is then refused (or a bank debit that
+  bounces) keeps the pause: `scheduleFailed` says so (`nextRetryAt: null`, `status: 'paused'`), and the
+  refused period is charged when the pause ends.
 
 ## How it works
 
@@ -428,7 +464,7 @@ MERCHANT`). `savePaypalMethod` turns the approved token into a payment token and
   3, 4 minutes; before each new try the customer's PaymentIntents are searched for this checkout,
   because Stripe replays a key's first answer (even a 500), so a new key is used only once nothing was
   found. After five tries, or at once for anything odd, a `charge_unknown` issue asks a person, who
-  retries it or gives it up (Stripe is asked first: a charge it shows paid is settled, an open one canceled; otherwise `failed`, and the app decides what next). The sweep leaves charges handed to a person alone. A charge and its on-session retries pay for one thing: a second payment for it is owed back (`refund_needed`), and only one retry can be open at a time. A charge whose queued try died is
+  retries it or gives it up (Stripe is asked first: a charge it shows paid is settled, an open one canceled; PayPal's order is read, or without an order id Transaction Search is searched for a capture tagged with the charge, and giving up is refused until three hours after the last try, since PayPal's search lags that much; otherwise `failed`, and the app decides what next). The sweep leaves charges handed to a person alone. A charge and its on-session retries pay for one thing, as does each period of a schedule: a second payment for it is owed back (`refund_needed`), and only one retry can be open at a time. An on-session retry of a schedule's charge pays that period and moves the schedule on; one asked for once the period is paid is refused. A charge whose queued try died is
   picked up by the sweep after 10 quiet minutes.
 - **On-session retries with PayPal.** `retryWithPaypal` makes an order for PayPal's buttons (a PayPal
   account or a card), settled like an embedded checkout. One retry is open at a time: asking for the
@@ -455,18 +491,28 @@ MERCHANT`). `savePaypalMethod` turns the approved token into a payment token and
   `hostData` (`requestRefund({ ..., hostData })`, a few short strings, e.g. an admin's answer), which
   `on.refunded` receives when it is done (also when that request was refunded in a dashboard instead: an
   untagged refund of the same amount closes it); refunds the library or a dashboard made on their own
-  have none. `on.refunded` can come twice for one refund (failed at the processor after sending, then
-  sent again), so act on it idempotently.
+  have none. A refund the processor fails after reporting it done comes to `on.refunded` again with
+  `reversed: true` (and `refundedCents` without it); sent again later, it comes once more, so act on it
+  idempotently. While a dispute is open on a payment, refunds of it are refused (requesting, sending and
+  marking done by hand); each dispute is kept, so a payment is disputed until all of its disputes end,
+  and a Stripe dispute lost is taken off what is left to refund (a PayPal one comes back as a refund
+  event). Marking a refund done by hand is checked against what is left after refunds in progress.
 - **Sweep** (every 10 minutes): PayPal approvals whose webhook never came are captured; expired
   checkouts are settled if paid after all, else ended at the processor and abandoned; quiet off-session
   charges are tried again; refunds left sending are checked.
 - **Reconcile** (nightly, last 3 days): Stripe sessions, direct PaymentIntents and refunds tagged for the
-  app against the component, both ways; PayPal orders of the window; PayPal Transaction Search for
+  app against the component, both ways; PayPal orders of the window (refunds they list that the ledger
+  lacks are recorded, as Stripe's are); PayPal Transaction Search for
   captures the component lacks (skipped, logged once a day, when PayPal refuses it). Differences are
   issues; one that goes away is resolved. The digest (`issuesDigest`) hands new issues to `on.issues`.
-- **Rate limits** on every public entry: `start`, `setupPaymentMethod`, `retryOnSession` and the return
-  page. Per signed-in user (else per payer email, or the token on the return page), per window, and for
-  everyone together per minute. Defaults 5 per 10 minutes and 30 a minute (the return page four times
+- **Rate limits** on every public entry: `start`, `setupPaymentMethod`, `setupPaypalMethod`,
+  `savePaypalMethod`, `savedMethods`, `verifyMethodOwner`, `removeSavedMethod`, `retryOnSession`,
+  `retryWithPaypal`, the return page and `cancelCheckout`. Per key, per window: the `limitKey` the host
+  passes (each of those takes one), else the signed-in user, else the payer's email (the owner, for the
+  saved-method lists and checks; the token on the return page); and for everyone together per minute.
+  Listing and checking saved methods allow four times as many. A PayPal webhook whose
+  `paypal-transmission-time` is more than ten minutes from now is refused (400) before PayPal is asked
+  to verify it. Defaults 5 per 10 minutes and 30 a minute (the return page four times
   that); `limits` in `definePayments`.
 - **Keys** come from `fromEnv`. `PAYMENTS_MODE=live` marks the production deployment: there every set-up
   problem (a test key, the sandbox, a missing webhook secret or id) stops the push with the reason;
@@ -519,6 +565,8 @@ MERCHANT`). `savePaypalMethod` turns the approved token into a payment token and
 src/core       pure TypeScript, no Convex: fees, money, types, the processors' wire code, event lists   @earthdance/payments/core
 src/component  the Convex component: tables, queries, mutations; no network, no secrets, no routes, no crons
 src/client     what the app's convex/ code imports: definePayments, fromEnv, validators                 @earthdance/payments
+               (index.ts the Payments facade; hosted.ts, refunds.ts, sweep.ts, saved.ts, paypalVault.ts,
+               schedules.ts the flows; api.ts the generated functions; util.ts leaf helpers)
 src/react      the return page hook and the admin page                                                @earthdance/payments/react
 src/cli        npx ed-payments webhooks
 src/test.ts    register / registerPayments for convex-test, fake Stripe and PayPal, fixtures            @earthdance/payments/test
@@ -587,8 +635,8 @@ the wire code (`stripe.*`, `paypal.*`, signatures, parsers) and `STRIPE_EVENTS` 
 
 ### `@earthdance/payments/react`
 
-`PaypalButtons`, `StripeEmbeddedCheckout`, `StripeSaveMethod`, `StripeRetryPayment`, `useStripeSetupReturn`,
-`useCheckoutReturn`, `checkoutReturnToken`,
+`PaypalButtons`, `StripeEmbeddedCheckout`, `PaypalCardPayment`, `PaypalCardFields`, `PaypalSaveButton`,
+`StripeSaveMethod`, `StripeRetryPayment`, `useStripeSetupReturn`, `useCheckoutReturn`, `checkoutReturnToken`,
 `PaymentsAdminPage` and helpers; see
 "The React package" above.
 
@@ -597,8 +645,12 @@ the wire code (`stripe.*`, `paypal.*`, signatures, parsers) and `STRIPE_EVENTS` 
 `registerPayments(t)` (the component plus fake Stripe and PayPal behind `fetch`), `register(t)`,
 `fakeStripe()` (sessions, customers, saved methods with `saveMethod(customer, 'ok' | 'decline' | 'auth' | 'bank')`,
 PaymentIntents with `confirm`, `settleBank`, `intentEvent`, refunds, disputes, webhook endpoints),
-`fakePaypal()`, the fixtures and event builders. `src/testing/contract.test.ts` checks every fake
-answer against a saved real object.
+`fakePaypal()`, the fixtures and event builders. `src/testing/contract.test.ts` checks every route a
+fake answers, and every webhook body it makes, against a saved real object (`drift`: no invented
+fields, no other types, no null where the processor has a value, every list element). The fakes
+refuse what the processors refuse: Stripe's 400 `idempotency_error` for a key reused with other
+parameters, and PayPal replays a request id's first answer with its first status. The sandbox suites
+compare live answers' fields with the fixtures (`keyDiff`), so a stale fixture shows.
 
 ## Fixtures
 
@@ -607,13 +659,14 @@ answer against a saved real object.
 - **Captured** from Stripe test mode (API `2026-10-28.endive`): sessions, a customer, card and bank
   payment methods and their list, a SetupIntent, off-session PaymentIntents (paid, bank processing),
   an on-session one and its cancel, an expanded one, a list, the 402 decline and authentication errors,
-  the 400 for `payment_method_types`, a 403 for a missing permission. From the PayPal sandbox: a created
-  order, an unapproved order, `ORDER_NOT_APPROVED`, Transaction Search's 403, verification's `FAILURE`.
+  the 400 for `payment_method_types`, the 400 for a reused idempotency key. From the PayPal sandbox: a
+  token, a created order, an unapproved order, `ORDER_NOT_APPROVED`, a 404, Transaction Search's rows and
+  its 403, the webhooks list, verification's `FAILURE`.
 - **Built** from those real objects as the processor documents: the Stripe `checkout.session.*`,
   `payment_intent.*`, `charge.refunded`, `refund.*` and `charge.dispute.*` events; PayPal's approved
   order, `CHECKOUT.ORDER.APPROVED`, `ORDER_ALREADY_CAPTURED` and the dispute events.
-- **Documented samples:** PayPal's captured order and `PAYMENT.CAPTURE.*` events; Stripe's refund and
-  webhook endpoint objects.
+- **Documented samples:** PayPal's captured order and `PAYMENT.CAPTURE.*` events; Stripe's refund,
+  webhook endpoint and deleted webhook endpoint objects.
 - Scrubbed of account ids, key ids, emails, client secrets, merchant and payer ids.
 
 ## Setting up an app's processors
@@ -662,6 +715,42 @@ the webhooks registered on the live deployment:
     sandbox kept 2.59% + 49¢ on a saved card). Remove one: gone from the bid form and from PayPal. After a
     decline, pay on the retry page with PayPal's buttons.
 
+## Upgrade notes
+
+### Next release (audit fixes)
+
+Nothing to migrate; these change what a host sees:
+
+- **Money on a checkout the buyer cancelled** (`cancelCheckout` / `payments.cancel`) that arrives anyway
+  is now `refund_needed` (`on.refundNeeded`), not `paid`. A checkout that only expired still settles as paid.
+- **`cancelCheckout` can refuse** while a PayPal capture is under way, throwing "This payment is being paid
+  right now…". Show the sentence and check the checkout again.
+- **One payment per schedule period:** a second payment for a period is `refund_needed`. An on-session
+  retry of a schedule's charge pays that period; asking for one once the period is paid throws "This is already paid."
+- **`giveUpCharge` on a PayPal charge with no order id** looks in Transaction Search first and is refused
+  until three hours after the charge's last try when nothing shows yet.
+- **A charge key reused** for another amount, payment method or `ref` now throws instead of returning
+  the first charge.
+- **Refunds are refused while a dispute is open**, and a lost Stripe dispute is taken off what is left
+  to refund. `on.refunded` may come with `reversed: true` (add nothing to your validator: `payments.args.refunded` has it).
+- **Rate limits:** `savedMethods`, `verifyMethodOwner` and `removeSavedMethod` are now limited (per
+  owner; the first two at four times the usual number). Every public entry takes an optional
+  `limitKey`, which now counts instead of the signed-in user too (`start`'s did only for signed-out payers).
+- **A `v.id()` in the context** must look like a Convex id (it was any string).
+- **PayPal webhooks** sent more than ten minutes before they arrive are refused (400) without asking PayPal.
+- **Register the webhooks again** (`npx ed-payments webhooks --paypal …`): `VAULT.PAYMENT-TOKEN.CREATED` is
+  new. A schedule whose first PayPal payment saves the method after the capture (vault `APPROVED`) waits up to
+  three days for the token instead of lapsing at its next charge: the schedules worker reads the order again
+  (needs `worker().schedules` exported, as schedules already do), and the event, when it comes, is a faster path.
+- **`METHOD_NOT_SAVED`** is a new `scheduleFailed` `declineCode` (`checkoutId: null`, `final: true`):
+  that wait ran out. Nothing was charged or refused; word it as a payment method that couldn't be saved,
+  not a failed payment, and ask for another method.
+- `PaymentsAdminPage` has no `skipApproval` prop: it reads the server's `adminApi({ skipApproval })`
+  through the `access` query, so the page and the server can't disagree. Remove the prop (TypeScript
+  refuses it now).
+- `paypalCardPaySdkUrl` and `paypalVaultSdkUrl` are no longer exported from `@earthdance/payments/react`: the
+  components load PayPal's SDK themselves, and an app never should (AGENTS.md rule 1).
+
 ## Developing
 
 ```sh
@@ -681,9 +770,10 @@ refuses live ones.
 ## Releasing
 
 ```sh
-npm run release -- 0.2.0
+npm run release -- 0.8.0
 ```
 
 From a clean branch: builds, runs every check, commits the version bump, puts the tag on a commit
 just past it that adds `dist`, and pushes both. Branches never hold `dist`. Apps install the tag:
-`npm install github:adamaviner/ed-payments#v0.2.0` (pnpm: `pnpm add github:adamaviner/ed-payments#v0.2.0`).
+`npm install github:adamaviner/ed-payments#v0.8.0` (pnpm: `pnpm add github:adamaviner/ed-payments#v0.8.0`).
+After a release, update "Status" above and the tag in "Adopt in 5 steps".

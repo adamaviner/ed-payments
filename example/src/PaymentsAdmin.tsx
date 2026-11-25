@@ -1,6 +1,7 @@
 // How an app shows Admin → Payments (typechecked against the example's generated api, so a change to
 // the admin api that breaks apps breaks here first). This app signs in with Convex auth, so it passes
-// no `auth`; ed-schedule would pass `auth={{ token }}`. skipApproval matches paymentsAdmin.ts.
+// no `auth`; ed-schedule would pass `auth={{ token }}`. Whether refunds wait for approval comes from
+// paymentsAdmin.ts (adminApi({ skipApproval })), through the page's access query.
 import { type CheckoutSummary, type PaymentRef, PaymentsAdminPage, type RefundQuestion } from '@earthdance/payments/react'
 import { useQuery } from 'convex/react'
 import { api } from '../convex/_generated/api.js'
@@ -31,7 +32,7 @@ const restockQuestion = (checkout: CheckoutSummary, amountCents: number, leftCen
 const confirmAgain = (action: 'approve' | 'send') => Promise.resolve(window.confirm(`Confirm you want to ${action} this refund.`))
 
 export function PaymentsAdmin() {
-  return <PaymentsAdminPage api={api.paymentsAdmin} skipApproval refLink={itemLink} refundQuestion={restockQuestion} onStepUp={confirmAgain} />
+  return <PaymentsAdminPage api={api.paymentsAdmin} refLink={itemLink} refundQuestion={restockQuestion} onStepUp={confirmAgain} />
 }
 
 /** The sidebar's badge: refunds to do plus open issues. */

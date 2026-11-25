@@ -1,0 +1,55 @@
+{
+  "_source": "Built 2026-11-24, not captured (delivering it needs a public webhook URL): PayPal's documented VAULT.PAYMENT-TOKEN.CREATED sample for a PayPal account saved with a purchase (https://developer.paypal.com/docs/checkout/save-payment-methods/during-purchase/js-sdk/paypal/): resource id, time_created, links, payment_source.paypal and customer.id, values scrubbed. resource.metadata.order_id is not in PayPal's sample; Shopware's PayPal plugin reads the order id there for this event (github.com/shopware/SwagPayPal issues/845, pull/849), so it is added here unconfirmed.",
+  "id": "WH-TEST-VAULT-CREATED-PAYPAL",
+  "event_version": "1.0",
+  "create_time": "2026-11-24T12:00:01.000Z",
+  "resource_type": "payment_token",
+  "resource_version": "3.0",
+  "event_type": "VAULT.PAYMENT-TOKEN.CREATED",
+  "summary": "A payment token has been created.",
+  "resource": {
+    "time_created": "2026-11-24T12:00:00.000Z",
+    "links": [
+      {
+        "href": "https://api.sandbox.paypal.com/v3/vault/payment-tokens/fakepaytoken1",
+        "rel": "self",
+        "method": "GET",
+        "encType": "application/json"
+      },
+      {
+        "href": "https://api.sandbox.paypal.com/v3/vault/payment-tokens/fakepaytoken1",
+        "rel": "delete",
+        "method": "DELETE",
+        "encType": "application/json"
+      }
+    ],
+    "id": "fakepaytoken1",
+    "payment_source": {
+      "paypal": {
+        "permit_multiple_payment_tokens": false,
+        "usage_type": "MERCHANT",
+        "customer_type": "CONSUMER",
+        "email_address": "buyer@example.org",
+        "payer_id": "FAKEPAYER1"
+      }
+    },
+    "customer": {
+      "id": "FAKECUST1"
+    },
+    "metadata": {
+      "order_id": "FAKEORDER1"
+    }
+  },
+  "links": [
+    {
+      "href": "https://api.sandbox.paypal.com/v1/notifications/webhooks-events/WH-TEST-VAULT-CREATED-PAYPAL",
+      "rel": "self",
+      "method": "GET"
+    },
+    {
+      "href": "https://api.sandbox.paypal.com/v1/notifications/webhooks-events/WH-TEST-VAULT-CREATED-PAYPAL/resend",
+      "rel": "resend",
+      "method": "POST"
+    }
+  ]
+}

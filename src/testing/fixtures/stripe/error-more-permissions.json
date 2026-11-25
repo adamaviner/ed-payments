@@ -1,9 +1,0 @@
-{
-  "_source": "Stripe test mode, API 2026-10-28.endive, POST /v1/refunds, captured 2026-11-17 by scripts/capture (scrubbed)",
-  "error": {
-    "code": "more_permissions_required",
-    "message": "Permission denied. The provided key 'rk_test_...5jBG' does not have the required permissions for this endpoint on account 'acct_scrubbed'. Enabling Charges and Refunds Write ('charge_write') permissions on this key would allow this request to continue. You can edit permissions at https://dashboard.stripe.com/b/acct_scrubbed?destination=%2Ftest%2Fapikeys%2Fmk_scrubbed%2Fedit",
-    "request_log_url": "https://dashboard.stripe.com/acct_scrubbed/test/workbench/logs?object=req_cscEXBRzM3Xrsu",
-    "type": "invalid_request_error"
-  }
-}

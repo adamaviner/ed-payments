@@ -5,6 +5,8 @@
 import { afterAll, describe, expect, test } from 'vitest'
 import { stripeWebhook } from '../src/cli/webhooks.js'
 import { ProcessorError, intentState, sessionState, stripe, stripeCall, type StripeCustomer } from '../src/core/index.js'
+import { keyDiff } from '../src/testing/drift.js'
+import { fixture, stripeObjectFixtures } from '../src/testing/fixtures.js'
 
 const secretKey = process.env.SANDBOX_STRIPE_SECRET_KEY ?? ''
 if (!/^(sk|rk)_test_/.test(secretKey)) throw new Error('The sandbox suite only runs with a Stripe test key.')
@@ -48,8 +50,15 @@ describe('Checkout Sessions', () => {
         o,
       )
       expect(sessionState(s)).toBe('open')
-      expect((await stripe.retrieveSession(keys, s.id, o)).metadata).toMatchObject({ app: 'sandbox' })
-      expect(sessionState(await stripe.expireSession(keys, s.id, o))).toBe('expired')
+      // Each live answer has the fields its fixture has (the fakes are built from the fixtures).
+      expect(keyDiff(s, fixture(method === 'card' ? stripeObjectFixtures.sessionOpen : stripeObjectFixtures.sessionAchOpen))).toEqual([])
+      const read = await stripe.retrieveSession(keys, s.id, o)
+      expect(read.metadata).toMatchObject({ app: 'sandbox' })
+      expect(keyDiff(read, fixture(method === 'card' ? stripeObjectFixtures.sessionOpen : stripeObjectFixtures.sessionAchOpen))).toEqual([])
+      const expired = await stripe.expireSession(keys, s.id, o)
+      expect(sessionState(expired)).toBe('expired')
+      // The expired fixture is a card session's; a bank account's has no card options.
+      if (method === 'card') expect(keyDiff(expired, fixture(stripeObjectFixtures.sessionExpired))).toEqual([])
     }
   })
 
@@ -80,10 +89,12 @@ describe('Checkout Sessions', () => {
 describe('saved methods and PaymentIntents', () => {
   test('a customer, a SetupIntent for off-session use, and the old parameter refused', async () => {
     customer = await stripe.createCustomer(keys, { app: 'sandbox', owner: `user:${run}`, email: 'sandbox@example.org' }, { ...o, idempotencyKey: `sb-cust-${run}` })
+    expect(keyDiff(customer, fixture(stripeObjectFixtures.customer))).toEqual([])
     const again = await stripe.createCustomer(keys, { app: 'sandbox', owner: `user:${run}`, email: 'sandbox@example.org' }, { ...o, idempotencyKey: `sb-cust-${run}` })
     expect(again.id).toBe(customer.id)
     const si = await stripe.createSetupIntent(keys, { customer: customer.id, app: 'sandbox', owner: `user:${run}` }, o)
     expect(si).toMatchObject({ status: 'requires_payment_method', usage: 'off_session' })
+    expect(keyDiff(si, fixture(stripeObjectFixtures.setupIntent))).toEqual([])
     expect(si.client_secret).toBeTruthy()
     const old = await failure(stripeCall(keys, 'POST', '/v1/setup_intents', { customer: customer.id, payment_method_types: ['card'] }, o))
     expect(old.status).toBe(400)
@@ -109,12 +120,17 @@ describe('saved methods and PaymentIntents', () => {
     const card = await attach('pm_card_visa')
     const paid = await charge(card, 'ok')
     expect(intentState(paid)).toBe('paid')
+    expect(keyDiff(paid, fixture(stripeObjectFixtures.paymentIntentOffSession))).toEqual([])
     expect((await charge(card, 'ok')).id).toBe(paid.id)
     const listed = await stripe.customerMethods(keys, c, o)
     expect(listed.data.map((m) => m.id)).toContain(card)
-    expect((await stripe.retrievePaymentMethod(keys, card, o)).customer).toBe(c)
+    expect(keyDiff(listed, fixture(stripeObjectFixtures.customerPaymentMethods))).toEqual([])
+    const method = await stripe.retrievePaymentMethod(keys, card, o)
+    expect(method.customer).toBe(c)
+    expect(keyDiff(method, fixture(stripeObjectFixtures.paymentMethodCard))).toEqual([])
     const full = await stripe.paymentIntentWithMethod(keys, paid.id, o)
     expect(typeof full.payment_method === 'object' && full.payment_method?.type).toBe('card')
+    expect(keyDiff(full, fixture(stripeObjectFixtures.paymentIntentExpanded))).toEqual([])
 
     expect(await failure(charge(await attach('pm_card_chargeCustomerFail'), 'decline'))).toMatchObject({
       status: 402,
@@ -124,7 +140,9 @@ describe('saved methods and PaymentIntents', () => {
       paymentIntent: { status: 'requires_payment_method' },
     })
     expect(await failure(charge(await attach('pm_card_authenticationRequired'), 'auth'))).toMatchObject({ status: 402, code: 'authentication_required', declined: true })
-    expect(intentState(await charge(await attach('pm_usBankAccount_success'), 'bank'))).toBe('processing')
+    const bank = await charge(await attach('pm_usBankAccount_success'), 'bank')
+    expect(intentState(bank)).toBe('processing')
+    expect(keyDiff(bank, fixture(stripeObjectFixtures.paymentIntentOffSessionBank))).toEqual([])
 
     const on = await stripe.createPaymentIntent(
       keys,
@@ -133,7 +151,10 @@ describe('saved methods and PaymentIntents', () => {
     )
     expect(on.status).toBe('requires_payment_method')
     expect(on.client_secret).toBeTruthy()
-    expect((await stripe.cancelPaymentIntent(keys, on.id, o)).status).toBe('canceled')
+    expect(keyDiff(on, fixture(stripeObjectFixtures.paymentIntentOnSession))).toEqual([])
+    const canceled = await stripe.cancelPaymentIntent(keys, on.id, o)
+    expect(canceled.status).toBe('canceled')
+    expect(keyDiff(canceled, fixture(stripeObjectFixtures.paymentIntentCanceled))).toEqual([])
     expect((await stripe.listPaymentIntents(keys, Math.floor(now / 1000) - 60, undefined, o)).data.some((p) => p.id === paid.id)).toBe(true)
   })
 

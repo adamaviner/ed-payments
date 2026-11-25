@@ -66,9 +66,12 @@ export class ProcessorError extends Error {
     this.adviceCode = extra.adviceCode
   }
 
-  /** Worth trying again later: the processor was down, slow or rate-limiting. */
+  /**
+   * Worth trying again later: the processor was down, slow or rate-limiting, or (Stripe's 409) still
+   * working on another request with the same idempotency key.
+   */
   get retryable(): boolean {
-    return this.status === 0 || this.status === 429 || this.status >= 500
+    return this.status === 0 || this.status === 429 || this.status >= 500 || (this.processor === 'stripe' && this.status === 409)
   }
 
   /**

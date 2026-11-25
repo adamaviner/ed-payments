@@ -19,11 +19,15 @@ import {
   verifyPaypalWebhook,
   type PaypalSetupToken,
 } from '../src/core/index.js'
+import { keyDiff } from '../src/testing/drift.js'
+import { fixture, paypalObjectFixtures } from '../src/testing/fixtures.js'
 
 const keys = { clientId: process.env.SANDBOX_PAYPAL_CLIENT_ID ?? '', clientSecret: process.env.SANDBOX_PAYPAL_CLIENT_SECRET ?? '', apiBase: PAYPAL_SANDBOX_API }
 if (!keys.clientId || !keys.clientSecret) throw new Error('The sandbox suite needs PayPal sandbox keys.')
 const o = { fetch: (input: string, init?: RequestInit) => fetch(input, init) }
 const run = Date.now().toString(36)
+/** What PayPal knows about a card's BIN depends on the card (the fixtures' is another test card). */
+const BIN_FIELDS = ['.payment_source.card.bin_details', '.payment_source.card.available_networks']
 
 async function call() {
   const { token } = await paypalToken(keys, Date.now(), o)
@@ -38,7 +42,10 @@ describe('orders', () => {
     expect(order.status).toBe('PAYER_ACTION_REQUIRED')
     expect(approveUrl(order)).toMatch(/^https:\/\/www\.sandbox\.paypal\.com\//)
     expect((await paypal.createOrder(c, input, `sb-${run}`)).id).toBe(order.id)
-    expect((await paypal.getOrder(c, order.id)).purchase_units?.[0]?.custom_id).toBe(`sandbox:${run}`)
+    const read = await paypal.getOrder(c, order.id)
+    expect(read.purchase_units?.[0]?.custom_id).toBe(`sandbox:${run}`)
+    // The fixture's order was made with a brand name and an invoice id; this one has neither.
+    expect(keyDiff(read, fixture(paypalObjectFixtures.orderUnapproved), { ignore: ['.purchase_units[n].payee.display_data', '.purchase_units[n].invoice_id'] })).toEqual([])
     await expect(paypal.captureOrder(c, order.id, `sb-cap-${run}`)).rejects.toMatchObject({ status: 422, code: 'ORDER_NOT_APPROVED' })
   })
 
@@ -77,6 +84,12 @@ test('Transaction Search answers, or refuses with 403 when the app lacks it', as
   try {
     const res = await searchTransactions(c, { start: Date.now() - 24 * 60 * 60_000, end: Date.now() - 60_000, page: 1 })
     expect(res.totalPages).toBeGreaterThanOrEqual(0)
+    const raw = (await (
+      await fetch(`${c.apiBase}/v1/reporting/transactions?start_date=${new Date(Date.now() - 30 * 86_400_000).toISOString()}&end_date=${new Date().toISOString()}&fields=all&page_size=2`, {
+        headers: { Authorization: `Bearer ${c.token}` },
+      })
+    ).json()) as unknown
+    expect(keyDiff({ ...(raw as object), transaction_details: [] }, { ...fixture(paypalObjectFixtures.transactionSearch), transaction_details: [] })).toEqual([])
   } catch (err) {
     if (!(err instanceof ProcessorError) || err.status !== 403) throw err
     console.info('test:sandbox: Transaction Search isn’t enabled on this PayPal app (403); the comparison skips that direction.')
@@ -89,8 +102,11 @@ test('the webhook CLI creates the sandbox webhook with the library’s events, l
   try {
     expect(made.action).toBe('created')
     const c = await call()
-    const w = ((await paypal.listWebhooks(c)).webhooks ?? []).find((x) => x.url === url)
+    const list = await paypal.listWebhooks(c)
+    expect(keyDiff({ ...list, webhooks: [] }, { ...fixture(paypalObjectFixtures.webhooksList), webhooks: [] })).toEqual([])
+    const w = (list.webhooks ?? []).find((x) => x.url === url)
     expect(w?.event_types.map((e) => e.name).sort()).toEqual([...PAYPAL_EVENTS].sort())
+    expect(keyDiff(w, fixture(paypalObjectFixtures.webhooksList).webhooks[0])).toEqual([])
     expect((await paypalWebhook(keys, { url, fetch: o.fetch })).action).toBe('unchanged')
   } finally {
     expect((await paypalWebhook(keys, { url, fetch: o.fetch, remove: true })).action).toBe('removed')
@@ -137,10 +153,12 @@ describe('the vault', () => {
     expect(setup.status).toBe('APPROVED')
     const saved = await paypal.createPaymentToken(c, setup.id, `sb-save-${run}`)
     expect(saved.payment_source?.card?.verification_status).toBe('VERIFIED')
+    expect(keyDiff(saved, fixture(paypalObjectFixtures.vaultPaymentTokenCard), { ignore: BIN_FIELDS })).toEqual([])
     expect(paymentTokenLabel(saved)).toEqual({ kind: 'card', label: 'Visa •••• 1111' })
     const input = { customId: `sandbox:${run}-v`, description: 'Sandbox bid', amountCents: 3000, kind: 'card' as const, vaultId: saved.id }
     const order = await paypal.chargeVaulted(c, input, `sb-charge-${run}`)
     expect(order.status).toBe('COMPLETED')
+    expect(keyDiff(order, fixture(paypalObjectFixtures.vaultOrderCaptured), { ignore: BIN_FIELDS })).toEqual([])
     const capture = orderCapture(order)!
     expect(capture.status).toBe('COMPLETED')
     expect(captureFee(capture)).toBeGreaterThan(0)

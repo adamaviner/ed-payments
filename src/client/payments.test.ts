@@ -659,3 +659,48 @@ describe('reconcile', () => {
     expect((await t.query(api.shop.issues, {})).map((i) => i.detail)).toEqual(['PayPal says A bowl was paid; here it is failed.'])
   })
 })
+
+describe('a PayPal capture and the buyer’s cancel', () => {
+  test('cancel while a capture is going through is refused, saying it is being paid', async () => {
+    const { t } = setup()
+    const started = await t.action(api.shop.buyEmbedded, { processor: 'paypal', method: 'card' })
+    await t.run(async (ctx) => await ctx.runMutation(app.components.payments.checkouts.claimCapture, { id: started.checkoutId, now: Date.now() }))
+    await expect(t.action(api.payments.cancelCheckout, { checkoutId: started.checkoutId })).rejects.toThrow(/being paid right now/)
+  })
+
+  test('a stale claim: cancel asks PayPal first, and an order captured there is settled, not abandoned', async () => {
+    const { t, status, calls } = setup()
+    const started = await t.action(api.shop.buyEmbedded, { processor: 'paypal', method: 'card' })
+    if (started.embedded.processor !== 'paypal') throw new Error('expected PayPal')
+    pp.approve(started.embedded.orderId)
+    await pp.fetch(`https://api-m.sandbox.paypal.com/v2/checkout/orders/${started.embedded.orderId}/capture`, { method: 'POST' })
+    await t.run(async (ctx) => await ctx.runMutation(app.components.payments.checkouts.claimCapture, { id: started.checkoutId, now: Date.now() - 10 * MIN }))
+    expect(await t.action(api.payments.cancelCheckout, { checkoutId: started.checkoutId })).toEqual({ status: 'paid' })
+    expect((await status(started.checkoutId)).status).toBe('paid')
+    expect(await calls('onPaid')).toHaveLength(1)
+  })
+})
+
+test('declined at capture: only the buyer captures it after that, even once its last error is overwritten', async () => {
+  const { t, status, later } = setup()
+  const started = await t.action(api.shop.buyEmbedded, { processor: 'paypal', method: 'card' })
+  if (started.embedded.processor !== 'paypal') throw new Error('expected PayPal')
+  pp.approve(started.embedded.orderId)
+  pp.declineNextCapture()
+  expect(await t.action(api.shop.back, { processor: 'paypal', token: started.embedded.orderId })).toMatchObject({ declined: true })
+  await t.run(async (ctx) => await ctx.runMutation(app.components.payments.checkouts.noteError, { id: started.checkoutId, error: 'Something else went wrong.' }))
+  later(10 * MIN)
+  await t.action(internal.paymentsWorker.sweep, {})
+  expect(pp.calls.filter((x) => x.path.endsWith('/capture'))).toHaveLength(1)
+  expect((await status(started.checkoutId)).status).toBe('pending')
+})
+
+test('reconcile, PayPal: a refund the ledger missed (its webhook lost) is recorded from the order', async () => {
+  const { t, post, status, paypalCheckout } = setup()
+  const a = await paypalCheckout()
+  await post('/paypal/webhook', pp.approve(a.orderId))
+  pp.refundInDashboard((await status(a.checkoutId)).paymentRef!, 700)
+  await t.action(internal.paymentsWorker.reconcile, {})
+  expect((await status(a.checkoutId)).refundedCents).toBe(700)
+  expect(await t.query(api.shop.issues, {})).toEqual([])
+})

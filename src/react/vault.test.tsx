@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { ConvexError } from 'convex/values'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { forgetScripts } from './embedded.js'
 import { PAYPAL_VAULT_NAMESPACE, PaypalCardFields, PaypalSaveButton, paypalVaultSdkUrl } from './vault.js'
@@ -154,4 +155,54 @@ test('PayPal button: only the PayPal funding source; approving saves with the se
   onSaved.mockRejectedValueOnce(new Error('Too many tries just now.'))
   await act(() => buttons[0].onApprove({ vaultSetupToken: 'SETUP2' }))
   expect(screen.getByRole('alert').textContent).toBe('Too many tries just now.')
+})
+
+/** A ConvexError as the browser gets it: the sentence in data, the wire's wrapping in message. */
+const fromServer = (sentence: string) => Object.assign(new ConvexError(sentence), { message: `[CONVEX A(payments:save)] [Request ID: 1] Server Error\nUncaught ConvexError: ${sentence}` })
+
+test('card fields: a ConvexError from the app is said as its sentence, not the wire’s wrapping', async () => {
+  render(<PaypalCardFields clientId="client-1" createSetupToken={() => Promise.resolve('S1')} onSaved={() => Promise.reject(fromServer('That card is already saved.'))} submitLabel="Place bid" />)
+  await finishScript(paypalVaultSdkUrl('client-1'))
+  const button = await screen.findByRole('button', { name: 'Place bid' })
+  await waitFor(() => expect(button.hasAttribute('disabled')).toBe(false))
+  await act(async () => {
+    fireEvent.click(button)
+  })
+  expect(screen.getByRole('alert').textContent).toBe('That card is already saved.')
+})
+
+test('card fields: a second click while saving doesn’t ask for a second setup token', async () => {
+  let finish: (token: string) => void = () => {}
+  const createSetupToken = vi.fn(() => new Promise<string>((resolve) => (finish = resolve)))
+  render(<PaypalCardFields clientId="client-1" createSetupToken={createSetupToken} onSaved={() => Promise.resolve()} submitLabel="Place bid" />)
+  await finishScript(paypalVaultSdkUrl('client-1'))
+  const button = await screen.findByRole('button', { name: 'Place bid' })
+  await waitFor(() => expect(button.hasAttribute('disabled')).toBe(false))
+  fireEvent.click(button)
+  fireEvent.click(button)
+  await act(async () => finish('S1'))
+  expect(createSetupToken).toHaveBeenCalledTimes(1)
+})
+
+test('PayPal button: the app refusing a setup token is said in its words; PayPal’s own errors in plain words', async () => {
+  vi.spyOn(console, 'warn').mockImplementation(() => {})
+  const createSetupToken = vi.fn<() => Promise<string>>(() => Promise.reject(fromServer('Too many tries just now.')))
+  render(<PaypalSaveButton clientId="client-1" createSetupToken={createSetupToken} onSaved={() => Promise.resolve()} />)
+  await finishScript(paypalVaultSdkUrl('client-1'))
+  await waitFor(() => expect(buttons).toHaveLength(1))
+  const err = await buttons[0].createVaultSetupToken().catch((e: unknown) => e)
+  act(() => buttons[0].onError(err))
+  expect(screen.getByRole('alert').textContent).toBe('Too many tries just now.')
+  createSetupToken.mockResolvedValueOnce('SETUP3')
+  await act(async () => void (await buttons[0].createVaultSetupToken()))
+  act(() => buttons[0].onError(new Error('popup closed')))
+  expect(screen.getByRole('alert').textContent).toBe('PayPal had a problem just now. Try again, or use a card.')
+})
+
+test('PayPal button: a ConvexError from onSaved is said as its sentence', async () => {
+  render(<PaypalSaveButton clientId="client-1" createSetupToken={() => Promise.resolve('S2')} onSaved={() => Promise.reject(fromServer('That PayPal account is someone else’s.'))} />)
+  await finishScript(paypalVaultSdkUrl('client-1'))
+  await waitFor(() => expect(buttons).toHaveLength(1))
+  await act(() => buttons[0].onApprove({ vaultSetupToken: 'S2' }))
+  expect(screen.getByRole('alert').textContent).toBe('That PayPal account is someone else’s.')
 })

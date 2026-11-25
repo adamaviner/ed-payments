@@ -70,11 +70,13 @@ type Name = keyof typeof calls
 
 /** What the page's access query answers: an admin unless a test says otherwise. */
 let level: 'admin' | 'request' | null = 'admin'
+/** What the server's adminApi({ skipApproval }) was made with, as its access query says. */
+let skipApproval = false
 /** What the page's openRefunds query answers. */
 let openRefunds: OpenRefund[] = [openRefund]
 
 vi.mock('convex/react', () => ({
-  useQuery: (fn: string) => (fn === 'openRefunds' ? openRefunds : fn === 'access' ? level && { level, name: 'Bo', skipApproval: false } : undefined),
+  useQuery: (fn: string) => (fn === 'openRefunds' ? openRefunds : fn === 'access' ? level && { level, name: 'Bo', skipApproval } : undefined),
   usePaginatedQuery: (fn: string) => ({ results: fn === 'refundable' ? [checkout] : [issue], status: 'Exhausted', loadMore: () => {} }),
   useMutation: (fn: Name) => calls[fn],
   useAction: (fn: Name) => calls[fn],
@@ -84,6 +86,7 @@ const api = Object.fromEntries(['access', 'openRefunds', 'refundable', 'issues',
 
 beforeEach(() => {
   level = 'admin'
+  skipApproval = false
   openRefunds = [openRefund]
   for (const fn of Object.values(calls)) fn.mockClear()
 })
@@ -106,7 +109,8 @@ function amountError(row: HTMLElement): string {
 const refundRow = () => rowOf(screen.getByLabelText('Amount ($)'))
 
 test('what is left counts the open refund; more than that is refused in place', () => {
-  render(<PaymentsAdminPage api={api} auth={{ token: 't' }} skipApproval />)
+  skipApproval = true
+  render(<PaymentsAdminPage api={api} auth={{ token: 't' }} />)
   const row = refundRow()
   // $100 paid, $10 refunded, $20 asked for and not sent: $70 left.
   expect(within(row).getByText('$70.00 left')).toBeTruthy()
@@ -122,7 +126,8 @@ test('what is left counts the open refund; more than that is refused in place', 
 test('a payment whose open refunds hold all that is left offers no refund', () => {
   // $100 paid, $10 refunded, $90 asked for and not sent.
   openRefunds = [{ ...openRefund, amountCents: 9000 }]
-  render(<PaymentsAdminPage api={api} auth={{ token: 't' }} skipApproval />)
+  skipApproval = true
+  render(<PaymentsAdminPage api={api} auth={{ token: 't' }} />)
   const row = rowOf(screen.getByText('the rest is in Refunds to do'))
   expect(within(row).queryByText(/left$/)).toBeNull()
   expect(within(row).queryByLabelText('Amount ($)')).toBeNull()
@@ -130,7 +135,8 @@ test('a payment whose open refunds hold all that is left offers no refund', () =
 })
 
 test('a refund asks twice, then requests the typed amount in cents and sends it', async () => {
-  render(<PaymentsAdminPage api={api} auth={{ token: 't' }} skipApproval />)
+  skipApproval = true
+  render(<PaymentsAdminPage api={api} auth={{ token: 't' }} />)
   const row = refundRow()
   fireEvent.change(within(row).getByLabelText('Amount ($)'), { target: { value: '12.5' } })
   fireEvent.click(within(row).getByRole('button', { name: 'Refund $12.50' }))
@@ -141,7 +147,8 @@ test('a refund asks twice, then requests the typed amount in cents and sends it'
 })
 
 test('blank refunds everything left', async () => {
-  render(<PaymentsAdminPage api={api} skipApproval />)
+  skipApproval = true
+  render(<PaymentsAdminPage api={api} />)
   const row = refundRow()
   fireEvent.click(within(row).getByRole('button', { name: 'Refund $70.00' }))
   fireEvent.click(within(row).getByRole('button', { name: 'Send $70.00 back via Stripe?' }))
@@ -151,7 +158,8 @@ test('blank refunds everything left', async () => {
 
 test('the processor refusing a refund shows its reason by the row', async () => {
   calls.sendRefund.mockResolvedValueOnce({ status: 'failed', error: 'Charge already refunded.' })
-  render(<PaymentsAdminPage api={api} skipApproval />)
+  skipApproval = true
+  render(<PaymentsAdminPage api={api} />)
   const row = refundRow()
   fireEvent.click(within(row).getByRole('button', { name: 'Refund $70.00' }))
   fireEvent.click(within(row).getByRole('button', { name: 'Send $70.00 back via Stripe?' }))
@@ -160,7 +168,8 @@ test('the processor refusing a refund shows its reason by the row', async () => 
 
 test('a refund recorded but not sent clears the form, so it is finished in Refunds to do and not asked again', async () => {
   calls.sendRefund.mockRejectedValueOnce(new Error('Network down'))
-  render(<PaymentsAdminPage api={api} skipApproval />)
+  skipApproval = true
+  render(<PaymentsAdminPage api={api} />)
   const row = refundRow()
   fireEvent.change(within(row).getByLabelText('Amount ($)'), { target: { value: '5' } })
   fireEvent.click(within(row).getByRole('button', { name: 'Refund $5.00' }))
@@ -209,7 +218,8 @@ const relistQuestion = (c: CheckoutSummary, cents: number, left: number): Refund
     : null
 
 test('a full refund waits for the app’s question to be answered, with nothing chosen for the admin, and sends the answer', async () => {
-  render(<PaymentsAdminPage api={api} skipApproval refundQuestion={relistQuestion} />)
+  skipApproval = true
+  render(<PaymentsAdminPage api={api} refundQuestion={relistQuestion} />)
   const row = refundRow()
   const group = within(row).getByRole('group', { name: 'List Weekend retreat again?' })
   const radios = within(group).getAllByRole<HTMLInputElement>('radio')
@@ -224,7 +234,8 @@ test('a full refund waits for the app’s question to be answered, with nothing 
 })
 
 test('a partial refund asks nothing and sends no notes', async () => {
-  render(<PaymentsAdminPage api={api} skipApproval refundQuestion={relistQuestion} />)
+  skipApproval = true
+  render(<PaymentsAdminPage api={api} refundQuestion={relistQuestion} />)
   const row = refundRow()
   fireEvent.change(within(row).getByLabelText('Amount ($)'), { target: { value: '20' } })
   expect(within(row).queryByRole('group')).toBeNull()
@@ -246,7 +257,8 @@ test('an answer only counts for the question it was given to: a partial amount d
           ],
         }
       : null
-  const { rerender } = render(<PaymentsAdminPage api={api} skipApproval refundQuestion={question} />)
+  skipApproval = true
+  const { rerender } = render(<PaymentsAdminPage api={api} refundQuestion={question} />)
   const row = refundRow()
   fireEvent.click(within(row).getByLabelText('Yes'))
   fireEvent.change(within(row).getByLabelText('Amount ($)'), { target: { value: '20' } })
@@ -254,7 +266,7 @@ test('an answer only counts for the question it was given to: a partial amount d
   fireEvent.change(within(row).getByLabelText('Amount ($)'), { target: { value: '' } })
   expect(within(row).getByLabelText<HTMLInputElement>('Yes').checked).toBe(true)
   key = 'restock'
-  rerender(<PaymentsAdminPage api={api} skipApproval refundQuestion={(c, cents, left) => question(c, cents, left)} />)
+  rerender(<PaymentsAdminPage api={api} refundQuestion={(c, cents, left) => question(c, cents, left)} />)
   expect(within(row).getByLabelText<HTMLInputElement>('Yes').checked).toBe(false)
   expect(within(row).getByRole<HTMLButtonElement>('button', { name: 'Refund $70.00' }).disabled).toBe(true)
 })
@@ -272,7 +284,8 @@ test('without skipApproval the answer goes with the request, and the form clears
 
 test('someone who may only ask for refunds asks, and sees no approve, send or issue controls', async () => {
   level = 'request'
-  render(<PaymentsAdminPage api={api} auth={{ token: 't' }} skipApproval />)
+  skipApproval = true
+  render(<PaymentsAdminPage api={api} auth={{ token: 't' }} />)
   expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull()
   expect(screen.queryByRole('button', { name: /Refund via/ })).toBeNull()
   expect(screen.queryByRole('button', { name: 'Mark resolved' })).toBeNull()
@@ -296,11 +309,28 @@ test('a refused second step asks the app, then sends once more', async () => {
   const { ConvexError } = await import('convex/values')
   calls.sendRefund.mockRejectedValueOnce(new ConvexError({ code: 'step_up', message: 'Confirm with your passkey first.' }))
   const onStepUp = vi.fn(async () => true)
-  render(<PaymentsAdminPage api={api} auth={{ token: 't' }} skipApproval onStepUp={onStepUp} />)
+  skipApproval = true
+  render(<PaymentsAdminPage api={api} auth={{ token: 't' }} onStepUp={onStepUp} />)
   const row = refundRow()
   fireEvent.change(within(row).getByLabelText('Amount ($)'), { target: { value: '5' } })
   fireEvent.click(within(row).getByRole('button', { name: 'Refund $5.00' }))
   fireEvent.click(within(row).getByRole('button', { name: 'Send $5.00 back via Stripe?' }))
   await waitFor(() => expect(calls.sendRefund).toHaveBeenCalledTimes(2))
   expect(onStepUp).toHaveBeenCalledWith('send')
+})
+
+test('the server’s skipApproval decides, so the page never offers a step the server refuses', async () => {
+  skipApproval = true
+  const { unmount } = render(<PaymentsAdminPage api={api} />)
+  expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull()
+  expect(screen.getByRole('button', { name: 'Refund via Stripe' })).toBeTruthy()
+  const row = refundRow()
+  fireEvent.click(within(row).getByRole('button', { name: 'Refund $70.00' }))
+  fireEvent.click(within(row).getByRole('button', { name: 'Send $70.00 back via Stripe?' }))
+  await waitFor(() => expect(calls.sendRefund).toHaveBeenCalledWith({ refundId: 'r2' }))
+  unmount()
+  skipApproval = false
+  render(<PaymentsAdminPage api={api} />)
+  expect(screen.getByRole('button', { name: 'Approve' })).toBeTruthy()
+  expect(screen.queryByRole('button', { name: 'Refund via Stripe' })).toBeNull()
 })

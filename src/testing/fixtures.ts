@@ -31,10 +31,11 @@ import sPiCanceled from './fixtures/stripe/payment-intent-canceled.json' with { 
 import sPiExpanded from './fixtures/stripe/payment-intent-expanded.json' with { type: 'json' }
 import sPiList from './fixtures/stripe/payment-intent-list.json' with { type: 'json' }
 import sWebhookEndpoint from './fixtures/stripe/webhook-endpoint.json' with { type: 'json' }
+import sWebhookEndpointDeleted from './fixtures/stripe/webhook-endpoint-deleted.json' with { type: 'json' }
 import sErrorDeclined from './fixtures/stripe/error-card-declined.json' with { type: 'json' }
 import sErrorAuth from './fixtures/stripe/error-authentication-required.json' with { type: 'json' }
 import sErrorPmTypes from './fixtures/stripe/error-payment-method-types.json' with { type: 'json' }
-import sErrorPermissions from './fixtures/stripe/error-more-permissions.json' with { type: 'json' }
+import sErrorIdempotency from './fixtures/stripe/error-idempotency-key-reused.json' with { type: 'json' }
 import sSessionOpen from './fixtures/stripe/session-open.json' with { type: 'json' }
 import sSessionAchOpen from './fixtures/stripe/session-ach-open.json' with { type: 'json' }
 import sSessionExpired from './fixtures/stripe/session-expired.json' with { type: 'json' }
@@ -66,8 +67,15 @@ import pVaultPaymentToken from './fixtures/paypal/vault-payment-token-card.json'
 import pVaultOrder from './fixtures/paypal/vault-order-captured.json' with { type: 'json' }
 import pErrorInvalidSource from './fixtures/paypal/error-invalid-payment-source.json' with { type: 'json' }
 import pVaultDeleted from './fixtures/paypal/VAULT.PAYMENT-TOKEN.DELETED.json' with { type: 'json' }
+import pVaultCreated from './fixtures/paypal/VAULT.PAYMENT-TOKEN.CREATED.json' with { type: 'json' }
+import pVaultCreatedPaypal from './fixtures/paypal/VAULT.PAYMENT-TOKEN.CREATED-paypal.json' with { type: 'json' }
+import pOrderVaultApproved from './fixtures/paypal/order-vault-approved-captured.json' with { type: 'json' }
 import pOrderVaultCard from './fixtures/paypal/order-vault-card-captured.json' with { type: 'json' }
 import pVaultOrderRecurring from './fixtures/paypal/vault-order-recurring.json' with { type: 'json' }
+import pOauthToken from './fixtures/paypal/oauth-token.json' with { type: 'json' }
+import pWebhooksList from './fixtures/paypal/webhooks-list.json' with { type: 'json' }
+import pErrorNotFound from './fixtures/paypal/error-resource-not-found.json' with { type: 'json' }
+import pTransactionSearch from './fixtures/paypal/transaction-search.json' with { type: 'json' }
 
 export const stripeEventFixtures = {
   'checkout.session.completed': sCompleted,
@@ -109,10 +117,11 @@ export const stripeObjectFixtures = {
   paymentIntentExpanded: sPiExpanded,
   paymentIntentList: sPiList,
   webhookEndpoint: sWebhookEndpoint,
+  webhookEndpointDeleted: sWebhookEndpointDeleted,
   errorCardDeclined: sErrorDeclined,
   errorAuthenticationRequired: sErrorAuth,
   errorPaymentMethodTypes: sErrorPmTypes,
-  errorMorePermissions: sErrorPermissions,
+  errorIdempotencyKeyReused: sErrorIdempotency,
 }
 
 export const paypalEventFixtures = {
@@ -126,6 +135,8 @@ export const paypalEventFixtures = {
   'CUSTOMER.DISPUTE.CREATED': pDisputeCreated,
   'CUSTOMER.DISPUTE.RESOLVED': pDisputeResolved,
   'VAULT.PAYMENT-TOKEN.DELETED': pVaultDeleted,
+  'VAULT.PAYMENT-TOKEN.CREATED': pVaultCreated,
+  'VAULT.PAYMENT-TOKEN.CREATED-paypal': pVaultCreatedPaypal,
 }
 
 export const paypalObjectFixtures = {
@@ -143,7 +154,12 @@ export const paypalObjectFixtures = {
   vaultOrderCaptured: pVaultOrder,
   errorInvalidPaymentSource: pErrorInvalidSource,
   orderVaultCardCaptured: pOrderVaultCard,
+  orderVaultApprovedCaptured: pOrderVaultApproved,
   vaultOrderRecurring: pVaultOrderRecurring,
+  oauthToken: pOauthToken,
+  webhooksList: pWebhooksList,
+  errorResourceNotFound: pErrorNotFound,
+  transactionSearch: pTransactionSearch,
 }
 
 export type StripeEventFixture = keyof typeof stripeEventFixtures

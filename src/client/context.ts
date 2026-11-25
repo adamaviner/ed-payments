@@ -11,8 +11,10 @@ export function mismatch(validator: GenericValidator, value: unknown, path = 'co
     case 'any':
       return null
     case 'string':
-    case 'id':
       return typeof value === 'string' ? null : `${path} should be a string`
+    // The table can't be read from an id here, but its shape can: Convex ids are lower-case letters and digits.
+    case 'id':
+      return typeof value === 'string' && CONVEX_ID.test(value) ? null : `${path} should be a document id`
     case 'float64':
       return typeof value === 'number' ? null : `${path} should be a number`
     case 'int64':
@@ -62,5 +64,7 @@ export function mismatch(validator: GenericValidator, value: unknown, path = 'co
   // A kind of validator newer than this check: Convex still validates it when the callback is called.
   return null
 }
+
+const CONVEX_ID = /^[0-9a-z]{20,64}$/
 
 const isPlainObject = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null && !Array.isArray(x)

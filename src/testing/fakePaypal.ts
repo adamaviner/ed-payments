@@ -41,6 +41,8 @@ interface Order {
   /** Vault with purchase: what pays it is saved when it is captured (the token's id once saved). */
   save?: { kind: 'card' | 'paypal'; customerId?: string }
   vaultId?: string
+  /** Saved after the capture: the order shows vault APPROVED until PayPal finishes saving (finishSave, deliverVault), then VAULTED. */
+  vaultLater?: 'waiting' | 'saved'
 }
 
 export interface FakePaypalOptions {
@@ -56,7 +58,7 @@ const issue = (status: number, name: string, issueName: string, description: str
 export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', search = false, fallback }: FakePaypalOptions = {}) {
   const orders = new Map<string, Order>()
   const refunds = new Map<string, PaypalRefund & { captureId: string }>()
-  const replies = new Map<string, unknown>()
+  const replies = new Map<string, { status: number; reply: unknown }>()
   const webhooks = new Map<string, { id: string; url: string; event_types: { name: string }[] }>()
   const calls: { method: string; path: string; body: unknown }[] = []
   let n = 0
@@ -65,6 +67,7 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
   let declineNext = false
   /** How the next method saved with a purchase behaves when charged later. */
   let nextSavedBehaviour: VaultBehaviour = 'ok'
+  let nextSavedLater = false
   let refuse: ((call: { method: string; path: string }) => Response | undefined) | undefined
   let searchEnabled = search
   const activity: { at: number; detail: unknown }[] = []
@@ -78,6 +81,12 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
   const refundedOf = (captureId: string) =>
     [...refunds.values()].filter((r) => r.captureId === captureId && r.status !== 'FAILED' && r.status !== 'CANCELLED').reduce((s, r) => s + (decimalToCents(r.amount?.value) ?? 0), 0)
 
+  /** A capture's refunds as an order lists them (purchase_units[].payments.refunds), when it has any. */
+  const refundsJson = (captureId: string) => {
+    const list = [...refunds.values()].filter((r) => r.captureId === captureId).map(({ captureId: _c, ...r }) => r)
+    return list.length ? { refunds: list } : {}
+  }
+
   /** The order as PayPal shows it; `created` is the answer to creating it, which (as in the sandbox) has no create_time yet. */
   function orderJson(o: Order, created = false): PaypalOrder {
     const base = fixture(created ? paypalObjectFixtures.orderCreated : paypalObjectFixtures.orderUnapproved) as unknown as PaypalOrder & { purchase_units: Record<string, unknown>[] }
@@ -85,7 +94,7 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
       ...base.purchase_units[0],
       custom_id: o.customId,
       amount: { currency_code: 'USD', value: centsToDecimal(o.amountCents) },
-      ...(o.capture ? { payments: { captures: o.capture ? [o.capture] : [] } } : {}),
+      ...(o.capture ? { payments: { captures: o.capture ? [o.capture] : [], ...refundsJson(o.capture.id) } } : {}),
     }
     const links =
       o.status === 'PAYER_ACTION_REQUIRED'
@@ -107,7 +116,11 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
   function savedSource(o: Order): NonNullable<PaypalOrder['payment_source']> {
     const v = o.vaultId ? vault.get(o.vaultId) : undefined
     if (!v) return {}
-    const attributes = { vault: { id: v.id, status: 'VAULTED', customer: { id: v.customerId } } }
+    // PayPal's documented APPROVED answer: no token or customer yet, only the link to the order.
+    const attributes =
+      o.vaultLater === 'waiting'
+        ? { vault: { status: 'APPROVED', links: [{ href: `${apiBase}/v2/checkout/orders/${o.id}`, rel: 'up', method: 'GET' }] } }
+        : { vault: { id: v.id, status: 'VAULTED', customer: { id: v.customerId } } }
     if (v.kind === 'paypal') return { paypal: { email_address: v.source?.paypal?.email_address ?? 'buyer@example.org', attributes } }
     const card = v.source?.card
     return { card: { brand: card?.brand ?? 'VISA', last_digits: card?.last_digits ?? '0004', attributes } }
@@ -126,9 +139,11 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
     const refused = refuse?.({ method, path: url.pathname })
     if (refused) return refused
     const requestId = new Headers(init?.headers).get('paypal-request-id')
-    if (requestId && replies.has(requestId)) return ok(replies.get(requestId))
+    // PayPal replays a request id's first answer with its first status (201 for a create), not a fresh 200.
+    const replayed = requestId ? replies.get(requestId) : undefined
+    if (replayed) return ok(replayed.reply, replayed.status)
     const remember = (reply: unknown, status = 201) => {
-      if (requestId) replies.set(requestId, reply)
+      if (requestId) replies.set(requestId, { status, reply })
       return ok(reply, status)
     }
     const path = url.pathname.split('/').filter(Boolean)
@@ -281,7 +296,9 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
           }
           vault.set(token.id, token)
           o.vaultId = token.id
+          if (nextSavedLater) o.vaultLater = 'waiting'
           nextSavedBehaviour = 'ok'
+          nextSavedLater = false
         }
         return remember(orderJson(o))
       }
@@ -294,11 +311,11 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
       const cents = b.amount ? (decimalToCents(b.amount.value) ?? 0) : o.amountCents - refundedOf(o.capture.id)
       if (cents > o.amountCents - refundedOf(o.capture.id))
         return issue(422, 'UNPROCESSABLE_ENTITY', 'REFUND_AMOUNT_EXCEEDED', 'The refund amount must be less than or equal to the capture amount that has not yet been refunded.')
-      return remember(makeRefund(o.capture.id, cents, b.custom_id))
+      return remember(refundJson(makeRefund(o.capture.id, cents, b.custom_id)))
     }
     if (path[1] === 'payments' && path[2] === 'refunds' && path[3]) {
       const r = refunds.get(path[3])
-      return r ? ok(r) : issue(404, 'RESOURCE_NOT_FOUND', 'INVALID_RESOURCE_ID', 'Specified resource ID does not exist.')
+      return r ? ok(refundJson(r)) : issue(404, 'RESOURCE_NOT_FOUND', 'INVALID_RESOURCE_ID', 'Specified resource ID does not exist.')
     }
     if (url.pathname === '/v1/reporting/transactions') {
       if (!searchEnabled) return Response.json(fixture(paypalObjectFixtures.transactionSearchNotAuthorized), { status: 403 })
@@ -381,6 +398,12 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
     return r
   }
 
+  /** A refund as PayPal shows it, without the capture id the fake keeps beside it. */
+  function refundJson(r: PaypalRefund & { captureId: string }): PaypalRefund {
+    const { captureId: _c, ...shown } = r
+    return shown
+  }
+
   function order(id: string): Order {
     const o = orders.get(id)
     if (!o) throw new Error(`fakePaypal: no order ${id}`)
@@ -446,6 +469,55 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
     savedWithPurchaseBehaves(behaviour: VaultBehaviour) {
       nextSavedBehaviour = behaviour
     },
+    /**
+     * The next order saved with a purchase is saved only after its capture, as PayPal does when it
+     * answers vault status APPROVED: the capture names no token, and deliverVault makes the
+     * VAULT.PAYMENT-TOKEN.CREATED that brings it.
+     */
+    savesWithPurchaseLater() {
+      nextSavedLater = true
+    },
+    /**
+     * PayPal finishes saving an order's method (savesWithPurchaseLater) without the webhook reaching
+     * the app: from then on reading the order shows the token VAULTED, with its customer.
+     */
+    finishSave(orderId: string) {
+      const o = order(orderId)
+      if (!o.vaultId || !o.vaultLater) throw new Error(`fakePaypal: order ${orderId} wasn’t saved later`)
+      o.vaultLater = 'saved'
+    },
+    /**
+     * VAULT.PAYMENT-TOKEN.CREATED for an order saved later (savesWithPurchaseLater); the save is
+     * finished, so the order shows the token too. withOrderId false leaves out metadata.order_id,
+     * which PayPal's own sample doesn't show.
+     */
+    deliverVault(orderId: string, opts: { withOrderId?: boolean; eventId?: string } = {}) {
+      const o = order(orderId)
+      const v = o.vaultId ? vault.get(o.vaultId) : undefined
+      if (!v || !o.vaultLater) throw new Error(`fakePaypal: order ${orderId} wasn’t saved later`)
+      o.vaultLater = 'saved'
+      const tokenUrl = `${apiBase}/v3/vault/payment-tokens/${v.id}`
+      const card = v.source?.card
+      const event = paypalEvent(
+        v.kind === 'card' ? 'VAULT.PAYMENT-TOKEN.CREATED' : 'VAULT.PAYMENT-TOKEN.CREATED-paypal',
+        {
+          id: v.id,
+          time_created: new Date().toISOString(),
+          links: [
+            { href: tokenUrl, rel: 'self', method: 'GET', encType: 'application/json' },
+            { href: tokenUrl, rel: 'delete', method: 'DELETE', encType: 'application/json' },
+          ],
+          payment_source: card
+            ? { card: { last_digits: card.last_digits, brand: card.brand, expiry: card.expiry } }
+            : { paypal: { usage_type: 'MERCHANT', customer_type: 'CONSUMER', permit_multiple_payment_tokens: false, email_address: v.source?.paypal?.email_address ?? 'buyer@example.org' } },
+          customer: { id: v.customerId },
+          metadata: { order_id: o.id },
+        },
+        opts.eventId,
+      )
+      if (opts.withOrderId === false) delete event.resource.metadata
+      return webhook(event)
+    },
     /** The payer removes a saved method at PayPal: gone from the vault, and VAULT.PAYMENT-TOKEN.DELETED. */
     deleteToken(tokenId: string) {
       const v = vault.get(tokenId)
@@ -504,7 +576,15 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
     captureEvent(id: string, name: 'PAYMENT.CAPTURE.COMPLETED' | 'PAYMENT.CAPTURE.PENDING' | 'PAYMENT.CAPTURE.DECLINED' = 'PAYMENT.CAPTURE.COMPLETED') {
       const x = order(id)
       if (!x.capture) throw new Error(`fakePaypal: order ${id} isn’t captured`)
-      return webhook(paypalEvent(name, { ...x.capture, links: [{ href: `${apiBase}/v2/checkout/orders/${id}`, rel: 'up', method: 'GET' }] }))
+      // Only a completed capture has money in it to break down (fees); a pending or declined one carries none.
+      const { seller_receivable_breakdown: breakdown, ...capture } = x.capture
+      return webhook(
+        paypalEvent(name, {
+          ...capture,
+          ...(name === 'PAYMENT.CAPTURE.COMPLETED' && breakdown ? { seller_receivable_breakdown: breakdown } : {}),
+          links: [{ href: `${apiBase}/v2/checkout/orders/${id}`, rel: 'up', method: 'GET' }],
+        }),
+      )
     },
     /** A payment captured outside this app's knowledge (e.g. its row was lost), tagged for `app`. */
     capturedElsewhere(app: string, checkoutId: string, cents: number) {
@@ -516,8 +596,7 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
     /** Someone refunds in PayPal's dashboard (or PayPal reverses the payment). */
     refundInDashboard(captureId: string, cents: number, name: 'PAYMENT.CAPTURE.REFUNDED' | 'PAYMENT.CAPTURE.REVERSED' = 'PAYMENT.CAPTURE.REFUNDED') {
       const r = makeRefund(captureId, cents, undefined)
-      const { captureId: _c, ...resource } = r
-      return { refund: r, hook: webhook(paypalEvent(name, { ...resource })) }
+      return { refund: r, hook: webhook(paypalEvent(name, { ...refundJson(r) })) }
     },
     dispute(captureId: string, status: 'CREATED' | 'RESOLVED', cents = 1000) {
       return webhook(

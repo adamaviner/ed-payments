@@ -6,9 +6,21 @@
 // only when the bank asks). Charges are orders naming the saved method, captured at once.
 import type { Scheduler } from 'convex/server'
 import { ConvexError } from 'convex/values'
-import { orderCapture, paymentTokenLabel, PAYPAL_DECLINE_ISSUES, paypal, paypalMethodId, paypalTokenOf, RECURRING_USAGE_PATTERN, type PaypalOrder, type PaypalPaymentToken } from '../core/paypal.js'
+import {
+  orderCapture,
+  paymentTokenLabel,
+  PAYPAL_DECLINE_ISSUES,
+  paypal,
+  paypalMethodId,
+  paypalTokenOf,
+  RECURRING_USAGE_PATTERN,
+  searchTransactions,
+  type FoundTransaction,
+  type PaypalOrder,
+  type PaypalPaymentToken,
+} from '../core/paypal.js'
 import { METHOD_REMOVED } from '../core/declines.js'
-import { ProcessorError, tagFor, type Payer, type Ref } from '../core/types.js'
+import { ProcessorError, parseTag, tagFor, type Payer, type Ref } from '../core/types.js'
 import type { Checkout, Payments, RunActionCtx } from './index.js'
 import { declineOf, type SavedMethod } from './saved.js'
 import { errorText } from './util.js'
@@ -48,10 +60,10 @@ const viewOf = (m: { paymentTokenId: string; kind: 'card' | 'paypal'; label: str
 export async function setupPaypalMethod(
   p: Payments,
   ctx: RunActionCtx,
-  a: { owner: Ref; payer: Payer; kind: 'card' | 'paypal'; description?: string; recurring?: boolean },
+  a: { owner: Ref; payer: Payer; kind: 'card' | 'paypal'; description?: string; recurring?: boolean; limitKey?: string },
 ): Promise<{ setupTokenId: string; clientId: string }> {
   const keys = p.paypalKeys()
-  await p.takeLimits(ctx, 'setup', a.payer.email)
+  await p.takeLimits(ctx, 'setup', a.payer.email, 1, a.limitKey)
   const customerId = (await ctx.runQuery(p.component.customers.paypalCustomer, { app: p.app, owner: a.owner })) ?? undefined
   const site = p.url('/')
   try {
@@ -83,9 +95,9 @@ export async function setupPaypalMethod(
  * owner's tag (it came from the browser, and anyone could send someone else's). A card whose $0
  * check failed is deleted from PayPal's vault again and refused.
  */
-export async function savePaypalMethod(p: Payments, ctx: RunActionCtx, a: { owner: Ref; setupTokenId: string; payerEmail?: string; recurring?: boolean }): Promise<SavedMethod> {
+export async function savePaypalMethod(p: Payments, ctx: RunActionCtx, a: { owner: Ref; setupTokenId: string; payerEmail?: string; recurring?: boolean; limitKey?: string }): Promise<SavedMethod> {
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(a.setupTokenId)) throw new ConvexError(UNUSABLE)
-  await p.takeLimits(ctx, 'save', a.payerEmail)
+  await p.takeLimits(ctx, 'save', a.payerEmail, 1, a.limitKey)
   const tag = await paypalOwnerTag(p.app, a.owner)
   const token = await p.withPaypal(ctx, async (call): Promise<PaypalPaymentToken> => {
     let setup
@@ -239,16 +251,65 @@ export async function chargePaypalNow(p: Payments, ctx: RunActionCtx & { schedul
   await note(`PayPal left the charge ${order.status}.`, false, order.id)
 }
 
+/** PayPal's Transaction Search shows a payment up to three hours after it was made. */
+const SEARCH_LAG_MS = 3 * 60 * 60_000
+const DAY = 24 * 60 * 60_000
+const SEARCH_PAGES = 20
+
+const timeInNewYork = (ms: number) => new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(ms)
+
+/**
+ * The capture PayPal made for this charge, found by its tag in Transaction Search (for a charge whose
+ * order id never came back). Null when there is none yet, or PayPal refuses the search (403).
+ */
+async function taggedCapture(p: Payments, ctx: RunActionCtx, c: Checkout, now: number): Promise<FoundTransaction | null> {
+  const start = Math.max(c.createdAt - 5 * 60_000, now - 31 * DAY + 60_000)
+  try {
+    for (let page = 1; page <= SEARCH_PAGES; page++) {
+      const res = await p.withPaypal(ctx, (call) => searchTransactions(call, { start, end: now, page }))
+      const hit = res.transactions.find((t) => {
+        const tag = parseTag(t.customField)
+        return tag?.app === p.app && tag.id === c.id && t.amountCents > 0 && (t.status === 'S' || t.status === 'P')
+      })
+      if (hit) return hit
+      if (page >= res.totalPages) return null
+    }
+    return null
+  } catch (err) {
+    if (err instanceof ProcessorError && err.status === 403) {
+      console.info('payments: PayPal Transaction Search isn’t enabled for this REST app, so a charge given up can’t be looked for there.')
+      return null
+    }
+    throw err
+  }
+}
+
 /**
  * A person gives up on a PayPal charge whose outcome was unknown. An order PayPal made for it is
- * looked at first: captured means paid (settled instead). Without an order id nothing more can be
- * asked here; a capture that turns up later is caught by the nightly comparison.
+ * looked at first: captured means paid (settled instead). Without an order id, Transaction Search is
+ * asked for a capture tagged with the charge; none there is only certain three hours after the last
+ * try (PayPal's search lags that much), so until then giving up is refused, saying when to try again.
  */
 export async function giveUpPaypalCharge(p: Payments, ctx: RunActionCtx, c: Checkout, who: string): Promise<{ status: string }> {
+  const now = Date.now()
+  const statusNow = async () => ({ status: (await ctx.runQuery(p.component.checkouts.get, { id: c.id }))?.status ?? c.status })
   if (c.processorCheckoutId) {
     const id = c.processorCheckoutId
     const order = await p.withPaypal(ctx, (call) => paypal.getOrder(call, id))
-    if (await settleCharge(p, ctx, c, order)) return { status: (await ctx.runQuery(p.component.checkouts.get, { id: c.id }))?.status ?? c.status }
+    if (await settleCharge(p, ctx, c, order)) return await statusNow()
+  } else {
+    const found = await taggedCapture(p, ctx, c, now)
+    if (found?.status === 'S') {
+      await ctx.runMutation(p.component.checkouts.settlePaid, { id: c.id, paymentRef: found.transactionId, paidCents: found.amountCents, now })
+      return await statusNow()
+    }
+    if (found) {
+      await ctx.runMutation(p.component.checkouts.markProcessing, { id: c.id, paymentRef: found.transactionId, now })
+      return await statusNow()
+    }
+    const sure = (c.lastTriedAt ?? c.createdAt) + SEARCH_LAG_MS
+    if (now < sure)
+      throw new ConvexError(`PayPal can take up to three hours to show a payment, and none shows for this charge yet. Give up on it after ${timeInNewYork(sure)} (New York time), or retry it.`)
   }
   await ctx.runMutation(p.component.checkouts.settleFailed, { id: c.id, reason: `Given up by ${who}: ${c.lastError ?? 'the charge didn’t complete'}`, now: Date.now() })
   return { status: 'failed' }

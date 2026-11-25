@@ -207,3 +207,37 @@ test('Stripe: keys from different modes are said, not shown as a blank box; a fa
   fireEvent.click(await screen.findByRole('button', { name: 'Pay on Stripe’s site instead' }))
   expect(onFallback).toHaveBeenCalled()
 })
+
+test('a script that loads without its global (a blocker stubbing it out) is forgotten, so the next mount loads it afresh', async () => {
+  const w = window as Win
+  const working = w.paypal
+  delete w.paypal
+  const first = render(<PaypalButtons payment={{ ...paypalPayment, clientId: 'client-stubbed' }} completeReturn={ref} onFallback={() => {}} />)
+  await finishScript(paypalSdkUrl('client-stubbed'))
+  expect(await screen.findByText('The payment form didn’t load.')).toBeTruthy()
+  first.unmount()
+  w.paypal = working
+  render(<PaypalButtons payment={{ ...paypalPayment, clientId: 'client-stubbed' }} completeReturn={ref} />)
+  await waitFor(() => expect(scripts.filter((s) => s.src === paypalSdkUrl('client-stubbed'))).toHaveLength(2))
+  act(() => void scripts.filter((s) => s.src === paypalSdkUrl('client-stubbed'))[1].dispatchEvent(new Event('load')))
+  await waitFor(() => expect(buttons).toHaveLength(1))
+})
+
+test('PayPal: an error inside PayPal’s buttons is said in plain words, and the buyer can choose again', async () => {
+  render(<PaypalButtons payment={paypalPayment} completeReturn={ref} />)
+  await finishScript(paypalSdkUrl('client-1'))
+  await waitFor(() => expect(buttons).toHaveLength(1))
+  act(() => buttons[0].onError(new Error('Window closed before response')))
+  expect(screen.getByRole('alert').textContent).toBe('PayPal had a problem just now. Try again, or choose another way to pay.')
+})
+
+test('Stripe: unmounted while Stripe.js is still loading, nothing is left mounted and the next one loads', async () => {
+  const first = render(<StripeEmbeddedCheckout payment={{ processor: 'stripe', clientSecret: 'cs_test_5_secret' }} publishableKey="pk_test_1" />)
+  await waitFor(() => expect(scripts.some((s) => s.src === STRIPE_JS)).toBe(true))
+  first.unmount()
+  await finishScript(STRIPE_JS)
+  await act(async () => {})
+  expect(stripeMounts.filter((m) => m.mounted && !m.destroyed)).toHaveLength(0)
+  render(<StripeEmbeddedCheckout payment={{ processor: 'stripe', clientSecret: 'cs_test_6_secret' }} publishableKey="pk_test_1" />)
+  await waitFor(() => expect(stripeMounts.filter((m) => m.mounted && !m.destroyed)).toMatchObject([{ secret: 'cs_test_6_secret' }]))
+})

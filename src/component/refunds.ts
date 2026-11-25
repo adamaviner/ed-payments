@@ -5,10 +5,9 @@
 import { ConvexError, v } from 'convex/values'
 import type { Doc, Id } from './_generated/dataModel.js'
 import { mutation, query, type MutationCtx } from './_generated/server.js'
-import { COMMITTED_REFUND, notifyHost, openIssue, refundViewOf, refundView, refundsOf } from './lib.js'
+import { COMMITTED_REFUND, loadCheckout, notifyHost, openIssue, refundViewOf, refundView, refundsOf } from './lib.js'
+import { dollars } from '../core/money.js'
 import { hostData as hostDataValidator, processor } from './schema.js'
-
-const dollarsOf = (cents: number) => `$${(cents / 100).toFixed(2)}`
 
 async function loadRefund(ctx: MutationCtx, id: string): Promise<Doc<'refunds'>> {
   const nid = ctx.db.normalizeId('refunds', id)
@@ -17,17 +16,27 @@ async function loadRefund(ctx: MutationCtx, id: string): Promise<Doc<'refunds'>>
   return r
 }
 
-async function loadCheckout(ctx: MutationCtx, id: Id<'checkouts'> | string): Promise<Doc<'checkouts'>> {
-  const nid = ctx.db.normalizeId('checkouts', id)
-  const c = nid ? await ctx.db.get(nid) : null
-  if (!c) throw new ConvexError(`No checkout ${id}.`)
-  return c
-}
-
-/** What is left to refund once refunds done and in progress are taken off, leaving out `except`. */
+/**
+ * What is left to refund once refunds done and in progress, and Stripe disputes lost, are taken off,
+ * leaving out `except`. A PayPal dispute lost comes back as a refund or reversal event, recorded
+ * as an external refund, so it is already in refundedCents.
+ */
 async function remaining(ctx: MutationCtx, c: Doc<'checkouts'>, except?: Id<'refunds'>): Promise<number> {
   const inFlight = (await refundsOf(ctx, c._id)).filter((r) => r._id !== except && COMMITTED_REFUND.has(r.status)).reduce((sum, r) => sum + r.amountCents, 0)
-  return (c.paidCents ?? 0) - c.refundedCents - inFlight
+  const disputes =
+    c.processor === 'stripe'
+      ? await ctx.db
+          .query('disputes')
+          .withIndex('by_checkout', (q) => q.eq('checkoutId', c._id))
+          .collect()
+      : []
+  const lost = disputes.filter((d) => d.status === 'lost').reduce((sum, d) => sum + (d.amountCents ?? c.paidCents ?? 0), 0)
+  return (c.paidCents ?? 0) - c.refundedCents - inFlight - lost
+}
+
+/** While the buyer's bank or PayPal holds a dispute, refunding too would give the money back twice if it is lost. */
+function notDisputed(c: Doc<'checkouts'>) {
+  if (c.disputed) throw new ConvexError('This payment is disputed by the buyer; refund it once the dispute has ended.')
 }
 
 /** Counts a refund as done: adds it to the checkout's refundedCents and tells the host. */
@@ -63,10 +72,11 @@ export const request = mutation({
     checkHostData(hostData)
     const c = await loadCheckout(ctx, checkoutId)
     if (c.status !== 'paid' && c.status !== 'refund_needed') throw new ConvexError('Only a paid checkout can be refunded.')
+    notDisputed(c)
     const left = await remaining(ctx, c)
     const amount = amountCents ?? left
     if (!Number.isInteger(amount) || amount < 1) throw new ConvexError(left < 1 ? 'Nothing is left to refund on this payment.' : 'A refund needs an amount of at least one cent.')
-    if (amount > left) throw new ConvexError(`Only ${dollarsOf(left)} is left to refund on this payment.`)
+    if (amount > left) throw new ConvexError(`Only ${dollars(Math.max(left, 0))} is left to refund on this payment.`)
     return await ctx.db.insert('refunds', {
       checkoutId: c._id,
       amountCents: amount,
@@ -120,8 +130,9 @@ export const begin = mutation({
     }
     const c = await loadCheckout(ctx, r.checkoutId)
     if (!c.paymentRef) throw new ConvexError('This payment has no processor reference to refund.')
+    notDisputed(c)
     const left = await remaining(ctx, c, r._id)
-    if (r.amountCents > left) throw new ConvexError(`Only ${dollarsOf(left)} is left to refund on this payment.`)
+    if (r.amountCents > left) throw new ConvexError(`Only ${dollars(left)} is left to refund on this payment.`)
     // A refund the processor refused is a new attempt under a new key; otherwise the same key, so a
     // repeat can never refund twice.
     const attempts = (r.attempts ?? 0) + (r.status === 'failed' ? 1 : 0)
@@ -191,9 +202,9 @@ export const markManual = mutation({
       })
       return null
     }
-    if (c.refundedCents + r.amountCents > (c.paidCents ?? 0)) {
-      throw new ConvexError(`Only ${dollarsOf((c.paidCents ?? 0) - c.refundedCents)} is left unrefunded on this payment; check the processor before marking this one done.`)
-    }
+    notDisputed(c)
+    const left = await remaining(ctx, c, r._id)
+    if (r.amountCents > left) throw new ConvexError(`Only ${dollars(Math.max(left, 0))} is left unrefunded on this payment; check the processor before marking this one done.`)
     await ctx.db.patch(r._id, { status: 'manual', approvedBy: r.approvedBy ?? by, note: note?.trim() || undefined, sentAt: now, updatedAt: now })
     await counted(ctx, r, now)
     return null
@@ -240,7 +251,8 @@ export const recordExternal = mutation({
     const match =
       rows.find((r) => r.processorRefundId === a.processorRefundId) ??
       rows.find((r) => r._id === tagged) ??
-      rows.find((r) => r.status === 'manual' && !r.processorRefundId && r.amountCents === a.amountCents) ??
+      // A refund done by hand, now seen at the processor; never one that failed there, which refunded nothing.
+      (a.state === 'failed' ? undefined : rows.find((r) => r.status === 'manual' && !r.processorRefundId && r.amountCents === a.amountCents)) ??
       // A request carrying the app's notes, made in the dashboard instead of sent from here: it is that
       // refund, so the notes reach on.refunded (an external row would be counted without them).
       (a.state === 'failed' ? undefined : rows.find((r) => r.hostData && (r.status === 'requested' || r.status === 'approved') && !r.processorRefundId && r.amountCents === a.amountCents))
@@ -270,14 +282,31 @@ export const recordExternal = mutation({
     if (match.status === 'sent' && a.state === 'failed') {
       // Stripe can fail a refund after reporting it succeeded (a closed card): undo the count and say so.
       await ctx.db.patch(match._id, { status: 'failed', error: 'The processor reports this refund failed after sending it.', updatedAt: a.now })
-      await ctx.db.patch(c._id, { refundedCents: Math.max(0, c.refundedCents - match.amountCents) })
+      const refundedCents = Math.max(0, c.refundedCents - match.amountCents)
+      await ctx.db.patch(c._id, { refundedCents })
+      // The host counted it when it was sent; `reversed` tells it to take it off again.
+      await notifyHost(
+        ctx,
+        { ...c, refundedCents },
+        'onRefunded',
+        {
+          refundId: match._id,
+          amountCents: match.amountCents,
+          refundedCents,
+          paidCents: c.paidCents ?? 0,
+          origin: match.origin,
+          reversed: true,
+          ...(match.hostData ? { hostData: match.hostData } : {}),
+        },
+        a.now,
+      )
       await openIssue(ctx, {
         kind: 'status_differs',
         key: a.processorRefundId,
         checkoutId: c._id,
         processor: c.processor,
         paymentRef: a.paymentRef,
-        detail: `Refund ${a.processorRefundId} of ${dollarsOf(match.amountCents)} failed after it was sent.`,
+        detail: `Refund ${a.processorRefundId} of ${dollars(match.amountCents)} failed after it was sent.`,
         now: a.now,
       })
       return 'updated'

@@ -9,8 +9,10 @@ import { ConvexError } from 'convex/values'
 import { DEFAULT_CHARGE_HOUR_UTC, DEFAULT_RETRY_DAYS, anchorDayOf, isAnchorDay } from '../core/schedule.js'
 import { isMethodFor, type Method, type Payer, type Processor, type Ref } from '../core/types.js'
 import type { Payments, RunActionCtx, RunMutationCtx, RunQueryCtx, SchedulerCtx, StartUi, StartedEmbedded, StartedRedirect } from './index.js'
+import { getOrderOrNull, orderVault } from '../core/paypal.js'
+import { paypalSavedArgs } from './hosted.js'
 import { ensureCustomer } from './saved.js'
-import { errorText } from './util.js'
+import { cleanPayer, errorText } from './util.js'
 
 export type ScheduleView = NonNullable<Awaited<ReturnType<Payments['getSchedule']>>>
 
@@ -91,7 +93,7 @@ export async function startSchedule<T>(p: Payments, ctx: SchedulerCtx, a: StartS
     ref: a.ref,
     purpose: a.purpose,
     description: a.description,
-    payer: { email: a.payer.email.trim(), ...(a.payer.name?.trim() ? { name: a.payer.name.trim() } : {}) },
+    payer: cleanPayer(a.payer),
     processor: target.processor,
     method: target.method,
     paymentMethodId: a.paymentMethodId,
@@ -129,7 +131,7 @@ export async function startScheduleCheckout<T>(p: Payments, ctx: RunActionCtx, a
     ref: a.ref,
     purpose: a.purpose,
     description: a.description,
-    payer: { email: a.payer.email.trim(), ...(a.payer.name?.trim() ? { name: a.payer.name.trim() } : {}) },
+    payer: cleanPayer(a.payer),
     processor: a.processor,
     method: a.method,
     amountCents: a.amountCents,
@@ -174,6 +176,10 @@ export async function startScheduleCheckout<T>(p: Payments, ctx: RunActionCtx, a
  */
 export async function chargeDue(p: Payments, ctx: SchedulerCtx, scheduleId: string): Promise<string | null> {
   const plan = await ctx.runMutation(p.component.schedules.claim, { id: scheduleId, app: p.app, now: Date.now() })
+  if (plan.action === 'check_vault') {
+    await checkPaypalVault(p, ctx, plan.orderId)
+    return null
+  }
   if (plan.action !== 'charge') return null
   return await p.chargeOffSession(
     ctx,
@@ -192,9 +198,28 @@ export async function chargeDue(p: Payments, ctx: SchedulerCtx, scheduleId: stri
   )
 }
 
+/**
+ * A schedule waits for the PayPal token its first payment saved after the capture (vault APPROVED):
+ * the order shows it once PayPal has finished, so it is read again rather than relying only on
+ * VAULT.PAYMENT-TOKEN.CREATED, which may never reach the app and isn't documented to name the order.
+ * A token found goes through the same mutation as that event, so the two arriving together save it
+ * once. An order that can't be read, or isn't saved yet, leaves the schedule waiting: claim has
+ * already set its next look, and fails it as METHOD_NOT_SAVED when the wait is over.
+ */
+async function checkPaypalVault(p: Payments, ctx: SchedulerCtx, orderId: string) {
+  try {
+    const order = await p.withPaypal(ctx, (call) => getOrderOrNull(call, orderId))
+    const saved = order ? orderVault(order) : null
+    if (!saved) return
+    await ctx.runMutation(p.component.schedules.paypalTokenCreated, { app: p.app, orderId, paypal: paypalSavedArgs(saved), now: Date.now() })
+  } catch (err) {
+    console.warn(`payments: couldn’t read PayPal order ${orderId} for its saved method; trying again later: ${errorText(err)}`)
+  }
+}
+
 /** The hourly run (worker().schedules): every due schedule of this app is charged, or one when given. */
 export async function runSchedules(p: Payments, ctx: SchedulerCtx, o: { scheduleId?: string } = {}): Promise<{ charged: number; errors: number }> {
-  const ids = o.scheduleId ? [o.scheduleId] : (await ctx.runQuery(p.component.schedules.due, { now: Date.now(), limit: 100 })).filter((s) => s.app === p.app).map((s) => s.id)
+  const ids = o.scheduleId ? [o.scheduleId] : (await ctx.runQuery(p.component.schedules.due, { app: p.app, now: Date.now(), limit: 100 })).map((s) => s.id)
   const out = { charged: 0, errors: 0 }
   for (const id of ids) {
     try {

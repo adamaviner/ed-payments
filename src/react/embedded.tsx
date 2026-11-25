@@ -8,6 +8,7 @@ import { useAction } from 'convex/react'
 import { useEffect, useRef, useState } from 'react'
 import type { EmbeddedPayment } from '../client/index.js'
 import type { CompleteReturnRef } from './types.js'
+import { useLatest } from './hooks.js'
 import { Button, cn, ErrorNote } from './ui.js'
 
 type PaypalPayment = Extract<EmbeddedPayment, { processor: 'paypal' }>
@@ -37,29 +38,31 @@ export function forgetScripts() {
 }
 
 /**
- * Loads a script once per address (every mount shares it); resolves once it has run. A failed load,
- * or one with no answer after GIVE_UP_MS, is forgotten, so a later mount tries again.
+ * Loads a script once per address (every mount shares it); resolves once it has run and set `global`
+ * on window. A failed load, one with no answer after GIVE_UP_MS, or one that ran without setting
+ * `global` (a blocker that stubs the script out) is forgotten, so a later mount tries again.
  */
-export function loadScript(src: string, attributes: Record<string, string> = {}): Promise<void> {
+export function loadScript(src: string, global: string, attributes: Record<string, string> = {}): Promise<void> {
   const known = loading.get(src)
   if (known) return known
   const p = new Promise<void>((resolve, reject) => {
     const el = document.createElement('script')
     for (const [name, value] of Object.entries(attributes)) el.setAttribute(name, value)
-    const fail = () => {
+    const fail = (why = `Couldn’t load ${new URL(src).host}.`) => {
       clearTimeout(timer)
       if (loading.get(src) === p) loading.delete(src)
       el.remove()
-      reject(new Error(`Couldn’t load ${new URL(src).host}.`))
+      reject(new Error(why))
     }
     const timer = setTimeout(fail, GIVE_UP_MS)
     el.src = src
     el.async = true
     el.addEventListener('load', () => {
+      if (!(global in window)) return fail(`${new URL(src).host} loaded without ${global}.`)
       clearTimeout(timer)
       resolve()
     })
-    el.addEventListener('error', fail)
+    el.addEventListener('error', () => fail())
     document.head.appendChild(el)
   })
   loading.set(src, p)
@@ -154,18 +157,14 @@ export function PaypalButtons({ payment, completeReturn, onFallback, navigate, c
   const [load, setLoad] = useState<Load>('loading')
   const [note, setNote] = useState<string | null>(null)
   useSlow(load, setLoad)
-  // The latest callbacks, so the buttons (rendered once per order) never call stale ones.
-  const latest = useRef({ capture, navigate })
-  useEffect(() => {
-    latest.current = { capture, navigate }
-  }, [capture, navigate])
+  const latest = useLatest({ capture, navigate })
 
   const { orderId, clientId, returnUrl, only } = payment
   useEffect(() => {
     let live = true
     let buttons: PaypalButtons | null = null
     const go = (url: string) => (latest.current.navigate ?? ((u: string) => window.location.assign(u)))(url)
-    loadScript(paypalSdkUrl(clientId)).then(
+    loadScript(paypalSdkUrl(clientId), 'paypal').then(
       () => {
         const sdk = globals().paypal
         if (!live || !box.current) return
@@ -203,7 +202,7 @@ export function PaypalButtons({ payment, completeReturn, onFallback, navigate, c
       live = false
       void buttons?.close?.().catch(() => {})
     }
-  }, [orderId, clientId, returnUrl, only])
+  }, [orderId, clientId, returnUrl, only, latest])
 
   return (
     <div className={cn('flex flex-col gap-3', className)}>
@@ -243,7 +242,7 @@ export function StripeEmbeddedCheckout({ payment, publishableKey, onFallback, cl
     // waits for the one before it to be made and destroys it first (StrictMode mounts twice at once).
     const making = lastStripePage.then(async (before) => {
       destroyPage(before)
-      await loadScript(STRIPE_JS)
+      await loadScript(STRIPE_JS, 'Stripe')
       const make = globals().Stripe
       if (!make) throw new Error('Stripe.js loaded without Stripe.')
       if (!live) return null

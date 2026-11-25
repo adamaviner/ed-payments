@@ -2,8 +2,19 @@
 // if it was handled before), then act. Events for objects that aren't this app's checkouts, or that
 // the component doesn't know, are answered 200 and counted as foreign, never retried forever (fix c).
 // A real failure after the signature check answers 500, so the processor tries again later.
-import type { PaypalCapture, PaypalDispute, PaypalEvent, PaypalOrder, PaypalRefund } from '../core/paypal.js'
-import { captureOrderId, moneyCents, orderCustomId, parsePaypalEvent, paypalMethodId, paypalTokenOf, refundCaptureId, verifyPaypalWebhook } from '../core/paypal.js'
+import type { PaypalCapture, PaypalDispute, PaypalEvent, PaypalOrder, PaypalPaymentToken, PaypalRefund } from '../core/paypal.js'
+import {
+  RECURRING_USAGE_PATTERN,
+  captureOrderId,
+  moneyCents,
+  orderCustomId,
+  parsePaypalEvent,
+  paymentTokenLabel,
+  paypalMethodId,
+  paypalTokenOf,
+  refundCaptureId,
+  verifyPaypalWebhook,
+} from '../core/paypal.js'
 import type { StripeCharge, StripeDispute, StripeEvent, StripeRefund, StripeSession } from '../core/stripe.js'
 import { STRIPE_EVENTS, parseStripeEvent, paymentIntentId, stripe, verifyStripeSignature, type StripePaymentIntent } from '../core/stripe.js'
 import { parseTag } from '../core/types.js'
@@ -15,6 +26,9 @@ import { errorText, paypalRefundState, stripeRefundState } from './util.js'
 export type UnhandledStripeEvent = (ctx: RunActionCtx, event: StripeEvent) => Promise<void>
 
 type Outcome = 'handled' | 'ignored' | 'foreign'
+
+/** How far a PayPal delivery's transmission time may be from now. */
+const PAYPAL_WEBHOOK_TOLERANCE_MS = 10 * 60_000
 
 const text = (status: number, body: string) => new Response(body, { status })
 
@@ -138,6 +152,7 @@ async function onStripeDispute(p: Payments, ctx: RunActionCtx, type: string, d: 
     disputeId: d.id,
     status: type === 'charge.dispute.created' ? 'opened' : 'closed',
     outcome: type === 'charge.dispute.closed' ? d.status : undefined,
+    lost: type === 'charge.dispute.closed' && d.status === 'lost',
     reason: d.reason,
     amountCents: d.amount,
     now: Date.now(),
@@ -168,6 +183,10 @@ export async function handlePaypalWebhook(p: Payments, ctx: RunActionCtx, reques
   const body = await request.text()
   const event = parsePaypalEvent(body)
   if (!event) return text(400, 'Not a PayPal event')
+  // Checked here, before PayPal is asked: a replayed or made-up delivery costs nothing. PayPal sends
+  // each retry afresh, with its own time.
+  const sentAt = Date.parse(request.headers.get('paypal-transmission-time') ?? '')
+  if (!Number.isFinite(sentAt) || Math.abs(Date.now() - sentAt) > PAYPAL_WEBHOOK_TOLERANCE_MS) return text(400, 'Stale or missing transmission time')
   let verified: boolean
   try {
     verified = await p.withPaypal(ctx, (call) => verifyPaypalWebhook(keys, call.token, request.headers, body, { fetch: p.fetch }))
@@ -235,6 +254,8 @@ async function actOnPaypal(p: Payments, ctx: RunActionCtx, event: PaypalEvent): 
       const id = typeof event.resource.id === 'string' ? event.resource.id : null
       return id ? await onMethodGone(p, ctx, paypalMethodId(id), 'The payer removed this payment method at PayPal.') : 'foreign'
     }
+    case 'VAULT.PAYMENT-TOKEN.CREATED':
+      return await onPaypalTokenCreated(p, ctx, event.resource as unknown as PaypalPaymentToken)
     case 'CUSTOMER.DISPUTE.CREATED':
     case 'CUSTOMER.DISPUTE.RESOLVED': {
       const d = event.resource as unknown as PaypalDispute
@@ -246,6 +267,7 @@ async function actOnPaypal(p: Payments, ctx: RunActionCtx, event: PaypalEvent): 
         disputeId: d.dispute_id,
         status: event.event_type === 'CUSTOMER.DISPUTE.CREATED' ? 'opened' : 'closed',
         outcome: d.dispute_outcome?.outcome_code,
+        lost: d.dispute_outcome?.outcome_code === 'RESOLVED_BUYER_FAVOUR',
         reason: d.reason,
         amountCents: moneyCents(d.dispute_amount) ?? undefined,
         now: Date.now(),
@@ -255,4 +277,36 @@ async function actOnPaypal(p: Payments, ctx: RunActionCtx, event: PaypalEvent): 
     default:
       return 'ignored'
   }
+}
+
+/**
+ * A PayPal method saved after the payment that asked for it (the capture said vault APPROVED): the
+ * schedule waiting for it takes it (schedules.paypalTokenCreated says how it is found). PayPal sends
+ * this event for every token, so one this app saved another way (a setup token, a VAULTED capture)
+ * is simply handled. With no order named and several schedules of the same PayPal customer waiting,
+ * none is guessed: the schedules worker reads each one's order again and finds its own token there.
+ */
+async function onPaypalTokenCreated(p: Payments, ctx: RunActionCtx, t: PaypalPaymentToken): Promise<Outcome> {
+  const what = paymentTokenLabel(t)
+  const customerId = t.customer?.id
+  if (typeof t.id !== 'string' || !customerId || !what) return 'foreign'
+  const ntr = t.payment_source?.card?.network_transaction_reference
+  const res = await ctx.runMutation(p.component.schedules.paypalTokenCreated, {
+    app: p.app,
+    orderId: t.metadata?.order_id,
+    paypal: {
+      paypalCustomerId: customerId,
+      paymentTokenId: t.id,
+      kind: what.kind,
+      label: what.label,
+      usagePattern: what.kind === 'paypal' ? RECURRING_USAGE_PATTERN : undefined,
+      networkRef: ntr?.id ? { id: ntr.id, ...(ntr.network ? { network: ntr.network } : {}) } : undefined,
+    },
+    now: Date.now(),
+  })
+  if (res === 'ambiguous') {
+    console.warn(`payments: PayPal token ${t.id} names no order, and more than one schedule of its customer waits for one; none was given it`)
+    return 'ignored'
+  }
+  return res === 'foreign' ? 'foreign' : 'handled'
 }

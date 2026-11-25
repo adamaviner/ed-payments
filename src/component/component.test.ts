@@ -368,3 +368,204 @@ describe('cleanup', () => {
     expect(await read(pay.checkouts.get, { id })).not.toBeNull()
   })
 })
+
+describe('money on a closed checkout', () => {
+  test('money arriving on a checkout the buyer cancelled is owed back, not kept', async () => {
+    const { mutate, create, checkout, calls } = setup()
+    const id = await create()
+    await mutate(pay.checkouts.attach, { id, processorCheckoutId: 'cs_1' })
+    expect(await mutate(pay.checkouts.cancel, { id, now: NOW })).toEqual({ outcome: 'abandoned' })
+    expect(await mutate(pay.checkouts.settlePaid, { id, paymentRef: 'pi_1', paidCents: 2500, now: NOW })).toMatchObject({
+      outcome: 'refund_needed',
+      reason: 'The buyer cancelled this payment before it arrived.',
+    })
+    expect(await checkout(id)).toMatchObject({ status: 'refund_needed', paymentRef: 'pi_1' })
+    expect(await calls('onPaid')).toHaveLength(0)
+    expect(await calls('onRefundNeeded')).toHaveLength(1)
+  })
+
+  test('a bank payment starting on an expired or failed checkout is processing, and the host told; on a cancelled one the host hears at the refund', async () => {
+    const { mutate, create, checkout, calls } = setup()
+    const expired = await create()
+    await mutate(pay.checkouts.attach, { id: expired, processorCheckoutId: 'cs_1' })
+    await mutate(pay.checkouts.abandon, { id: expired, now: NOW })
+    expect(await mutate(pay.checkouts.markProcessing, { id: expired, paymentRef: 'pi_1', now: NOW })).toEqual({ outcome: 'processing' })
+    const failed = await create()
+    await mutate(pay.checkouts.failStart, { id: failed, error: 'Stripe is down', now: NOW })
+    expect(await mutate(pay.checkouts.markProcessing, { id: failed, paymentRef: 'pi_2', now: NOW })).toEqual({ outcome: 'processing' })
+    expect((await calls('onProcessing')).map((c) => c.args.checkoutId)).toEqual([expired, failed])
+    const cancelled = await create()
+    await mutate(pay.checkouts.attach, { id: cancelled, processorCheckoutId: 'cs_3' })
+    await mutate(pay.checkouts.cancel, { id: cancelled, now: NOW })
+    expect(await mutate(pay.checkouts.markProcessing, { id: cancelled, paymentRef: 'pi_3', now: NOW })).toEqual({ outcome: 'processing' })
+    expect(await calls('onProcessing')).toHaveLength(2)
+    expect(await mutate(pay.checkouts.settlePaid, { id: cancelled, paymentRef: 'pi_3', paidCents: 2500, now: NOW })).toMatchObject({ outcome: 'refund_needed' })
+    expect((await checkout(cancelled)).status).toBe('refund_needed')
+  })
+
+  test('a PayPal capture claims the checkout: one claim at a time, and the buyer can’t cancel it until the claim goes stale', async () => {
+    const { mutate, create, checkout } = setup()
+    const id = await create({ processor: 'paypal' })
+    await mutate(pay.checkouts.attach, { id, processorCheckoutId: 'O1' })
+    expect(await mutate(pay.checkouts.claimCapture, { id, now: NOW })).toEqual({ claimed: true })
+    expect(await mutate(pay.checkouts.claimCapture, { id, now: NOW + 1000 })).toEqual({ claimed: false, status: 'pending' })
+    expect(await mutate(pay.checkouts.cancel, { id, now: NOW + 1000 })).toEqual({ outcome: 'being_paid' })
+    expect((await checkout(id)).status).toBe('pending')
+    await mutate(pay.checkouts.releaseCapture, { id })
+    expect(await mutate(pay.checkouts.claimCapture, { id, now: NOW + 2000 })).toEqual({ claimed: true })
+    expect(await mutate(pay.checkouts.cancel, { id, now: NOW + 2000 + 6 * 60_000 })).toEqual({ outcome: 'check_processor' })
+    expect(await mutate(pay.checkouts.cancel, { id, checked: true, now: NOW + 2000 + 6 * 60_000 })).toEqual({ outcome: 'abandoned' })
+    expect(await mutate(pay.checkouts.claimCapture, { id, now: NOW + 3 * 60 * 60_000 })).toEqual({ claimed: false, status: 'abandoned' })
+  })
+})
+
+describe('the refund ledger and disputes', () => {
+  const dispute = (mutate: ReturnType<typeof setup>['mutate'], paymentRef: string, disputeId: string, status: 'opened' | 'closed', o: { lost?: boolean; amountCents?: number } = {}) =>
+    mutate(pay.disputes.record, { processor: 'stripe', paymentRef, disputeId, status, amountCents: o.amountCents ?? 1000, lost: o.lost, outcome: o.lost ? 'lost' : 'won', now: NOW })
+
+  test('refunds are refused while a dispute is open; one dispute closing leaves another open; a lost one comes off what is left', async () => {
+    const { t, mutate, paid, checkout } = setup()
+    const id = await paid()
+    await dispute(mutate, `pi_${id}`, 'dp_1', 'opened')
+    await expect(t.mutation(api.shop.requestRefund, { checkoutId: id, reason: 'Sorry' })).rejects.toThrow(/disputed/)
+    await dispute(mutate, `pi_${id}`, 'dp_2', 'opened')
+    await dispute(mutate, `pi_${id}`, 'dp_1', 'closed')
+    expect((await checkout(id)).disputed).toBe(true)
+    await dispute(mutate, `pi_${id}`, 'dp_2', 'closed', { lost: true })
+    expect((await checkout(id)).disputed).toBe(false)
+    await expect(t.mutation(api.shop.requestRefund, { checkoutId: id, amountCents: 2000, reason: 'Sorry' })).rejects.toThrow(/Only \$15\.00 is left/)
+    expect(await t.mutation(api.shop.requestRefund, { checkoutId: id, reason: 'Sorry' })).toEqual(expect.any(String))
+    expect((await t.query(api.shop.refundsFor, { checkoutId: id }))[0]).toMatchObject({ amountCents: 1500 })
+  })
+
+  test('a refund in progress is refused to send while a dispute opened after it is open', async () => {
+    const { t, mutate, paid } = setup()
+    const id = await paid()
+    const refundId = await t.mutation(api.shop.requestRefund, { checkoutId: id, reason: 'Sorry' })
+    await dispute(mutate, `pi_${id}`, 'dp_1', 'opened')
+    await expect(mutate(pay.refunds.begin, { refundId, skipApproval: true, now: NOW })).rejects.toThrow(/disputed/)
+  })
+
+  test('marking a refund done by hand counts refunds being sent', async () => {
+    const { t, mutate, paid } = setup()
+    const id = await paid()
+    const a = await t.mutation(api.shop.requestRefund, { checkoutId: id, amountCents: 1500, reason: 'Part' })
+    const b = await t.mutation(api.shop.requestRefund, { checkoutId: id, amountCents: 1000, reason: 'Rest' })
+    await mutate(pay.refunds.begin, { refundId: a, skipApproval: true, now: NOW })
+    await mutate(pay.refunds.recordExternal, { processor: 'stripe', paymentRef: `pi_${id}`, processorRefundId: 're_dash', amountCents: 900, state: 'done', now: NOW })
+    await expect(mutate(pay.refunds.markManual, { refundId: b, by: 'boss', now: NOW })).rejects.toThrow(/left/)
+  })
+
+  test('a refund that failed at the processor isn’t linked to one marked done by hand', async () => {
+    const { t, mutate, paid, read } = setup()
+    const id = await paid()
+    const b = await t.mutation(api.shop.requestRefund, { checkoutId: id, amountCents: 1000, reason: 'By cheque' })
+    await mutate(pay.refunds.markManual, { refundId: b, by: 'boss', now: NOW })
+    expect(await mutate(pay.refunds.recordExternal, { processor: 'stripe', paymentRef: `pi_${id}`, processorRefundId: 're_failed', amountCents: 1000, state: 'failed', now: NOW })).toBe('unchanged')
+    expect(await read(pay.refunds.get, { refundId: b })).toMatchObject({ status: 'manual', processorRefundId: null })
+  })
+
+  test('a refund the processor fails after it was sent: the host is told it was reversed', async () => {
+    const { t, mutate, paid, calls, checkout } = setup()
+    const id = await paid()
+    const refundId = await t.mutation(api.shop.requestRefund, { checkoutId: id, amountCents: 1000, reason: 'Sorry' })
+    await mutate(pay.refunds.begin, { refundId, skipApproval: true, now: NOW })
+    await mutate(pay.refunds.finish, { refundId, ok: true, done: true, processorRefundId: 're_1', now: NOW })
+    await mutate(pay.refunds.recordExternal, { processor: 'stripe', paymentRef: `pi_${id}`, processorRefundId: 're_1', amountCents: 1000, state: 'failed', now: NOW })
+    expect((await checkout(id)).refundedCents).toBe(0)
+    expect((await calls('onRefunded')).map((c) => [c.args.refundedCents, c.args.reversed])).toEqual([
+      [1000, undefined],
+      [0, true],
+    ])
+  })
+
+  test('settling keeps a fee already recorded when the processor doesn’t say one', async () => {
+    const { mutate, create, checkout } = setup()
+    const id = await create()
+    await mutate(pay.checkouts.recordFee, { id, processorFeeCents: 103 })
+    await mutate(pay.checkouts.settlePaid, { id, paymentRef: 'pi_1', paidCents: 2500, now: NOW })
+    expect((await checkout(id)).processorFeeCents).toBe(103)
+  })
+})
+
+describe('scans that page past what they skip', () => {
+  test('the sweep’s list leaves out charges handed to a person', async () => {
+    const { mutate, create, read } = setup()
+    const parked = await create({ now: NOW })
+    await mutate(pay.checkouts.attach, { id: parked, processorCheckoutId: 'pi_parked' })
+    await mutate(pay.checkouts.noteChargeAttempt, { id: parked, error: 'no answer', giveUp: true, max: 5, now: NOW })
+    const open = await create({ now: NOW + 1 })
+    expect((await read(pay.checkouts.due, { limit: 1 })).map((c) => c.id)).toEqual([open])
+  })
+
+  test('checkouts created in the same millisecond are all read, a page at a time', async () => {
+    const { create, read } = setup()
+    const ids = new Set<string>()
+    for (let i = 0; i < 5; i++) ids.add(await create({ now: NOW }))
+    const seen = new Set<string>()
+    let cursor: string | null = null
+    for (let i = 0; i < 10; i++) {
+      const page: { page: { id: string }[]; continueCursor: string; isDone: boolean } = await read(pay.checkouts.createdSince, { since: NOW - 1, paginationOpts: { numItems: 2, cursor } })
+      for (const c of page.page) seen.add(c.id)
+      if (page.isDone) break
+      cursor = page.continueCursor
+    }
+    expect(seen).toEqual(ids)
+  })
+
+  test('the schedules due are one app’s, so another app’s waiting ones don’t crowd them out', async () => {
+    const { mutate, read } = setup()
+    const make = (app: string) =>
+      mutate(pay.schedules.create, {
+        app,
+        owner: { type: 'donor', id: app },
+        ref: { type: 'monthly', id: app },
+        purpose: 'donation',
+        description: 'Monthly gift',
+        payer: { email: 'd@example.org' },
+        processor: 'stripe',
+        method: 'card',
+        paymentMethodId: 'pm_1',
+        amountCents: 2500,
+        anchorDay: 1,
+        hourUTC: 15,
+        retryDays: [3],
+        firstChargeAt: NOW,
+        callbacks: {},
+        now: NOW,
+      })
+    await make('other')
+    const ours = await make('test')
+    expect(await read(pay.schedules.due, { app: 'test', now: NOW + DAY, limit: 1 })).toEqual([{ id: ours, app: 'test' }])
+  })
+})
+
+test('a schedule on a saved method the library has no row for is charged, whichever processor it is at', async () => {
+  const { mutate } = setup()
+  const make = (paymentMethodId: string, processor: 'stripe' | 'paypal') =>
+    mutate(pay.schedules.create, {
+      app: 'test',
+      owner: { type: 'donor', id: paymentMethodId },
+      ref: { type: 'monthly', id: paymentMethodId },
+      purpose: 'donation',
+      description: 'Monthly gift',
+      payer: { email: 'd@example.org' },
+      processor,
+      method: 'card',
+      paymentMethodId,
+      amountCents: 2500,
+      anchorDay: 1,
+      hourUTC: 15,
+      retryDays: [3],
+      firstChargeAt: NOW,
+      callbacks: {},
+      now: NOW,
+    })
+  for (const [pm, processor] of [
+    ['pm_unknown', 'stripe'],
+    ['paypal:unknown', 'paypal'],
+  ] as const) {
+    const id = await make(pm, processor)
+    expect(await mutate(pay.schedules.claim, { id, app: 'test', now: NOW })).toMatchObject({ action: 'charge', paymentMethodId: pm })
+  }
+})

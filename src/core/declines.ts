@@ -43,7 +43,15 @@ const STRIPE_HARD: ReadonlySet<string> = new Set([
   'no_account',
 ])
 
-const PAYPAL_HARD: ReadonlySet<string> = new Set(['CARD_EXPIRED', 'PAYER_ACCOUNT_LOCKED_OR_CLOSED', 'PAYER_ACCOUNT_RESTRICTED', 'INVALID_PAYMENT_SOURCE', 'PAYER_ACTION_REQUIRED', 'METHOD_REMOVED'])
+const PAYPAL_HARD: ReadonlySet<string> = new Set([
+  'CARD_EXPIRED',
+  'PAYER_ACCOUNT_LOCKED_OR_CLOSED',
+  'PAYER_ACCOUNT_RESTRICTED',
+  'INVALID_PAYMENT_SOURCE',
+  'PAYER_ACTION_REQUIRED',
+  'METHOD_REMOVED',
+  'METHOD_NOT_SAVED',
+])
 
 /** What a processor said about a refused charge: Stripe's code, decline_code and advice_code, or PayPal's issue. */
 export interface DeclineInfo {
@@ -68,5 +76,12 @@ export function declineCodeOf(d: DeclineInfo): string | undefined {
   return d.code ?? d.declineCode ?? undefined
 }
 
-/** The code the library records when a schedule's saved method is gone (removed by the payer, or never saved). */
+/** The code the library records when a schedule's saved method is gone (removed by the payer or at the processor). */
 export const METHOD_REMOVED = 'METHOD_REMOVED'
+
+/**
+ * The code the library records when a schedule's first payment was taken but PayPal never finished
+ * saving the method it paid with (vault APPROVED, no token within three days). Nothing was charged
+ * and nothing was refused: the app asks for a payment method, not about a failed payment.
+ */
+export const METHOD_NOT_SAVED = 'METHOD_NOT_SAVED'

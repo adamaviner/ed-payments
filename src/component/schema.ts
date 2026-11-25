@@ -122,6 +122,23 @@ export default defineSchema({
     /** What the processor actually kept, when it says. */
     processorFeeCents: v.optional(v.number()),
     disputed: v.optional(v.boolean()),
+    /**
+     * PayPal declined the card or account the buyer chose at capture: from then on only the buyer
+     * captures it (completeReturn), never the webhook or the sweep. lastError says it for people.
+     */
+    paypalDeclinedAt: v.optional(v.number()),
+    /**
+     * Left out of the sweep's and cleanup's scans, so rows that stay put can't fill the batch: an
+     * off-session charge handed to a person (until they retry it), or an old failed checkout kept with its refund.
+     */
+    parkedAt: v.optional(v.number()),
+    /** The buyer closed it (cancelCheckout): money that arrives anyway is owed back, not kept. */
+    cancelledByBuyerAt: v.optional(v.number()),
+    /**
+     * PayPal: when a capture claimed it (claimCapture), before asking PayPal. The buyer can't cancel
+     * while the claim is live; once stale, cancel asks PayPal for the order first.
+     */
+    captureClaimedAt: v.optional(v.number()),
     callbacks,
     /** Passed to every callback as it was given to start. */
     context: v.optional(v.any()),
@@ -132,7 +149,7 @@ export default defineSchema({
     settledAt: v.optional(v.number()),
     lastError: v.optional(v.string()),
   })
-    .index('by_status_expiresAt', ['status', 'expiresAt'])
+    .index('by_status_parked_expiresAt', ['status', 'parkedAt', 'expiresAt'])
     .index('by_processorCheckoutId', ['processorCheckoutId'])
     .index('by_paymentRef', ['paymentRef'])
     .index('by_ref', ['ref.type', 'ref.id'])
@@ -187,16 +204,33 @@ export default defineSchema({
     endReason: v.optional(v.string()),
     endedBy: v.optional(v.string()),
     endedAt: v.optional(v.number()),
+    /**
+     * Cancelled because its first payment wasn't completed (its checkout expired or failed), not by
+     * anyone: a first payment that arrives anyway, on a checkout the payer didn't cancel, starts it.
+     */
+    neverStarted: v.optional(v.boolean()),
+    /**
+     * PayPal took the first payment but answered vault status APPROVED, not VAULTED: the method is
+     * saved later, and its token shows on the order (read again by the schedules worker) and comes in
+     * VAULT.PAYMENT-TOKEN.CREATED. Until then (at most three days) the schedule waits for it instead
+     * of failing for want of a method. orderId is the first
+     * payment's order; paypalCustomerId the PayPal customer the token will belong to, when known;
+     * networkRef the card's reference from that capture, for later recurring charges.
+     */
+    paypalVaultPending: v.optional(
+      v.object({ orderId: v.string(), paypalCustomerId: v.optional(v.string()), networkRef: v.optional(networkRef), since: v.number(), lastCheckAt: v.optional(v.number()) }),
+    ),
     callbacks: scheduleCallbacks,
     /** Passed to every charge's callbacks and the schedule's own. */
     context: v.optional(v.any()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
-    .index('by_status_nextChargeAt', ['status', 'nextChargeAt'])
+    .index('by_app_status_nextChargeAt', ['app', 'status', 'nextChargeAt'])
     .index('by_owner', ['app', 'owner.type', 'owner.id'])
     .index('by_ref', ['ref.type', 'ref.id'])
-    .index('by_paymentMethodId', ['paymentMethodId']),
+    .index('by_paymentMethodId', ['paymentMethodId'])
+    .index('by_app_paypalVaultCustomer', ['app', 'paypalVaultPending.paypalCustomerId']),
 
   /** One Stripe Customer per payer of the app (owner: e.g. { type: 'user', id }), for saved payment methods. */
   customers: defineTable({
@@ -288,6 +322,24 @@ export default defineSchema({
     .index('by_checkout', ['checkoutId'])
     .index('by_status', ['status', 'updatedAt'])
     .index('by_processorRefundId', ['processorRefundId']),
+
+  /**
+   * Disputes (chargebacks), one row each, so a payment with two is disputed until both end, and what a
+   * lost one took back is off what is left to refund. Kept forever, with their payments.
+   */
+  disputes: defineTable({
+    checkoutId: v.id('checkouts'),
+    processor,
+    disputeId: v.string(),
+    status: v.union(v.literal('open'), v.literal('won'), v.literal('lost')),
+    amountCents: v.optional(v.number()),
+    /** How it ended, in the processor's words. */
+    outcome: v.optional(v.string()),
+    openedAt: v.number(),
+    closedAt: v.optional(v.number()),
+  })
+    .index('by_disputeId', ['processor', 'disputeId'])
+    .index('by_checkout', ['checkoutId']),
 
   /** Webhook deliveries seen, so a repeat is answered at once. Kept 30 days. */
   events: defineTable({
