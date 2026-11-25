@@ -8,7 +8,7 @@ import type { FunctionHandle } from 'convex/server'
 import type { Doc, Id } from './_generated/dataModel.js'
 import { mutation, query, type MutationCtx, type QueryCtx } from './_generated/server.js'
 import { method, networkRef, payer, processor, ref, scheduleCallbacks, scheduleStatus } from './schema.js'
-import { errorText, openIssue } from './lib.js'
+import { errorText, findSavedMethod, openIssue } from './lib.js'
 import { METHOD_REMOVED, type DeclineKind } from '../core/declines.js'
 import { chargeTimeOf, firstChargeFrom, isAnchorDay, periodOf, retryTime, shiftPeriod } from '../core/schedule.js'
 
@@ -286,18 +286,8 @@ const chargePlan = v.object({
  */
 async function methodUsable(ctx: QueryCtx, paymentMethodId: string | undefined): Promise<boolean> {
   if (!paymentMethodId) return false
-  if (paymentMethodId.startsWith('paypal:')) {
-    const pp = await ctx.db
-      .query('paypalMethods')
-      .withIndex('by_paymentTokenId', (q) => q.eq('paymentTokenId', paymentMethodId.slice('paypal:'.length)))
-      .first()
-    return !pp || pp.removedAt === undefined
-  }
-  const pm = await ctx.db
-    .query('paymentMethods')
-    .withIndex('by_stripePaymentMethodId', (q) => q.eq('stripePaymentMethodId', paymentMethodId))
-    .first()
-  return !pm || pm.removedAt === undefined
+  const row = await findSavedMethod(ctx, paymentMethodId)
+  return !row || row.removedAt === undefined
 }
 
 /**
@@ -700,19 +690,8 @@ export const methodRemoved = mutation({
   args: { paymentMethodId: v.string(), reason: v.string(), now: v.number() },
   returns: v.number(),
   handler: async (ctx, { paymentMethodId, reason, now }) => {
-    if (paymentMethodId.startsWith('paypal:')) {
-      const pp = await ctx.db
-        .query('paypalMethods')
-        .withIndex('by_paymentTokenId', (q) => q.eq('paymentTokenId', paymentMethodId.slice('paypal:'.length)))
-        .first()
-      if (pp && pp.removedAt === undefined) await ctx.db.patch(pp._id, { removedAt: now })
-    } else {
-      const pm = await ctx.db
-        .query('paymentMethods')
-        .withIndex('by_stripePaymentMethodId', (q) => q.eq('stripePaymentMethodId', paymentMethodId))
-        .first()
-      if (pm && pm.removedAt === undefined) await ctx.db.patch(pm._id, { removedAt: now })
-    }
+    const method = await findSavedMethod(ctx, paymentMethodId)
+    if (method && method.removedAt === undefined) await ctx.db.patch(method._id, { removedAt: now })
     const rows = await ctx.db
       .query('schedules')
       .withIndex('by_paymentMethodId', (q) => q.eq('paymentMethodId', paymentMethodId))

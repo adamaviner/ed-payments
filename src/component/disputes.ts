@@ -5,6 +5,7 @@ import { v } from 'convex/values'
 import { mutation } from './_generated/server.js'
 import { notifyHost, openIssue, resolveIssue } from './lib.js'
 import { processor } from './schema.js'
+import { dollars } from '../core/money.js'
 
 export const record = mutation({
   args: {
@@ -53,7 +54,7 @@ export const record = mutation({
       .collect()
     const disputed = all.some((d) => d.status === 'open')
     await ctx.db.patch(c._id, { disputed })
-    const amount = a.amountCents === undefined ? '' : ` for $${(a.amountCents / 100).toFixed(2)}`
+    const amount = a.amountCents === undefined ? '' : ` for ${dollars(a.amountCents)}`
     if (a.status === 'opened') {
       await openIssue(ctx, {
         kind: 'dispute',

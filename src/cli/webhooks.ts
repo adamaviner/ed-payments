@@ -2,7 +2,7 @@
 // library handles, so nobody copies event lists by hand. Run by `npx ed-payments webhooks`; written as
 // functions taking fetch so the tests run it against the fake processors.
 import { PAYPAL_EVENTS, PAYPAL_LIVE_API, paypal, paypalToken, type PaypalKeys } from '../core/paypal.js'
-import { STRIPE_API_VERSION, STRIPE_EVENTS, stripe, type StripeWebhookEndpoint } from '../core/stripe.js'
+import { STRIPE_API_VERSION, STRIPE_EVENTS, allPages, stripe } from '../core/stripe.js'
 import type { Fetch } from '../core/types.js'
 
 export interface WebhookResult {
@@ -31,14 +31,7 @@ export async function stripeWebhook(secretKey: string, r: Run): Promise<WebhookR
   const keys = { secretKey }
   const o = { fetch: r.fetch }
   const events = [...new Set([...STRIPE_EVENTS, ...(r.extraEvents ?? [])])]
-  const all: StripeWebhookEndpoint[] = []
-  let after: string | undefined
-  for (let i = 0; i < 20; i++) {
-    const page = await stripe.listWebhookEndpoints(keys, after, o)
-    all.push(...page.data)
-    if (!page.has_more || !page.data.length) break
-    after = page.data[page.data.length - 1].id
-  }
+  const all = await allPages((after) => stripe.listWebhookEndpoints(keys, after, o))
   const found = all.find((w) => w.url === r.url)
   if (r.remove) {
     if (!found) return { action: 'absent', id: null, notes: [] }

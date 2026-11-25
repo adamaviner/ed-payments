@@ -1,8 +1,9 @@
 // The nightly comparison with the processors. Each payment is looked at from both sides; every
 // difference opens an issue (one per payment and kind) and a difference that has gone away resolves
 // it. Refunds found at the processor that the ledger lacks are recorded on the way (a missed webhook heals).
-import { orderCapture, moneyCents, paypal, searchTransactions, type PaypalOrder } from '../core/paypal.js'
-import { intentState, paymentIntentId, sessionState, stripe, type StripePaymentIntent, type StripeRefund, type StripeSession } from '../core/stripe.js'
+import { dollars as inDollars } from '../core/money.js'
+import { getOrderOrNull, orderCapture, moneyCents, searchTransactions, type PaypalOrder } from '../core/paypal.js'
+import { allPages, intentState, paymentIntentId, sessionState, stripe } from '../core/stripe.js'
 import { ProcessorError, parseTag, type Processor } from '../core/types.js'
 import type { CheckoutView, Payments, RunActionCtx } from './index.js'
 import { errorText, paypalRefundState, stripeRefundState } from './util.js'
@@ -25,7 +26,7 @@ export interface ReconcileResult {
 type Checkout = NonNullable<CheckoutView>
 type Finding = { kind: 'missing_here' | 'missing_there' | 'amount_differs' | 'status_differs'; detail: string }
 
-const dollars = (cents: number | null | undefined) => `$${((cents ?? 0) / 100).toFixed(2)}`
+const dollars = (cents: number | null | undefined) => inDollars(cents ?? 0)
 
 /**
  * What the ledger says went back through the processor: refunds with a processor id that are done.
@@ -79,14 +80,7 @@ async function stripeSide(p: Payments, ctx: RunActionCtx, since: number, ours: C
   const keys = p.stripeKeys()
   const o = { fetch: p.fetch }
   const sinceSec = Math.floor(since / 1000)
-  const sessions: StripeSession[] = []
-  let after: string | undefined
-  for (let i = 0; i < MAX_PAGES; i++) {
-    const page = await stripe.listSessions(keys, sinceSec, after, o)
-    sessions.push(...page.data.filter((s) => s.metadata?.app === p.app))
-    if (!page.has_more || !page.data.length) break
-    after = page.data[page.data.length - 1].id
-  }
+  const sessions = (await allPages((after) => stripe.listSessions(keys, sinceSec, after, o), MAX_PAGES)).filter((s) => s.metadata?.app === p.app)
   const seen = new Set<string>()
   for (const s of sessions) {
     out.checked++
@@ -123,14 +117,7 @@ async function stripeSide(p: Payments, ctx: RunActionCtx, since: number, ours: C
  */
 async function stripeIntents(p: Payments, ctx: RunActionCtx, sinceSec: number, out: ReconcileResult, sync: Sync, seen: Set<string>) {
   const keys = p.stripeKeys()
-  const intents: StripePaymentIntent[] = []
-  let after: string | undefined
-  for (let i = 0; i < MAX_PAGES; i++) {
-    const page = await stripe.listPaymentIntents(keys, sinceSec, after, { fetch: p.fetch })
-    intents.push(...page.data.filter((pi) => pi.metadata?.app === p.app && pi.metadata.checkoutId))
-    if (!page.has_more || !page.data.length) break
-    after = page.data[page.data.length - 1].id
-  }
+  const intents = (await allPages((after) => stripe.listPaymentIntents(keys, sinceSec, after, { fetch: p.fetch }), MAX_PAGES)).filter((pi) => pi.metadata?.app === p.app && pi.metadata.checkoutId)
   for (const pi of intents) {
     const c = await ctx.runQuery(p.component.checkouts.get, { id: pi.metadata?.checkoutId ?? '' })
     if (c?.kind === 'hosted') continue
@@ -153,14 +140,7 @@ async function stripeIntents(p: Payments, ctx: RunActionCtx, sinceSec: number, o
 async function stripeRefunds(p: Payments, ctx: RunActionCtx, sinceSec: number, out: ReconcileResult, sync: Sync) {
   const keys = p.stripeKeys()
   const o = { fetch: p.fetch }
-  const refunds: StripeRefund[] = []
-  let after: string | undefined
-  for (let i = 0; i < MAX_PAGES; i++) {
-    const page = await stripe.listRefunds(keys, sinceSec, after, o)
-    refunds.push(...page.data)
-    if (!page.has_more || !page.data.length) break
-    after = page.data[page.data.length - 1].id
-  }
+  const refunds = await allPages((after) => stripe.listRefunds(keys, sinceSec, after, o), MAX_PAGES)
   const touched = new Set<string>()
   for (const r of refunds) {
     if (!r.payment_intent) continue
@@ -204,14 +184,7 @@ async function paypalSide(
     if (c.status === 'abandoned' || c.status === 'pending' || c.status === 'created') continue
     out.checked++
     await guard(`PayPal order ${c.processorCheckoutId}`, async () => {
-      const order = await p.withPaypal(ctx, async (call): Promise<PaypalOrder | null> => {
-        try {
-          return await paypal.getOrder(call, c.processorCheckoutId ?? '')
-        } catch (err) {
-          if (err instanceof ProcessorError && err.status === 404) return null
-          throw err
-        }
-      })
+      const order = await p.withPaypal(ctx, (call) => getOrderOrNull(call, c.processorCheckoutId ?? ''))
       // Refunds the order lists that the ledger lacks (a lost webhook) are recorded before comparing.
       out.refundsRecorded += order ? await recordPaypalRefunds(p, ctx, order) : 0
       await sync('paypal', c.paymentRef ?? c.processorCheckoutId ?? c.id, c, paypalFindings(c, order, await processorRefunded(p, ctx, c)))

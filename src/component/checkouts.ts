@@ -5,20 +5,13 @@ import { ConvexError, v, type ObjectType } from 'convex/values'
 import { paginationOptsValidator, paginationResultValidator } from 'convex/server'
 import type { Doc, Id } from './_generated/dataModel.js'
 import { mutation, query, type MutationCtx, type QueryCtx } from './_generated/server.js'
-import { callHost, callbackBase, checkoutView, notifyHost, openIssue, resolveIssue, view } from './lib.js'
+import { callHost, callbackBase, checkoutView, findSavedMethod, loadCheckout, notifyHost, openIssue, resolveIssue, view } from './lib.js'
+import { dollars } from '../core/money.js'
 import { callbacks, checkoutKind, checkoutStatus, declineKind, method, payer, processor, ref } from './schema.js'
 import { giveBackOne, limitsArg, takeAll } from './limits.js'
 import { noteScheduleCheckout, scheduleAbandoned, scheduleFailed, schedulePaid, scheduleProcessing } from './schedules.js'
 
 const already = v.object({ outcome: v.literal('already_handled'), status: checkoutStatus })
-const dollarsOf = (cents: number) => `$${(cents / 100).toFixed(2)}`
-
-async function load(ctx: MutationCtx, id: string): Promise<Doc<'checkouts'>> {
-  const nid = ctx.db.normalizeId('checkouts', id)
-  const c = nid ? await ctx.db.get(nid) : null
-  if (!c) throw new ConvexError(`No checkout ${id}.`)
-  return c
-}
 
 const createArgs = {
   app: v.string(),
@@ -116,7 +109,7 @@ export const attach = mutation({
   args: { id: v.string(), processorCheckoutId: v.string() },
   returns: v.union(v.object({ outcome: v.literal('attached') }), already),
   handler: async (ctx, { id, processorCheckoutId }) => {
-    const c = await load(ctx, id)
+    const c = await loadCheckout(ctx, id)
     if (c.status !== 'created') return { outcome: 'already_handled' as const, status: c.status }
     await ctx.db.patch(c._id, { status: 'pending', processorCheckoutId })
     return { outcome: 'attached' as const }
@@ -128,7 +121,7 @@ export const failStart = mutation({
   args: { id: v.string(), error: v.string(), now: v.number() },
   returns: v.null(),
   handler: async (ctx, { id, error, now }) => {
-    const c = await load(ctx, id)
+    const c = await loadCheckout(ctx, id)
     if (c.status !== 'created') return null
     await ctx.db.patch(c._id, { status: 'failed', lastError: error, settledAt: now })
     await scheduleAbandoned(ctx, c, now)
@@ -141,7 +134,7 @@ export const markProcessing = mutation({
   args: { id: v.string(), paymentRef: v.optional(v.string()), method: v.optional(method), now: v.optional(v.number()) },
   returns: v.union(v.object({ outcome: v.literal('processing') }), already),
   handler: async (ctx, { id, paymentRef, method, now }) => {
-    const c = await load(ctx, id)
+    const c = await loadCheckout(ctx, id)
     // Like settlePaid, money on its way to a checkout that expired or failed is still money taken.
     if (!SETTLEABLE.has(c.status) || c.status === 'processing') return { outcome: 'already_handled' as const, status: c.status }
     const patch = { status: 'processing' as const, paymentRef: paymentRef ?? c.paymentRef, method: method ?? c.method, lastError: undefined }
@@ -178,7 +171,7 @@ export const settlePaid = mutation({
   },
   returns: v.union(v.object({ outcome: v.literal('paid') }), v.object({ outcome: v.literal('refund_needed'), reason: v.string(), refundId: v.string() }), already),
   handler: async (ctx, { id, paymentRef, paidCents, processorFeeCents, processorCheckoutId, method, now }) => {
-    const loaded = await load(ctx, id)
+    const loaded = await loadCheckout(ctx, id)
     if (!SETTLEABLE.has(loaded.status)) return { outcome: 'already_handled' as const, status: loaded.status }
     const c = { ...loaded, method: method ?? loaded.method }
     await ctx.db.patch(c._id, {
@@ -197,7 +190,7 @@ export const settlePaid = mutation({
       ? 'The buyer cancelled this payment before it arrived.'
       : paidCents === c.amountCents
         ? null
-        : `The processor took ${dollarsOf(paidCents)}, not the ${dollarsOf(c.amountCents)} asked.`
+        : `The processor took ${dollars(paidCents)}, not the ${dollars(c.amountCents)} asked.`
     // A charge and its on-session retries (and a schedule's period) pay for one thing: the second to arrive is owed back.
     const duplicate = !refusal && (await paidElsewhere(ctx, c))
     if (duplicate) refusal = 'This was already paid by another payment.'
@@ -241,7 +234,7 @@ export const settleFailed = mutation({
   },
   returns: v.union(v.object({ outcome: v.literal('failed') }), already),
   handler: async (ctx, { id, reason, declined, declineCode, declineKind, processorCheckoutId, now }) => {
-    const c = await load(ctx, id)
+    const c = await loadCheckout(ctx, id)
     if (c.status !== 'created' && c.status !== 'pending' && c.status !== 'processing') return { outcome: 'already_handled' as const, status: c.status }
     const wasProcessing = c.status === 'processing'
     const patch = { status: 'failed' as const, lastError: reason, settledAt: now, processorCheckoutId: c.processorCheckoutId ?? processorCheckoutId, declineCode, declineKind, parkedAt: undefined }
@@ -262,7 +255,7 @@ export const noteChargeAttempt = mutation({
   args: { id: v.string(), error: v.string(), processorCheckoutId: v.optional(v.string()), giveUp: v.boolean(), max: v.number(), now: v.number() },
   returns: v.number(),
   handler: async (ctx, { id, error, processorCheckoutId, giveUp, max, now }) => {
-    const c = await load(ctx, id)
+    const c = await loadCheckout(ctx, id)
     // Settled meanwhile (the webhook won the race): nothing is unknown any more.
     if (c.status !== 'created' && c.status !== 'pending') return c.chargeAttempts ?? 0
     // Handed to a person: counted as the last try, so the sweep leaves it to them.
@@ -283,7 +276,7 @@ export const noteChargeAttempt = mutation({
         checkoutId: c._id,
         processor: c.processor,
         paymentRef: ref,
-        detail: `The charge of ${dollarsOf(c.amountCents)} for ${c.description} may or may not have gone through (${error}). Retry it (${c.processor === 'paypal' ? 'PayPal refuses a second payment for the same charge' : 'Stripe replays it rather than charging twice'}) or give up on it.`,
+        detail: `The charge of ${dollars(c.amountCents)} for ${c.description} may or may not have gone through (${error}). Retry it (${c.processor === 'paypal' ? 'PayPal refuses a second payment for the same charge' : 'Stripe replays it rather than charging twice'}) or give up on it.`,
         now,
       })
     }
@@ -299,7 +292,7 @@ export const reopenCharge = mutation({
   args: { id: v.string(), now: v.number() },
   returns: v.null(),
   handler: async (ctx, { id, now }) => {
-    const c = await load(ctx, id)
+    const c = await loadCheckout(ctx, id)
     if (c.kind !== 'offSession') throw new ConvexError('Only a saved-method charge can be retried.')
     if (c.status !== 'created' && c.status !== 'pending') throw new ConvexError(`This charge is ${c.status}; there is nothing to retry.`)
     if (c.parkedAt !== undefined) await ctx.db.patch(c._id, { parkedAt: undefined })
@@ -317,7 +310,7 @@ export const noteError = mutation({
   args: { id: v.string(), error: v.string(), paypalDeclinedAt: v.optional(v.number()) },
   returns: v.null(),
   handler: async (ctx, { id, error, paypalDeclinedAt }) => {
-    const c = await load(ctx, id)
+    const c = await loadCheckout(ctx, id)
     if (c.status === 'pending' || c.status === 'created') await ctx.db.patch(c._id, { lastError: error, ...(paypalDeclinedAt === undefined ? {} : { paypalDeclinedAt }) })
     return null
   },
@@ -328,7 +321,7 @@ export const abandon = mutation({
   args: { id: v.string(), now: v.number() },
   returns: v.union(v.object({ outcome: v.literal('abandoned') }), already),
   handler: async (ctx, { id, now }) => {
-    const c = await load(ctx, id)
+    const c = await loadCheckout(ctx, id)
     if (c.status !== 'created' && c.status !== 'pending') return { outcome: 'already_handled' as const, status: c.status }
     await ctx.db.patch(c._id, { status: 'abandoned', settledAt: now })
     await scheduleAbandoned(ctx, c, now)
@@ -352,7 +345,7 @@ export const cancel = mutation({
   args: { id: v.string(), giveBack: v.optional(v.object({ key: v.string(), windowMs: v.number() })), checked: v.optional(v.boolean()), now: v.number() },
   returns: v.union(v.object({ outcome: v.literal('abandoned') }), v.object({ outcome: v.literal('being_paid') }), v.object({ outcome: v.literal('check_processor') }), already),
   handler: async (ctx, { id, giveBack, checked, now }) => {
-    const c = await load(ctx, id)
+    const c = await loadCheckout(ctx, id)
     if (c.status !== 'created' && c.status !== 'pending') return { outcome: 'already_handled' as const, status: c.status }
     if (c.captureClaimedAt !== undefined && now - c.captureClaimedAt < CAPTURE_CLAIM_MS) return { outcome: 'being_paid' as const }
     if (c.captureClaimedAt !== undefined && !checked) return { outcome: 'check_processor' as const }
@@ -371,7 +364,7 @@ export const claimCapture = mutation({
   args: { id: v.string(), now: v.number() },
   returns: v.union(v.object({ claimed: v.literal(true) }), v.object({ claimed: v.literal(false), status: checkoutStatus })),
   handler: async (ctx, { id, now }) => {
-    const c = await load(ctx, id)
+    const c = await loadCheckout(ctx, id)
     const live = c.captureClaimedAt !== undefined && now - c.captureClaimedAt < CAPTURE_CLAIM_MS
     if ((c.status !== 'created' && c.status !== 'pending') || live) return { claimed: false as const, status: c.status }
     await ctx.db.patch(c._id, { captureClaimedAt: now })
@@ -384,7 +377,7 @@ export const releaseCapture = mutation({
   args: { id: v.string() },
   returns: v.null(),
   handler: async (ctx, { id }) => {
-    const c = await load(ctx, id)
+    const c = await loadCheckout(ctx, id)
     if (c.captureClaimedAt !== undefined) await ctx.db.patch(c._id, { captureClaimedAt: undefined })
     return null
   },
@@ -395,7 +388,7 @@ export const recordFee = mutation({
   args: { id: v.string(), processorFeeCents: v.number() },
   returns: v.null(),
   handler: async (ctx, { id, processorFeeCents }) => {
-    const c = await load(ctx, id)
+    const c = await loadCheckout(ctx, id)
     if (c.processorFeeCents !== processorFeeCents) await ctx.db.patch(c._id, { processorFeeCents })
     return null
   },
@@ -406,7 +399,7 @@ export const noteIssue = mutation({
   args: { id: v.string(), kind: v.union(v.literal('status_differs'), v.literal('amount_differs')), detail: v.string(), now: v.number() },
   returns: v.null(),
   handler: async (ctx, { id, kind, detail, now }) => {
-    const c = await load(ctx, id)
+    const c = await loadCheckout(ctx, id)
     await openIssue(ctx, { kind, key: c.paymentRef ?? c.processorCheckoutId ?? c._id, checkoutId: c._id, processor: c.processor, paymentRef: c.paymentRef, detail, now })
     return null
   },
@@ -439,20 +432,7 @@ async function periodPaid(ctx: QueryCtx, scheduleId: Id<'schedules'>, period: st
 }
 
 async function markDeclined(ctx: MutationCtx, paymentMethodId: string, reason: string, now: number) {
-  // A PayPal method's id is `paypal:<payment token id>` (core/paypal.ts paypalMethodId).
-  if (paymentMethodId.startsWith('paypal:')) {
-    const pp = await ctx.db
-      .query('paypalMethods')
-      .withIndex('by_paymentTokenId', (q) => q.eq('paymentTokenId', paymentMethodId.slice('paypal:'.length)))
-      .first()
-    if (pp && pp.declinedAt === undefined) await ctx.db.patch(pp._id, { declinedAt: now, declineReason: reason })
-    return
-  }
-  const stripePaymentMethodId = paymentMethodId
-  const row = await ctx.db
-    .query('paymentMethods')
-    .withIndex('by_stripePaymentMethodId', (q) => q.eq('stripePaymentMethodId', stripePaymentMethodId))
-    .first()
+  const row = await findSavedMethod(ctx, paymentMethodId)
   if (row && row.declinedAt === undefined) await ctx.db.patch(row._id, { declinedAt: now, declineReason: reason })
 }
 

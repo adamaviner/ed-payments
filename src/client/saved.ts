@@ -6,12 +6,12 @@
 import type { Scheduler } from 'convex/server'
 import { ConvexError } from 'convex/values'
 import { customerOf, intentState, savedMethodKind, savedMethodLabel, stripe, stripeFee, stripeMethodType, type StripePaymentIntent, type StripePaymentMethod } from '../core/stripe.js'
-import { paypal, paypalTokenOf } from '../core/paypal.js'
+import { getOrderOrNull, paypal, paypalTokenOf } from '../core/paypal.js'
 import { ProcessorError, tagFor, type Payer, type Processor, type Ref, type SavedMethodKind } from '../core/types.js'
 import { declineCodeOf, declineKind, type DeclineInfo } from '../core/declines.js'
 import type { Checkout, Payments, RunActionCtx } from './index.js'
 import { chargePaypalNow, paypalMethods, removePaypalMethod, verifyPaypalOwner } from './paypalVault.js'
-import { errorText } from './util.js'
+import { errorText, withParam } from './util.js'
 
 export interface SavedMethod {
   /** Stripe's `pm_…`, or `paypal:<payment token id>` for a method in PayPal's vault. */
@@ -334,12 +334,7 @@ async function retryable(p: Payments, ctx: RunActionCtx, checkoutId: string, wan
     const abandon = () => ctx.runMutation(p.component.checkouts.abandon, { id: r.id, now: Date.now() })
     if (r.processor === 'paypal') {
       const orderId = r.processorCheckoutId
-      const order = await p
-        .withPaypal(ctx, (call) => paypal.getOrder(call, orderId))
-        .catch((err: unknown) => {
-          if (err instanceof ProcessorError && err.status === 404) return null
-          throw err
-        })
+      const order = await p.withPaypal(ctx, (call) => getOrderOrNull(call, orderId))
       if (order?.status === 'COMPLETED') {
         await p.settlePaypalOrder(ctx, r.id, order)
         throw new ConvexError('This payment is already being processed.')
@@ -424,7 +419,7 @@ export async function retryWithPaypal(
 ): Promise<{ checkoutId: string; embedded: { processor: 'paypal'; orderId: string; clientId: string; returnUrl: string } }> {
   const { clientId } = p.paypalKeys()
   const returnUrl = p.url(a.returnPath)
-  const withToken = (orderId: string) => `${returnUrl}${returnUrl.includes('?') ? '&' : '?'}token=${encodeURIComponent(orderId)}`
+  const withToken = (orderId: string) => withParam(returnUrl, 'token', orderId)
   const { original, reuse } = await retryable(p, ctx, a.checkoutId, 'paypal')
   if (reuse && 'orderId' in reuse) return { checkoutId: reuse.checkoutId, embedded: { processor: 'paypal', orderId: reuse.orderId, clientId, returnUrl: withToken(reuse.orderId) } }
   const id = await createRetry(p, ctx, original, 'paypal', a.expiresAt, a.limitKey)

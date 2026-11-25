@@ -65,7 +65,7 @@ import {
 } from './saved.js'
 import { savePaypalMethod, setupPaypalMethod } from './paypalVault.js'
 import { runSchedules, startSchedule, startScheduleCheckout, updateSchedule, type ScheduleView, type StartScheduleArgs, type StartScheduleCheckoutArgs } from './schedules.js'
-import { errorText, paypalRefundState, stripeRefundState, type RefundState } from './util.js'
+import { cleanPayer, errorText, paypalRefundState, stripeRefundState, withParam, type RefundState } from './util.js'
 import {
   callbackArgs,
   paidReturns,
@@ -1222,15 +1222,7 @@ export class Payments<C extends GenericValidator = GenericValidator> {
     if (!c.processorCheckoutId) return expired ? await abandon() : null
     if (c.processor === 'paypal') {
       const id = c.processorCheckoutId
-      const order = await this.withPaypal(ctx, async (call) => {
-        try {
-          return await paypal.getOrder(call, id)
-        } catch (err) {
-          // PayPal forgets orders nobody approved after a while.
-          if (err instanceof ProcessorError && err.status === 404) return null
-          throw err
-        }
-      })
+      const order = await this.withPaypal(ctx, (call) => getOrderOrNull(call, id))
       if (order?.status === 'APPROVED') {
         let outcome: 'declined' | 'failed' | undefined
         try {
@@ -1389,11 +1381,6 @@ const defaultSiteUrl = () => {
   if (!url) throw new Error('SITE_URL isn’t set on this deployment (or pass siteUrl to definePayments).')
   return url
 }
-
-const cleanPayer = (p: Payer): Payer => ({ email: p.email.trim(), ...(p.name?.trim() ? { name: p.name.trim() } : {}) })
-
-/** `url` with one more query parameter. Not encoded: Stripe's {CHECKOUT_SESSION_ID} must reach Stripe as it is, and PayPal's ids are letters and digits. */
-const withParam = (url: string, name: string, value: string) => `${url}${url.includes('?') ? '&' : '?'}${name}=${value}`
 
 /** The idempotency key of a refund's send: the same for every repeat of one attempt (component refunds.begin makes the same). */
 export const refundKey = (refundId: string, attempts: number) => (attempts ? `refund-${refundId}-${attempts}` : `refund-${refundId}`)

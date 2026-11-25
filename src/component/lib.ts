@@ -3,7 +3,7 @@
 import { ConvexError, v, type Infer } from 'convex/values'
 import type { FunctionHandle } from 'convex/server'
 import type { Doc, Id } from './_generated/dataModel.js'
-import type { MutationCtx } from './_generated/server.js'
+import type { MutationCtx, QueryCtx } from './_generated/server.js'
 import { checkoutKind, checkoutStatus, declineKind, hostData, issueKind, method, payer, processor, ref, refundOrigin, refundStatus } from './schema.js'
 
 export const checkoutView = v.object({
@@ -195,6 +195,29 @@ export async function notifyHost(ctx: MutationCtx, c: Doc<'checkouts'>, name: 'o
   if (!res.ok) {
     await openIssue(ctx, { kind: 'callback_failed', key: `${c._id}:${name}`, checkoutId: c._id, processor: c.processor, paymentRef: c.paymentRef, detail: `${name} failed: ${res.error}`, now })
   }
+}
+
+/** A checkout by the id a caller gave, or a ConvexError saying there is none. */
+export async function loadCheckout(ctx: QueryCtx, id: string): Promise<Doc<'checkouts'>> {
+  const nid = ctx.db.normalizeId('checkouts', id)
+  const c = nid ? await ctx.db.get(nid) : null
+  if (!c) throw new ConvexError(`No checkout ${id}.`)
+  return c
+}
+
+/** The library's row for a saved method: Stripe's `pm_…`, or PayPal's `paypal:<payment token id>` (core/paypal.ts paypalMethodId). */
+export async function findSavedMethod(ctx: QueryCtx, paymentMethodId: string): Promise<Doc<'paymentMethods'> | Doc<'paypalMethods'> | null> {
+  if (paymentMethodId.startsWith('paypal:')) {
+    const tokenId = paymentMethodId.slice('paypal:'.length)
+    return await ctx.db
+      .query('paypalMethods')
+      .withIndex('by_paymentTokenId', (q) => q.eq('paymentTokenId', tokenId))
+      .first()
+  }
+  return await ctx.db
+    .query('paymentMethods')
+    .withIndex('by_stripePaymentMethodId', (q) => q.eq('stripePaymentMethodId', paymentMethodId))
+    .first()
 }
 
 /** Refunds in progress or done, which the remaining amount is reduced by. */

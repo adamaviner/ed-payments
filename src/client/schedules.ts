@@ -10,7 +10,7 @@ import { DEFAULT_CHARGE_HOUR_UTC, DEFAULT_RETRY_DAYS, anchorDayOf, isAnchorDay }
 import { isMethodFor, type Method, type Payer, type Processor, type Ref } from '../core/types.js'
 import type { Payments, RunActionCtx, RunMutationCtx, RunQueryCtx, SchedulerCtx, StartUi, StartedEmbedded, StartedRedirect } from './index.js'
 import { ensureCustomer } from './saved.js'
-import { errorText } from './util.js'
+import { cleanPayer, errorText } from './util.js'
 
 export type ScheduleView = NonNullable<Awaited<ReturnType<Payments['getSchedule']>>>
 
@@ -91,7 +91,7 @@ export async function startSchedule<T>(p: Payments, ctx: SchedulerCtx, a: StartS
     ref: a.ref,
     purpose: a.purpose,
     description: a.description,
-    payer: { email: a.payer.email.trim(), ...(a.payer.name?.trim() ? { name: a.payer.name.trim() } : {}) },
+    payer: cleanPayer(a.payer),
     processor: target.processor,
     method: target.method,
     paymentMethodId: a.paymentMethodId,
@@ -129,7 +129,7 @@ export async function startScheduleCheckout<T>(p: Payments, ctx: RunActionCtx, a
     ref: a.ref,
     purpose: a.purpose,
     description: a.description,
-    payer: { email: a.payer.email.trim(), ...(a.payer.name?.trim() ? { name: a.payer.name.trim() } : {}) },
+    payer: cleanPayer(a.payer),
     processor: a.processor,
     method: a.method,
     amountCents: a.amountCents,
