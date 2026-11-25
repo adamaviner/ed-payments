@@ -723,6 +723,8 @@ the webhooks registered on the live deployment:
   `on.scheduleFailed` and `on.scheduleChanged` are wired.** Before, it added it for every app (the worker
   reference always seems to have `schedules`), so an app without schedules had to export `schedules` from
   `payments.worker()` or its deploys failed. That export can go now; keeping it does no harm.
+- **A `v.id()` in the context may have capital letters** (as ids made by convex-test do, ending in the table
+  name). v0.9.0 refused them, so a host's tests failed on tables named in mixed case; production ids were fine.
 
 ### v0.9.0 (audit fixes)
 
