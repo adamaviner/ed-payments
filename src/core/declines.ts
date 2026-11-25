@@ -80,8 +80,10 @@ export function declineCodeOf(d: DeclineInfo): string | undefined {
 export const METHOD_REMOVED = 'METHOD_REMOVED'
 
 /**
- * The code the library records when a schedule's first payment was taken but PayPal never finished
- * saving the method it paid with (vault APPROVED, no token within three days). Nothing was charged
- * and nothing was refused: the app asks for a payment method, not about a failed payment.
+ * The code the library records when the method to charge isn't saved: a schedule's first payment was
+ * taken but PayPal never finished saving the method it paid with (vault APPROVED, no token within
+ * three days), or chargeSaved was given a method that isn't saved for the payer (another owner's, or
+ * an owner with no saved method here). Nothing was charged and nothing was refused: the app asks for
+ * a payment method, not about a failed payment.
  */
 export const METHOD_NOT_SAVED = 'METHOD_NOT_SAVED'

@@ -29,6 +29,7 @@ import type { ComponentApi } from '../component/_generated/component.js'
 import { cheaperCardProcessor, DEFAULT_FEE_RATES, feeRates, feeSchedule, type CardProcessorChoice, type FeeRates, type FeeRatesInput, type FeeSchedule } from '../core/fees.js'
 import { PAYPAL_LIVE_API, PAYPAL_SANDBOX_API, paypalToken, paypalTokenOf, type PaypalKeys, type PaypalOrder } from '../core/paypal.js'
 import type { StripeKeys, StripeSession } from '../core/stripe.js'
+import { METHOD_NOT_SAVED } from '../core/declines.js'
 import { accountFingerprint, decryptToken, encryptToken } from '../core/tokenCrypt.js'
 import { ProcessorError, type Fetch, type Method, type Payer, type Processor, type Ref, type SavedMethodKind } from '../core/types.js'
 import { adminApi, publicApi, worker, type AdminApiOptions } from './api.js'
@@ -264,6 +265,9 @@ export interface ChargeArgs<T> {
   /** The Stripe Customer, when the library has none recorded for the owner (adopting one made before it). */
   stripeCustomerId?: string
 }
+
+/** Where an off-session charge of a saved method goes. */
+type ChargeTarget = { processor: Processor; method: Method; stripeCustomerId?: string }
 
 export type CheckoutView = FunctionReturnType<ComponentApi['checkouts']['get']>
 export type Checkout = NonNullable<CheckoutView>
@@ -553,6 +557,11 @@ export class Payments<C extends GenericValidator = GenericValidator> {
    * paid or failed for a bank account; failed (declined: true) when the bank says no. A charge whose
    * outcome is unknown is tried again a few times under the same key, then left for a person as a
    * charge_unknown issue. Same idempotencyKey, same checkout. Returns the checkout id.
+   *
+   * A method that isn't saved for the payer (another owner's, or an owner with nothing saved here)
+   * isn't thrown: the checkout is recorded failed at once (declineCode METHOD_NOT_SAVED, declined
+   * false, nothing charged) and failed runs in that transaction, so the payer can pay with
+   * retryOnSession / retryWithPaypal. A bad amount, key or context still throws.
    */
   async chargeSaved(ctx: SchedulerCtx, a: ChargeArgs<Infer<C>>): Promise<string> {
     return await this.chargeOffSession(ctx, a)
@@ -569,7 +578,11 @@ export class Payments<C extends GenericValidator = GenericValidator> {
         throw new ConvexError('That idempotency key was already used for a different charge (another amount, payment method or thing paid for).')
       return existing.id
     }
-    const target = await this.chargeTarget(ctx, a)
+    const target = await this.savedTarget(ctx, a)
+    // A schedule checks its method when it starts or changes; there a method not saved stays a refusal.
+    if ('notSaved' in target && schedule) throw new ConvexError(target.notSaved)
+    // Recorded as a failed charge rather than thrown, so the app's failed path runs and the payer can pay on its page (retryOnSession / retryWithPaypal).
+    const failed = 'notSaved' in target ? { reason: target.notSaved, declineCode: METHOD_NOT_SAVED } : undefined
     const now = Date.now()
     const site = this.url('/')
     const made = await ctx.runMutation(this.component.checkouts.createCharge, {
@@ -592,24 +605,33 @@ export class Payments<C extends GenericValidator = GenericValidator> {
       paymentMethodId: a.paymentMethodId,
       chargeKey: `${this.app}:${a.idempotencyKey}`,
       ...(schedule ?? {}),
+      failed,
       now,
     })
     // Made by a call racing this one: that call queued the charge.
-    if (made.created) await ctx.scheduler.runAfter(0, this.wiring.worker.charge, { checkoutId: made.id })
+    if (made.created && !failed) await ctx.scheduler.runAfter(0, this.wiring.worker.charge, { checkoutId: made.id })
     return made.id
   }
 
   /** @internal Which processor charges a saved method: PayPal's must be the owner's, recorded here; Stripe's need the owner's Customer. */
-  async chargeTarget(ctx: RunQueryCtx, a: { owner: Ref; paymentMethodId: string; stripeCustomerId?: string }): Promise<{ processor: Processor; method: Method; stripeCustomerId?: string }> {
+  async chargeTarget(ctx: RunQueryCtx, a: { owner: Ref; paymentMethodId: string; stripeCustomerId?: string }): Promise<ChargeTarget> {
+    const target = await this.savedTarget(ctx, a)
+    if ('notSaved' in target) throw new ConvexError(target.notSaved)
+    return target
+  }
+
+  /** chargeTarget, saying why when the method isn't saved for the owner (with the processor it would have been). */
+  private async savedTarget(ctx: RunQueryCtx, a: { owner: Ref; paymentMethodId: string; stripeCustomerId?: string }): Promise<ChargeTarget | (ChargeTarget & { notSaved: string })> {
     const tokenId = paypalTokenOf(a.paymentMethodId)
     if (tokenId) {
       const found = await ctx.runQuery(this.component.customers.paypalMethod, { paymentTokenId: tokenId })
-      if (!found || found.app !== this.app || found.owner.type !== a.owner.type || found.owner.id !== a.owner.id) throw new ConvexError('That payment method isn’t saved for this payer.')
+      if (!found || found.app !== this.app || found.owner.type !== a.owner.type || found.owner.id !== a.owner.id)
+        return { processor: 'paypal', method: 'card', notSaved: 'That payment method isn’t saved for this payer.' }
       return { processor: 'paypal', method: found.method.kind }
     }
     const customer = await ctx.runQuery(this.component.customers.byOwner, { app: this.app, owner: a.owner })
     const stripeCustomerId = customer?.stripeCustomerId ?? a.stripeCustomerId
-    if (!stripeCustomerId) throw new ConvexError('This payer has no saved payment method here.')
+    if (!stripeCustomerId) return { processor: 'stripe', method: 'card', notSaved: 'This payer has no saved payment method here.' }
     const method = await ctx.runQuery(this.component.customers.method, { stripePaymentMethodId: a.paymentMethodId })
     return { processor: 'stripe', method: method?.kind ?? 'card', stripeCustomerId }
   }

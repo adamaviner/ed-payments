@@ -47,7 +47,7 @@ export function callbackArgs<C extends GenericValidator>(context: C) {
       reason: v.string(),
       declined: v.boolean(),
       wasProcessing: v.boolean(),
-      /** The processor's code for the refusal (insufficient_funds, lost_card, INSTRUMENT_DECLINED...), when it gave one. */
+      /** The processor's code for the refusal (insufficient_funds, lost_card, INSTRUMENT_DECLINED...), when it gave one; METHOD_NOT_SAVED when chargeSaved's method isn't saved for the payer (nothing charged). */
       declineCode: v.optional(v.union(v.string(), v.null())),
     },
     /**

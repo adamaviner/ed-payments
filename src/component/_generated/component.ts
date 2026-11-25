@@ -364,6 +364,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           context?: any;
           description: string;
           expiresAt: number;
+          failed?: { declineCode: string; reason: string };
           kind?: "hosted" | "offSession" | "onSession";
           limits?: Array<{
             key: string;
