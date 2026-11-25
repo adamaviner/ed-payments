@@ -91,6 +91,20 @@ test('a failed call is an error that retry asks again', async () => {
   expect(completeReturn).toHaveBeenCalledTimes(2)
 })
 
+test('retry while another mount’s call for the same return is in flight joins it rather than asking again', async () => {
+  const second = later<Answer>()
+  completeReturn.mockRejectedValueOnce(new Error('Network down')).mockReturnValueOnce(second.promise)
+  const a = renderHook(() => useCheckoutReturn(ref, { processor: 'paypal', token: 'PP-2' }))
+  await waitFor(() => expect(a.result.current).toMatchObject({ state: 'error', reason: 'request_failed' }))
+  const b = renderHook(() => useCheckoutReturn(ref, { processor: 'paypal', token: 'PP-2' }))
+  act(() => a.result.current.retry())
+  expect(a.result.current.state).toBe('checking')
+  await act(async () => second.resolve(paid))
+  expect(a.result.current.state).toBe('paid')
+  expect(b.result.current.state).toBe('paid')
+  expect(completeReturn).toHaveBeenCalledTimes(2)
+})
+
 test('checkoutReturnToken: Stripe’s session_id or payment_intent, PayPal’s token, else null', () => {
   expect(checkoutReturnToken('?session_id=cs_1')).toEqual({ processor: 'stripe', token: 'cs_1' })
   expect(checkoutReturnToken('?payment_intent=pi_1&payment_intent_client_secret=pi_1_secret_x&redirect_status=succeeded')).toEqual({ processor: 'stripe', token: 'pi_1' })

@@ -57,7 +57,7 @@ interface VaultSdk {
 }
 const vaultSdk = () => (window as unknown as Record<string, VaultSdk | undefined>)[PAYPAL_VAULT_NAMESPACE]
 
-const loadVaultSdk = (clientId: string) => loadScript(paypalVaultSdkUrl(clientId), { 'data-namespace': PAYPAL_VAULT_NAMESPACE })
+const loadVaultSdk = (clientId: string) => loadScript(paypalVaultSdkUrl(clientId), PAYPAL_VAULT_NAMESPACE, { 'data-namespace': PAYPAL_VAULT_NAMESPACE })
 
 /** PayPal's own errors are codes (INVALID_NUMBER, UPDATE_VAULT_SETUP_TOKEN_CONTINGENCY, …), not words for a payer. */
 const CARD_REFUSED = 'PayPal couldn’t check that card. Check the number, expiry date and security code, or use another card.'
@@ -371,7 +371,7 @@ export function PaypalCardPayment({ payment, completeReturn, submitLabel, naviga
   const latest = useLatest({ capture, navigate })
   const { orderId, clientId, returnUrl } = payment
   const { boxes, fields, load } = useCardFields({ clientId, orderId, style: withFieldStyle(style ?? {}) }, async ({ clientId, orderId, style }) => {
-    await loadScript(paypalCardPaySdkUrl(clientId), { 'data-namespace': PAYPAL_CARD_PAY_NAMESPACE })
+    await loadScript(paypalCardPaySdkUrl(clientId), PAYPAL_CARD_PAY_NAMESPACE, { 'data-namespace': PAYPAL_CARD_PAY_NAMESPACE })
     const sdk = (window as unknown as Record<string, CardPaySdk | undefined>)[PAYPAL_CARD_PAY_NAMESPACE]
     return (
       sdk?.CardFields({
