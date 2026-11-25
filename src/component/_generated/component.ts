@@ -722,6 +722,13 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         }>,
         Name
       >;
+      schedulePeriodPaid: FunctionReference<
+        "query",
+        "internal",
+        { period: string; scheduleId: string },
+        boolean,
+        Name
+      >;
       settleFailed: FunctionReference<
         "mutation",
         "internal",

@@ -4,7 +4,7 @@
 import { ConvexError, v } from 'convex/values'
 import { paginationOptsValidator, paginationResultValidator } from 'convex/server'
 import type { Doc, Id } from './_generated/dataModel.js'
-import { mutation, query, type MutationCtx } from './_generated/server.js'
+import { mutation, query, type MutationCtx, type QueryCtx } from './_generated/server.js'
 import { callHost, callbackBase, checkoutView, notifyHost, openIssue, resolveIssue, view } from './lib.js'
 import { callbacks, checkoutKind, checkoutStatus, declineKind, method, payer, processor, ref } from './schema.js'
 import { giveBackOne, limitsArg, takeAll } from './limits.js'
@@ -69,6 +69,13 @@ export const create = mutation({
         .filter((q) => q.or(q.eq(q.field('status'), 'created'), q.eq(q.field('status'), 'pending'), q.eq(q.field('status'), 'processing')))
         .first()
       if (open) throw new ConvexError('A payment for this is already open. Reload the page to continue it.')
+    }
+    // A retry pays what its charge was for: a schedule's charge carries its schedule and period on,
+    // so paying the retry pays the period and a second payment for it is owed back.
+    const from = original && !scheduleId ? await ctx.db.get(original) : null
+    if (from?.scheduleId && from.schedulePeriod) {
+      scheduleId = from.scheduleId
+      a.schedulePeriod = from.schedulePeriod
     }
     const schedule = scheduleId ? ctx.db.normalizeId('schedules', scheduleId) : null
     if (scheduleId && (!schedule || !a.schedulePeriod)) throw new ConvexError(`No schedule ${scheduleId}.`)
@@ -155,8 +162,9 @@ export const settlePaid = mutation({
     await ctx.db.patch(c._id, { paymentRef, paidCents, processorFeeCents, settledAt: now, lastError: undefined, method: c.method, processorCheckoutId: c.processorCheckoutId ?? processorCheckoutId })
     await resolveIssue(ctx, c._id, 'charge_unknown', now)
     let refusal: string | null = paidCents === c.amountCents ? null : `The processor took ${dollarsOf(paidCents)}, not the ${dollarsOf(c.amountCents)} asked.`
-    // A charge and its on-session retries pay for one thing: the second to arrive is owed back.
-    if (!refusal && (await paidElsewhere(ctx, c))) refusal = 'This was already paid by another payment.'
+    // A charge and its on-session retries (and a schedule's period) pay for one thing: the second to arrive is owed back.
+    const duplicate = !refusal && (await paidElsewhere(ctx, c))
+    if (duplicate) refusal = 'This was already paid by another payment.'
     if (!refusal && c.callbacks.onPaid) {
       const paid = { ...callbackBase(c), amountCents: c.amountCents, paidCents, paymentRef }
       const res = await callHost<{ refuse?: string } | null>(ctx, c.callbacks.onPaid, paid)
@@ -172,8 +180,9 @@ export const settlePaid = mutation({
     const refundId = await ctx.db.insert('refunds', { checkoutId: c._id, amountCents: paidCents, reason: refusal, origin: 'needed', status: 'requested', createdAt: now, updatedAt: now })
     const updated = (await ctx.db.get(c._id)) ?? c
     await notifyHost(ctx, updated, 'onRefundNeeded', { amountCents: c.amountCents, paidCents, paymentRef, refundId, reason: refusal }, now)
-    // Money the app turned away doesn't pay the period, and charging again would only be turned away too.
-    await scheduleFailed(ctx, updated, { reason: refusal, kind: 'hard', wasProcessing: loaded.status === 'processing' }, now)
+    // Money the app turned away doesn't pay the period, and charging again would only be turned away
+    // too. A duplicate isn't a refusal of the period: another payment already paid it.
+    if (!duplicate) await scheduleFailed(ctx, updated, { reason: refusal, kind: 'hard', wasProcessing: loaded.status === 'processing' }, now)
     return { outcome: 'refund_needed' as const, reason: refusal, refundId }
   },
 })
@@ -320,7 +329,10 @@ export const noteIssue = mutation({
   },
 })
 
-/** Whether the thing this checkout pays for was already paid: by the charge it retries, or by another retry of it. */
+/**
+ * Whether the thing this checkout pays for was already paid: by the charge it retries, by another
+ * retry of it, or (a schedule's) by any other payment for the same schedule and period.
+ */
 async function paidElsewhere(ctx: MutationCtx, c: Doc<'checkouts'>): Promise<boolean> {
   const rootId = c.retryOf ?? c._id
   const isPaid = (x: Doc<'checkouts'> | null) => !!x && x._id !== c._id && (x.status === 'paid' || x.status === 'processing')
@@ -329,7 +341,18 @@ async function paidElsewhere(ctx: MutationCtx, c: Doc<'checkouts'>): Promise<boo
     .query('checkouts')
     .withIndex('by_retryOf', (q) => q.eq('retryOf', rootId))
     .take(50)
-  return siblings.some(isPaid)
+  if (siblings.some(isPaid)) return true
+  return !!c.scheduleId && !!c.schedulePeriod && (await periodPaid(ctx, c.scheduleId, c.schedulePeriod, c._id))
+}
+
+/** Whether a payment other than `except` paid (or is paying, by bank) a schedule's period. */
+async function periodPaid(ctx: QueryCtx, scheduleId: Id<'schedules'>, period: string, except?: Id<'checkouts'>): Promise<boolean> {
+  const samePeriod = await ctx.db
+    .query('checkouts')
+    .withIndex('by_scheduleId', (q) => q.eq('scheduleId', scheduleId))
+    .filter((q) => q.eq(q.field('schedulePeriod'), period))
+    .take(100)
+  return samePeriod.some((x) => x._id !== except && (x.status === 'paid' || x.status === 'processing'))
 }
 
 async function markDeclined(ctx: MutationCtx, paymentMethodId: string, reason: string, now: number) {
@@ -442,6 +465,16 @@ export const byChargeKey = query({
       .withIndex('by_chargeKey', (q) => q.eq('chargeKey', chargeKey))
       .first()
     return c ? view(c) : null
+  },
+})
+
+/** Whether a schedule's period is paid (or on its way), so a retry for it is refused. */
+export const schedulePeriodPaid = query({
+  args: { scheduleId: v.string(), period: v.string() },
+  returns: v.boolean(),
+  handler: async (ctx, { scheduleId, period }) => {
+    const nid = ctx.db.normalizeId('schedules', scheduleId)
+    return !!nid && (await periodPaid(ctx, nid, period))
   },
 })
 

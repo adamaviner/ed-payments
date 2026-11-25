@@ -316,6 +316,8 @@ async function retryable(p: Payments, ctx: RunActionCtx, checkoutId: string, wan
   if (original.status === 'paid' || original.status === 'refund_needed') throw new ConvexError('This is already paid.')
   if (original.status === 'processing') throw new ConvexError('A payment for this is already on its way.')
   if (original.status !== 'failed' && original.status !== 'abandoned') throw new ConvexError('The first charge for this is still being worked out. Try again later.')
+  if (original.scheduleId && original.schedulePeriod && (await ctx.runQuery(p.component.checkouts.schedulePeriodPaid, { scheduleId: original.scheduleId, period: original.schedulePeriod })))
+    throw new ConvexError('This is already paid.')
   for (const r of await ctx.runQuery(p.component.checkouts.retriesOf, { id: original.id })) {
     if (r.status === 'paid' || r.status === 'refund_needed') throw new ConvexError('This is already paid.')
     if (r.status === 'processing') throw new ConvexError('This payment is already being processed.')
