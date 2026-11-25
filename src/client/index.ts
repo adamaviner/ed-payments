@@ -213,9 +213,29 @@ export interface StartArgs<T> {
    * buyer ends on returnPath and the webhooks settle the payment.
    */
   ui?: StartUi
+  /**
+   * With ui: 'onPage', the checkout id the payer's last press started. While that checkout is unpaid with the same
+   * amount, processor, method and schedule (or none) it is returned again and nothing new is counted; otherwise it is
+   * cancelled and a new one started. A paid or processing checkout is never replaced.
+   */
+  replaces?: string
 }
 
-export type StartUi = 'redirect' | 'embedded'
+export type StartUi = 'redirect' | 'embedded' | 'onPage'
+
+/**
+ * What the browser needs to confirm an on-page payment at the payer's press. Stripe: the PaymentIntent's client
+ * secret for the Payment Element in deferred-intent mode (saved for later on a schedule's first payment). PayPal:
+ * the order Card Fields (or the PayPal button) pays, as for embedded.
+ */
+export type OnPagePayment = { processor: 'stripe'; clientSecret: string; returnUrl: string } | { processor: 'paypal'; orderId: string; clientId: string; returnUrl: string; only?: 'card' | 'paypal' }
+
+export interface StartedOnPage {
+  checkoutId: string
+  onPage: OnPagePayment
+  /** True when the checkout given in replaces was returned again. */
+  reused: boolean
+}
 
 /** What the browser needs to show an embedded checkout. */
 export type EmbeddedPayment =
@@ -421,10 +441,11 @@ export class Payments<C extends GenericValidator = GenericValidator> {
    * `ui: 'embedded'` what the app's page needs to show it. Rate-limited per signed-in user (else per
    * payer email, or limitKey) and overall.
    */
+  async start(ctx: RunActionCtx, a: StartArgs<Infer<C>> & { ui: 'onPage' }): Promise<StartedOnPage>
   async start(ctx: RunActionCtx, a: StartArgs<Infer<C>> & { ui: 'embedded' }): Promise<StartedEmbedded>
   async start(ctx: RunActionCtx, a: StartArgs<Infer<C>> & { ui?: 'redirect' }): Promise<StartedRedirect>
-  async start(ctx: RunActionCtx, a: StartArgs<Infer<C>>): Promise<StartedRedirect | StartedEmbedded>
-  async start(ctx: RunActionCtx, a: StartArgs<Infer<C>>): Promise<StartedRedirect | StartedEmbedded> {
+  async start(ctx: RunActionCtx, a: StartArgs<Infer<C>>): Promise<StartedRedirect | StartedEmbedded | StartedOnPage>
+  async start(ctx: RunActionCtx, a: StartArgs<Infer<C>>): Promise<StartedRedirect | StartedEmbedded | StartedOnPage> {
     return await this.begin(ctx, a)
   }
 
@@ -433,7 +454,7 @@ export class Payments<C extends GenericValidator = GenericValidator> {
     ctx: RunActionCtx,
     a: StartArgs<Infer<C>>,
     save?: { scheduleId: string; schedulePeriod: string; stripeCustomerId?: string; paypalCustomerId?: string },
-  ): Promise<StartedRedirect | StartedEmbedded> {
+  ): Promise<StartedRedirect | StartedEmbedded | StartedOnPage> {
     return await hosted.begin(this, ctx, a, save)
   }
 
@@ -687,7 +708,7 @@ export class Payments<C extends GenericValidator = GenericValidator> {
    * paid (or on its way, for a bank account); if it never is, scheduleChanged says not_started.
    * Rate-limited like start.
    */
-  async startScheduleCheckout(ctx: RunActionCtx, a: StartScheduleCheckoutArgs<Infer<C>>): Promise<(StartedRedirect | StartedEmbedded) & { scheduleId: string }> {
+  async startScheduleCheckout(ctx: RunActionCtx, a: StartScheduleCheckoutArgs<Infer<C>>): Promise<(StartedRedirect | StartedEmbedded | StartedOnPage) & { scheduleId: string }> {
     return await startScheduleCheckout(this, ctx, a)
   }
 

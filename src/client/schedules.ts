@@ -8,7 +8,7 @@ import { createFunctionHandle } from 'convex/server'
 import { ConvexError } from 'convex/values'
 import { DEFAULT_CHARGE_HOUR_UTC, DEFAULT_RETRY_DAYS, anchorDayOf, isAnchorDay } from '../core/schedule.js'
 import { isMethodFor, type Method, type Payer, type Processor, type Ref } from '../core/types.js'
-import type { Payments, RunActionCtx, RunMutationCtx, RunQueryCtx, SchedulerCtx, StartUi, StartedEmbedded, StartedRedirect } from './index.js'
+import type { Payments, RunActionCtx, RunMutationCtx, RunQueryCtx, SchedulerCtx, StartUi, StartedEmbedded, StartedOnPage, StartedRedirect } from './index.js'
 import { getOrderOrNull, orderVault } from '../core/paypal.js'
 import { paypalSavedArgs } from './hosted.js'
 import { ensureCustomer } from './saved.js'
@@ -54,6 +54,8 @@ export interface StartScheduleCheckoutArgs<T> extends ScheduleBaseArgs<T> {
   cancelPath: string
   /** embedded (default): on the app's page (StripeEmbeddedCheckout, PaypalButtons or PaypalCardPayment); redirect: the processor's page. */
   ui?: StartUi
+  /** As for start: with ui: 'onPage', the checkout the payer's last press started, reused while nothing that matters changed. */
+  replaces?: string
   expiresAt?: number
   limitKey?: string
   stripeCustomerId?: string
@@ -109,7 +111,7 @@ export async function startSchedule<T>(p: Payments, ctx: SchedulerCtx, a: StartS
   return { scheduleId, checkoutId }
 }
 
-export async function startScheduleCheckout<T>(p: Payments, ctx: RunActionCtx, a: StartScheduleCheckoutArgs<T>): Promise<(StartedRedirect | StartedEmbedded) & { scheduleId: string }> {
+export async function startScheduleCheckout<T>(p: Payments, ctx: RunActionCtx, a: StartScheduleCheckoutArgs<T>): Promise<(StartedRedirect | StartedEmbedded | StartedOnPage) & { scheduleId: string }> {
   if (!isMethodFor(a.processor, a.method)) throw new ConvexError(`${a.processor === 'stripe' ? 'Stripe' : 'PayPal'} doesn’t take ${a.method} payments here.`)
   checkBase(p, a)
   const callbacks = await handles(p)
