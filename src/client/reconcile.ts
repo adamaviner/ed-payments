@@ -1,11 +1,11 @@
 // The nightly comparison with the processors. Each payment is looked at from both sides; every
 // difference opens an issue (one per payment and kind) and a difference that has gone away resolves
-// it. Refunds found at Stripe that the ledger lacks are recorded on the way (a missed webhook heals).
+// it. Refunds found at the processor that the ledger lacks are recorded on the way (a missed webhook heals).
 import { orderCapture, moneyCents, paypal, searchTransactions, type PaypalOrder } from '../core/paypal.js'
 import { intentState, paymentIntentId, sessionState, stripe, type StripePaymentIntent, type StripeRefund, type StripeSession } from '../core/stripe.js'
 import { ProcessorError, parseTag, type Processor } from '../core/types.js'
 import type { CheckoutView, Payments, RunActionCtx } from './index.js'
-import { errorText, stripeRefundState } from './util.js'
+import { errorText, paypalRefundState, stripeRefundState } from './util.js'
 
 const DAY = 24 * 60 * 60_000
 const MAX_PAGES = 20
@@ -212,10 +212,34 @@ async function paypalSide(
           throw err
         }
       })
+      // Refunds the order lists that the ledger lacks (a lost webhook) are recorded before comparing.
+      out.refundsRecorded += order ? await recordPaypalRefunds(p, ctx, order) : 0
       await sync('paypal', c.paymentRef ?? c.processorCheckoutId ?? c.id, c, paypalFindings(c, order, await processorRefunded(p, ctx, c)))
     })
   }
   await guard('PayPal Transaction Search', () => paypalSearch(p, ctx, since, now, out, sync))
+}
+
+async function recordPaypalRefunds(p: Payments, ctx: RunActionCtx, order: PaypalOrder): Promise<number> {
+  const capture = orderCapture(order)
+  if (!capture) return 0
+  let recorded = 0
+  for (const r of order.purchase_units?.[0]?.payments?.refunds ?? []) {
+    const amountCents = moneyCents(r.amount)
+    if (amountCents === null) continue
+    const tag = parseTag(r.custom_id)
+    const res = await ctx.runMutation(p.component.refunds.recordExternal, {
+      processor: 'paypal',
+      paymentRef: capture.id,
+      processorRefundId: r.id,
+      amountCents,
+      state: paypalRefundState(r.status),
+      refundId: tag?.app === p.app ? tag.id : undefined,
+      now: Date.now(),
+    })
+    if (res === 'recorded') recorded++
+  }
+  return recorded
 }
 
 function paypalFindings(c: Checkout, order: PaypalOrder | null, refunded: number): Finding[] {

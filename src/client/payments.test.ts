@@ -694,3 +694,13 @@ test('declined at capture: only the buyer captures it after that, even once its 
   expect(pp.calls.filter((x) => x.path.endsWith('/capture'))).toHaveLength(1)
   expect((await status(started.checkoutId)).status).toBe('pending')
 })
+
+test('reconcile, PayPal: a refund the ledger missed (its webhook lost) is recorded from the order', async () => {
+  const { t, post, status, paypalCheckout } = setup()
+  const a = await paypalCheckout()
+  await post('/paypal/webhook', pp.approve(a.orderId))
+  pp.refundInDashboard((await status(a.checkoutId)).paymentRef!, 700)
+  await t.action(internal.paymentsWorker.reconcile, {})
+  expect((await status(a.checkoutId)).refundedCents).toBe(700)
+  expect(await t.query(api.shop.issues, {})).toEqual([])
+})

@@ -78,6 +78,12 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
   const refundedOf = (captureId: string) =>
     [...refunds.values()].filter((r) => r.captureId === captureId && r.status !== 'FAILED' && r.status !== 'CANCELLED').reduce((s, r) => s + (decimalToCents(r.amount?.value) ?? 0), 0)
 
+  /** A capture's refunds as an order lists them (purchase_units[].payments.refunds), when it has any. */
+  const refundsJson = (captureId: string) => {
+    const list = [...refunds.values()].filter((r) => r.captureId === captureId).map(({ captureId: _c, ...r }) => r)
+    return list.length ? { refunds: list } : {}
+  }
+
   /** The order as PayPal shows it; `created` is the answer to creating it, which (as in the sandbox) has no create_time yet. */
   function orderJson(o: Order, created = false): PaypalOrder {
     const base = fixture(created ? paypalObjectFixtures.orderCreated : paypalObjectFixtures.orderUnapproved) as unknown as PaypalOrder & { purchase_units: Record<string, unknown>[] }
@@ -85,7 +91,7 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
       ...base.purchase_units[0],
       custom_id: o.customId,
       amount: { currency_code: 'USD', value: centsToDecimal(o.amountCents) },
-      ...(o.capture ? { payments: { captures: o.capture ? [o.capture] : [] } } : {}),
+      ...(o.capture ? { payments: { captures: o.capture ? [o.capture] : [], ...refundsJson(o.capture.id) } } : {}),
     }
     const links =
       o.status === 'PAYER_ACTION_REQUIRED'

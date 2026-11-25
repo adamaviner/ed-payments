@@ -320,6 +320,22 @@ export function savedMethodLabel(pm: StripePaymentMethod): string | null {
 
 export const customerOf = (x: { customer?: string | { id: string } | null }) => idOf(x.customer)
 
+/**
+ * Every item of a Stripe list, page by page (starting_after the last id), up to `maxPages`; past that
+ * it throws, so a caller never takes a partial list for the whole.
+ */
+export async function allPages<T extends { id: string }>(page: (startingAfter: string | undefined) => Promise<StripeList<T>>, maxPages = 20): Promise<T[]> {
+  const out: T[] = []
+  let after: string | undefined
+  for (let i = 0; i < maxPages; i++) {
+    const res = await page(after)
+    out.push(...res.data)
+    if (!res.has_more || !res.data.length) return out
+    after = res.data[res.data.length - 1].id
+  }
+  throw new Error(`Stripe has more than ${maxPages} pages of these; look in Stripe.`)
+}
+
 export const stripe = {
   createSession: (keys: Keys, i: SessionInput, o: StripeCallOptions) =>
     stripeCall<StripeSession>(keys, 'POST', '/v1/checkout/sessions', sessionParams(i), { idempotencyKey: `checkout-${i.checkoutId}`, ...o }),
@@ -343,7 +359,10 @@ export const stripe = {
   listSessions: (keys: Keys, sinceSec: number, startingAfter: string | undefined, o: StripeCallOptions) =>
     stripeCall<StripeList<StripeSession>>(keys, 'GET', '/v1/checkout/sessions', { limit: 100, created: { gte: sinceSec }, starting_after: startingAfter }, o),
   /** Every refund of one PaymentIntent (up to 100). */
-  refundsOf: (keys: Keys, paymentIntent: string, o: StripeCallOptions) => stripeCall<StripeList<StripeRefund>>(keys, 'GET', '/v1/refunds', { payment_intent: paymentIntent, limit: 100 }, o),
+  /** Every refund of a PaymentIntent, all pages. */
+  refundsOf: async (keys: Keys, paymentIntent: string, o: StripeCallOptions): Promise<{ data: StripeRefund[] }> => ({
+    data: await allPages((after) => stripeCall<StripeList<StripeRefund>>(keys, 'GET', '/v1/refunds', { payment_intent: paymentIntent, limit: 100, starting_after: after }, o)),
+  }),
   listRefunds: (keys: Keys, sinceSec: number, startingAfter: string | undefined, o: StripeCallOptions) =>
     stripeCall<StripeList<StripeRefund>>(keys, 'GET', '/v1/refunds', { limit: 100, created: { gte: sinceSec }, starting_after: startingAfter }, o),
 
@@ -371,7 +390,9 @@ export const stripe = {
     ),
   /** Takes a saved method off its Customer, so it can't be charged again (needs write access to PaymentMethods). */
   detachPaymentMethod: (keys: Keys, id: string, o: StripeCallOptions) => stripeCall<StripePaymentMethod>(keys, 'POST', `/v1/payment_methods/${encodeURIComponent(id)}/detach`, undefined, o),
-  createPaymentIntent: (keys: Keys, i: PaymentIntentInput, o: StripeCallOptions) => stripeCall<StripePaymentIntent>(keys, 'POST', '/v1/payment_intents', paymentIntentParams(i), o),
+  /** Keyed, like a session or a refund: a repeat after no answer must replay the same PaymentIntent. */
+  createPaymentIntent: (keys: Keys, i: PaymentIntentInput, o: StripeCallOptions & { idempotencyKey: string }) =>
+    stripeCall<StripePaymentIntent>(keys, 'POST', '/v1/payment_intents', paymentIntentParams(i), o),
   /** Without the expansions, for its status and client secret. */
   paymentIntent: (keys: Keys, id: string, o: StripeCallOptions) => stripeCall<StripePaymentIntent>(keys, 'GET', `/v1/payment_intents/${encodeURIComponent(id)}`, undefined, o),
   /** With the payment method used, for whether it was a card or a bank account. */

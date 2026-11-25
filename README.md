@@ -473,7 +473,8 @@ MERCHANT`). `savePaypalMethod` turns the approved token into a payment token and
   checkouts are settled if paid after all, else ended at the processor and abandoned; quiet off-session
   charges are tried again; refunds left sending are checked.
 - **Reconcile** (nightly, last 3 days): Stripe sessions, direct PaymentIntents and refunds tagged for the
-  app against the component, both ways; PayPal orders of the window; PayPal Transaction Search for
+  app against the component, both ways; PayPal orders of the window (refunds they list that the ledger
+  lacks are recorded, as Stripe's are); PayPal Transaction Search for
   captures the component lacks (skipped, logged once a day, when PayPal refuses it). Differences are
   issues; one that goes away is resolved. The digest (`issuesDigest`) hands new issues to `on.issues`.
 - **Rate limits** on every public entry: `start`, `setupPaymentMethod`, `retryOnSession` and the return

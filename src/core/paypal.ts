@@ -59,7 +59,7 @@ export interface PaypalOrder {
     card?: { brand?: string; last_digits?: string; attributes?: { vault?: PaypalVaultAttribute } }
     paypal?: { email_address?: string; attributes?: { vault?: PaypalVaultAttribute } }
   }
-  purchase_units?: { custom_id?: string; reference_id?: string; amount?: PaypalMoney; payments?: { captures?: PaypalCapture[] } }[]
+  purchase_units?: { custom_id?: string; reference_id?: string; amount?: PaypalMoney; payments?: { captures?: PaypalCapture[]; refunds?: PaypalRefund[] } }[]
 }
 
 export interface PaypalRefund {
