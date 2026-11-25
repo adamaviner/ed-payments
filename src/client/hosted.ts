@@ -179,12 +179,28 @@ export async function settlePaypalOrder(p: Payments, ctx: RunActionCtx, checkout
   })
 }
 
+/** How soon after a first payment whose PayPal save isn't finished its order is read again. */
+const FIRST_VAULT_CHECK_MS = 5 * 60_000
+
+/** @internal A method an order saved (orderVault), as the component's schedule mutations take it. */
+export function paypalSavedArgs(saved: NonNullable<ReturnType<typeof orderVault>>) {
+  return {
+    paypalCustomerId: saved.customerId,
+    paymentTokenId: saved.paymentTokenId,
+    kind: saved.kind,
+    label: saved.label,
+    usagePattern: saved.kind === 'paypal' ? RECURRING_USAGE_PATTERN : undefined,
+    networkRef: saved.networkRef,
+  }
+}
+
 /**
  * @internal Before a schedule's first payment is settled: the method it saved (Stripe's
  * setup_future_usage, PayPal's vault with purchase) becomes the schedule's, so settling starts it
  * with something to charge. A webhook's PayPal capture carries no payment_source, so the order is
  * read again. When PayPal says the save isn't finished (vault APPROVED, no token), the schedule is
- * marked as waiting for VAULT.PAYMENT-TOKEN.CREATED. Best effort: a schedule left without a method
+ * marked as waiting for the token: VAULT.PAYMENT-TOKEN.CREATED, or the order read again by the
+ * schedules worker (checkPaypalVault). Best effort: a schedule left without a method
  * fails its next charge, and the app's scheduleFailed asks the payer for another.
  */
 export async function saveForSchedule(p: Payments, ctx: RunActionCtx, checkoutId: string, from: { stripePaymentIntent?: string; paypalOrder?: PaypalOrder }) {
@@ -218,20 +234,12 @@ export async function saveForSchedule(p: Payments, ctx: RunActionCtx, checkoutId
           networkRef: waiting.networkRef,
           now: Date.now(),
         })
+        // PayPal usually finishes saving within minutes: the order is read again then, rather than
+        // at the next hourly run (claim's check_vault; the hourly run keeps checking after that).
+        if (ctx.scheduler && p.wiring.worker.schedules) await ctx.scheduler.runAfter(FIRST_VAULT_CHECK_MS, p.wiring.worker.schedules, { scheduleId: s.id })
         return
       }
-      await ctx.runMutation(p.component.schedules.attachMethod, {
-        id: s.id,
-        paypal: {
-          paypalCustomerId: saved.customerId,
-          paymentTokenId: saved.paymentTokenId,
-          kind: saved.kind,
-          label: saved.label,
-          usagePattern: saved.kind === 'paypal' ? RECURRING_USAGE_PATTERN : undefined,
-          networkRef: saved.networkRef,
-        },
-        now: Date.now(),
-      })
+      await ctx.runMutation(p.component.schedules.attachMethod, { id: s.id, paypal: paypalSavedArgs(saved), now: Date.now() })
     }
   } catch (err) {
     console.warn(`payments: schedule ${s.id} starts without a saved method: ${errorText(err)}`)

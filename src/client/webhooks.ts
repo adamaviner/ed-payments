@@ -284,7 +284,7 @@ async function actOnPaypal(p: Payments, ctx: RunActionCtx, event: PaypalEvent): 
  * schedule waiting for it takes it (schedules.paypalTokenCreated says how it is found). PayPal sends
  * this event for every token, so one this app saved another way (a setup token, a VAULTED capture)
  * is simply handled. With no order named and several schedules of the same PayPal customer waiting,
- * none is guessed: each one's wait runs out and its payer is asked for another method.
+ * none is guessed: the schedules worker reads each one's order again and finds its own token there.
  */
 async function onPaypalTokenCreated(p: Payments, ctx: RunActionCtx, t: PaypalPaymentToken): Promise<Outcome> {
   const what = paymentTokenLabel(t)

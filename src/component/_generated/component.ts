@@ -1546,7 +1546,8 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             purpose: string;
             ref: { id: string; type: string };
           }
-        | { action: "wait"; reason: string },
+        | { action: "wait"; reason: string }
+        | { action: "check_vault"; orderId: string },
         Name
       >;
       create: FunctionReference<

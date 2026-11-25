@@ -41,8 +41,8 @@ interface Order {
   /** Vault with purchase: what pays it is saved when it is captured (the token's id once saved). */
   save?: { kind: 'card' | 'paypal'; customerId?: string }
   vaultId?: string
-  /** Saved after the capture: the order shows vault APPROVED until VAULT.PAYMENT-TOKEN.CREATED is sent. */
-  vaultLater?: 'waiting' | 'delivered'
+  /** Saved after the capture: the order shows vault APPROVED until PayPal finishes saving (finishSave, deliverVault), then VAULTED. */
+  vaultLater?: 'waiting' | 'saved'
 }
 
 export interface FakePaypalOptions {
@@ -478,14 +478,24 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
       nextSavedLater = true
     },
     /**
-     * VAULT.PAYMENT-TOKEN.CREATED for an order saved later (savesWithPurchaseLater); from then on the
-     * order shows the token. withOrderId false leaves out metadata.order_id, which PayPal's own sample doesn't show.
+     * PayPal finishes saving an order's method (savesWithPurchaseLater) without the webhook reaching
+     * the app: from then on reading the order shows the token VAULTED, with its customer.
+     */
+    finishSave(orderId: string) {
+      const o = order(orderId)
+      if (!o.vaultId || !o.vaultLater) throw new Error(`fakePaypal: order ${orderId} wasn’t saved later`)
+      o.vaultLater = 'saved'
+    },
+    /**
+     * VAULT.PAYMENT-TOKEN.CREATED for an order saved later (savesWithPurchaseLater); the save is
+     * finished, so the order shows the token too. withOrderId false leaves out metadata.order_id,
+     * which PayPal's own sample doesn't show.
      */
     deliverVault(orderId: string, opts: { withOrderId?: boolean; eventId?: string } = {}) {
       const o = order(orderId)
       const v = o.vaultId ? vault.get(o.vaultId) : undefined
       if (!v || !o.vaultLater) throw new Error(`fakePaypal: order ${orderId} wasn’t saved later`)
-      o.vaultLater = 'delivered'
+      o.vaultLater = 'saved'
       const tokenUrl = `${apiBase}/v3/vault/payment-tokens/${v.id}`
       const card = v.source?.card
       const event = paypalEvent(

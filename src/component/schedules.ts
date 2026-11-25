@@ -9,7 +9,7 @@ import type { Doc, Id } from './_generated/dataModel.js'
 import { mutation, query, type MutationCtx, type QueryCtx } from './_generated/server.js'
 import { method, networkRef, payer, processor, ref, scheduleCallbacks, scheduleStatus } from './schema.js'
 import { errorText, findSavedMethod, openIssue } from './lib.js'
-import { METHOD_REMOVED, type DeclineKind } from '../core/declines.js'
+import { METHOD_NOT_SAVED, METHOD_REMOVED, type DeclineKind } from '../core/declines.js'
 import { chargeTimeOf, firstChargeFrom, isAnchorDay, periodOf, retryTime, shiftPeriod } from '../core/schedule.js'
 
 const HOUR = 60 * 60 * 1000
@@ -22,6 +22,12 @@ const MAX_AHEAD_MS = 2 * 366 * DAY
  * within minutes.
  */
 const VAULT_WAIT_MS = 3 * DAY
+/**
+ * How often the worker reads the first payment's order again while waiting for that token: the
+ * order shows it once saved, whether or not VAULT.PAYMENT-TOKEN.CREATED reaches the app or names
+ * the order.
+ */
+const VAULT_CHECK_MS = HOUR
 
 export const scheduleView = v.object({
   id: v.string(),
@@ -300,11 +306,13 @@ async function methodUsable(ctx: QueryCtx, paymentMethodId: string | undefined):
  * The worker asks whether a schedule's charge is due, and gets what to charge, keyed by schedule and
  * period (and attempt, for retries: a refused try charged nothing). A pause that has ended resumes
  * it; a charge still open (no answer yet) holds it back an hour; a method that is gone fails the
- * period as a hard decline, without a charge.
+ * period as a hard decline, without a charge. A schedule waiting for a PayPal token saved after its
+ * first payment gets check_vault (read that order again) until the wait is over, then fails as
+ * METHOD_NOT_SAVED, without a charge.
  */
 export const claim = mutation({
   args: { id: v.string(), app: v.string(), now: v.number() },
-  returns: v.union(chargePlan, v.object({ action: v.literal('wait'), reason: v.string() })),
+  returns: v.union(chargePlan, v.object({ action: v.literal('wait'), reason: v.string() }), v.object({ action: v.literal('check_vault'), orderId: v.string() })),
   handler: async (ctx, { id, app, now }) => {
     let s = await load(ctx, id)
     const wait = (reason: string) => ({ action: 'wait' as const, reason })
@@ -333,12 +341,14 @@ export const claim = mutation({
     if (!s.paymentMethodId && s.paypalVaultPending) {
       const deadline = s.paypalVaultPending.since + VAULT_WAIT_MS
       if (now < deadline) {
-        await ctx.db.patch(s._id, { nextChargeAt: Math.min(now + DAY, deadline), updatedAt: now })
-        return wait('PayPal hasn’t sent the saved payment method yet.')
+        // The worker reads the order now (paypalTokenCreated attaches what it finds); whatever it
+        // finds, or if PayPal can't be reached, it is looked at again within the hour.
+        await ctx.db.patch(s._id, { nextChargeAt: Math.min(now + VAULT_CHECK_MS, deadline), updatedAt: now })
+        return { action: 'check_vault' as const, orderId: s.paypalVaultPending.orderId }
       }
       const reason = 'PayPal didn’t finish saving the payment method.'
       await ctx.db.patch(s._id, { paypalVaultPending: undefined })
-      await failPeriod(ctx, { ...s, paypalVaultPending: undefined }, { period: s.period, reason, declineCode: METHOD_REMOVED, kind: 'hard', now })
+      await failPeriod(ctx, { ...s, paypalVaultPending: undefined }, { period: s.period, reason, declineCode: METHOD_NOT_SAVED, kind: 'hard', now })
       return wait(reason)
     }
     if (!(await methodUsable(ctx, s.paymentMethodId))) {
@@ -436,9 +446,10 @@ async function advance(ctx: MutationCtx, s: Doc<'schedules'>, period: string, no
     return
   }
   const next = shiftPeriod(period, 1)
-  // A schedule still waiting for its PayPal token is looked at again when the wait is over, so the
-  // payer is asked for another method then rather than at the next charge.
-  const nextChargeAt = Math.min(chargeTimeOf(next, s), s.paypalVaultPending ? s.paypalVaultPending.since + VAULT_WAIT_MS : Infinity)
+  // A schedule still waiting for its PayPal token is due at once, so the worker's next run reads the
+  // order for it (claim's check_vault), and again each hour until the wait is over, when the payer
+  // is asked for another method rather than at the next charge.
+  const nextChargeAt = s.paypalVaultPending ? Math.min(chargeTimeOf(next, s), now) : chargeTimeOf(next, s)
   await ctx.db.patch(s._id, {
     lastPaidPeriod,
     period: next,

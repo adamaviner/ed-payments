@@ -211,8 +211,9 @@ export default defineSchema({
     neverStarted: v.optional(v.boolean()),
     /**
      * PayPal took the first payment but answered vault status APPROVED, not VAULTED: the method is
-     * saved later and its token comes in VAULT.PAYMENT-TOKEN.CREATED. Until then (at most three days)
-     * the schedule waits for it instead of failing for want of a method. orderId is the first
+     * saved later, and its token shows on the order (read again by the schedules worker) and comes in
+     * VAULT.PAYMENT-TOKEN.CREATED. Until then (at most three days) the schedule waits for it instead
+     * of failing for want of a method. orderId is the first
      * payment's order; paypalCustomerId the PayPal customer the token will belong to, when known;
      * networkRef the card's reference from that capture, for later recurring charges.
      */

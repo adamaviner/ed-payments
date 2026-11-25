@@ -128,8 +128,9 @@ export function scheduleCallbackArgs<C extends GenericValidator>(context: C) {
     /** scheduleCharged: one period's charge was paid (paid is called for its checkout too). first: the payment that started the schedule. */
     scheduleCharged: { ...b, checkoutId: v.string(), period: v.string(), paidCents: v.number(), paymentRef: v.string(), first: v.boolean() },
     /**
-     * scheduleFailed: a charge was refused (or the saved method is gone: checkoutId null, declineCode
-     * METHOD_REMOVED). attempt: refusals in this period so far. final: no more retries, the schedule
+     * scheduleFailed: a charge was refused (or nothing was charged, checkoutId null: the saved method is
+     * gone, declineCode METHOD_REMOVED, or PayPal never finished saving the first payment's method,
+     * METHOD_NOT_SAVED). attempt: refusals in this period so far. final: no more retries, the schedule
      * lapsed (hard declines are final at once). nextRetryAt: when it is tried again.
      */
     scheduleFailed: {

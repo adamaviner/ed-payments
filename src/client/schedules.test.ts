@@ -405,7 +405,7 @@ describe('PayPal saves the method after the first payment (vault APPROVED)', () 
     await runAt('2030-01-03T12:05:00Z')
     expect(await calls('scheduleFailed')).toEqual([])
     await runAt('2030-01-04T12:05:00Z')
-    expect(await calls('scheduleFailed')).toMatchObject([{ attempt: 1, final: true, declineCode: 'METHOD_REMOVED', reason: 'PayPal didn’t finish saving the payment method.' }])
+    expect(await calls('scheduleFailed')).toMatchObject([{ checkoutId: null, attempt: 1, final: true, declineCode: 'METHOD_NOT_SAVED', reason: 'PayPal didn’t finish saving the payment method.' }])
     expect(await schedule(scheduleId)).toMatchObject({ status: 'lapsed', paymentMethodId: null })
     await runAt('2030-02-01T15:05:00Z')
     expect(pp.vaultCharges).toHaveLength(0)
@@ -414,6 +414,63 @@ describe('PayPal saves the method after the first payment (vault APPROVED)', () 
     expect(await schedule(scheduleId)).toMatchObject({ status: 'lapsed', paymentMethodId: null })
     const token = pp.vault().at(-1)!.id
     expect(await t.mutation(api.monthly.update, { scheduleId, paymentMethodId: `paypal:${token}` })).toMatchObject({ status: 'active' })
+  })
+
+  test('a brand-new payer’s token is found by reading the order again, with no webhook naming it; next month charges it', async () => {
+    const { t, calls, schedule, runAt } = setup()
+    const { scheduleId, orderId } = await startSavedLater(t)
+    await runAt('2030-01-01T13:05:00Z')
+    expect(await schedule(scheduleId)).toMatchObject({ paymentMethodId: null })
+    // The event names no order, and a payer saving for the first time has no PayPal customer the library knows.
+    expect(await hook(t, pp.deliverVault(orderId, { withOrderId: false }))).toBe('foreign')
+    expect(await schedule(scheduleId)).toMatchObject({ paymentMethodId: null })
+    await runAt('2030-01-01T14:05:00Z')
+    const token = pp.vault().at(-1)!.id
+    expect(await schedule(scheduleId)).toMatchObject({ status: 'active', method: 'paypal', paymentMethodId: `paypal:${token}`, nextChargeAt: at('2030-02-01T15:00:00Z') })
+    expect(pp.calls.filter((c) => c.method === 'GET' && c.path === `/v2/checkout/orders/${orderId}`).length).toBeGreaterThanOrEqual(2)
+    await runAt('2030-02-01T15:05:00Z')
+    expect(pp.vaultCharges).toHaveLength(1)
+    expect(await schedule(scheduleId)).toMatchObject({ lastPaidPeriod: '2030-02' })
+    expect(await calls('scheduleFailed')).toEqual([])
+  })
+
+  test('the order is read again minutes after the payment, so a save PayPal finishes quickly is attached before the hourly run', async () => {
+    const { t, schedule, settle } = setup()
+    const { scheduleId, orderId } = await startSavedLater(t, 'card')
+    pp.finishSave(orderId)
+    await settle()
+    expect(await schedule(scheduleId)).toMatchObject({ method: 'card', paymentMethodId: `paypal:${pp.vault().at(-1)!.id}` })
+  })
+
+  test('the order read and the webhook both bring the token: it is saved once', async () => {
+    const { t, schedule, runAt } = setup()
+    const { scheduleId, orderId } = await startSavedLater(t)
+    pp.finishSave(orderId)
+    await runAt('2030-01-01T13:05:00Z')
+    const { paymentMethodId } = await schedule(scheduleId)
+    expect(paymentMethodId).toMatch(/^paypal:/)
+    expect(await hook(t, pp.deliverVault(orderId))).toBe('handled')
+    expect(await schedule(scheduleId)).toMatchObject({ paymentMethodId })
+    expect((await t.action(api.monthly.methods, { donor: 'd1' })).map((m) => m.paymentMethodId)).toEqual([paymentMethodId])
+  })
+
+  test('the order can’t be read: the schedule keeps waiting, then fails as METHOD_NOT_SAVED with nothing charged', async () => {
+    const { t, calls, schedule, runAt } = setup()
+    const { scheduleId, orderId } = await startSavedLater(t)
+    pp.finishSave(orderId)
+    const reads = () => pp.calls.filter((c) => c.method === 'GET' && c.path === `/v2/checkout/orders/${orderId}`).length
+    const before = reads()
+    pp.refuse(({ method, path }) =>
+      method === 'GET' && path === `/v2/checkout/orders/${orderId}` ? new Response(JSON.stringify({ name: 'INTERNAL_SERVER_ERROR', message: 'Down' }), { status: 500 }) : undefined,
+    )
+    for (const when of ['2030-01-01T13:05:00Z', '2030-01-02T13:05:00Z', '2030-01-04T11:05:00Z']) await runAt(when)
+    expect(reads() - before).toBeGreaterThanOrEqual(3)
+    expect(await calls('scheduleFailed')).toEqual([])
+    expect(await schedule(scheduleId)).toMatchObject({ status: 'active', paymentMethodId: null })
+    await runAt('2030-01-04T12:05:00Z')
+    expect(await calls('scheduleFailed')).toMatchObject([{ checkoutId: null, final: true, declineCode: 'METHOD_NOT_SAVED', declineKind: 'hard' }])
+    expect(await schedule(scheduleId)).toMatchObject({ status: 'lapsed', paymentMethodId: null })
+    expect(pp.vaultCharges).toHaveLength(0)
   })
 
   test('a token for an order and customer this app doesn’t know is foreign', async () => {

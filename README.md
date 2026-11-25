@@ -366,10 +366,15 @@ await payments.schedulesFor(ctx, owner) // also schedulesForRef(ref), getSchedul
 - **Refusals.** The schedule goes `past_due` and the period is retried 3, 5 and 7 days after the
   first refusal; after the last, the schedule is `lapsed` (`scheduleFailed` with `final: true`).
   - Hard declines lapse it at once: lost, stolen or expired cards, closed bank accounts, revoked
-    authorizations, `advice_code: do_not_try_again`, and a method that is gone (`METHOD_REMOVED`).
+    authorizations, `advice_code: do_not_try_again`, a method that is gone (`METHOD_REMOVED`), and a
+    method PayPal never finished saving (`METHOD_NOT_SAVED`, below).
   - An insufficient-funds retry moves to the 1st or 15th when one falls within four days after it.
   - `scheduleFailed` gives `attempt`, `final`, `declineCode`, `declineKind` and `nextRetryAt`.
     The app sends its failed-charge email on `attempt === 1`.
+  - Two codes mean nothing was charged (`checkoutId: null`), and are exported from
+    `@earthdance/payments/core`: `METHOD_REMOVED` (the saved method is gone: ask for another) and
+    `METHOD_NOT_SAVED` (PayPal took the first payment but never finished saving the method: word it
+    as "we couldn't save your payment method", not as a failed payment).
   - A new method (`updateSchedule`) on a `past_due` schedule charges the refused period at once.
     On a `lapsed` one, it starts again at the next charge date, like `resumeSchedule`.
 - **First payment that saves the method** (`startScheduleCheckout`, embedded by default). The
@@ -389,12 +394,16 @@ await payments.schedulesFor(ctx, owner) // also schedulesForRef(ref), getSchedul
   - **PayPal saving after the payment.** PayPal may answer the capture with vault status
     `APPROVED` instead of `VAULTED`: paid, but the token comes later in
     `VAULT.PAYMENT-TOKEN.CREATED`. The schedule then starts with `paymentMethodId: null` and waits
-    for it instead of failing. The event's token goes to the schedule whose first order it names
-    (`metadata.order_id`), or else to the one schedule of this app waiting with that PayPal customer
-    (several waiting: none is guessed). If no token comes within three days, the schedule's charge
-    fails as `METHOD_REMOVED` (lapsed, `scheduleFailed` with `final: true`) without charging, so
-    the app asks the payer for another method. A token that comes later still is kept as the payer's
-    saved method for `updateSchedule`.
+    for it instead of failing. The schedules worker reads the first payment's order again (five
+    minutes after the capture, then at each hourly run), and attaches the token once the order shows
+    it `VAULTED`; it doesn't need the webhook. The event, when it comes first, attaches it too (the
+    two together save it once): its token goes to the schedule whose first order it names
+    (`metadata.order_id`, not in PayPal's docs), or else to the one schedule of this app waiting
+    with that PayPal customer (several waiting: none is guessed). An order that can't be read is
+    tried again at the next run. If no token comes within three days, the schedule fails as
+    `METHOD_NOT_SAVED` (lapsed, `scheduleFailed` with `checkoutId: null`, `final: true`)
+    without charging, so the app asks the payer for another method. A token that comes later still
+    is kept as the payer's saved method for `updateSchedule`.
 - **Removed at the processor.** `payment_method.detached` (Stripe) or `VAULT.PAYMENT-TOKEN.DELETED`
   (PayPal) cancels every schedule using the method, with `scheduleChanged` showing `by:
 'processor'` and a reason. Run the webhook CLI again after upgrading: both events are new.
@@ -731,7 +740,11 @@ Nothing to migrate; these change what a host sees:
 - **PayPal webhooks** sent more than ten minutes before they arrive are refused (400) without asking PayPal.
 - **Register the webhooks again** (`npx ed-payments webhooks --paypal …`): `VAULT.PAYMENT-TOKEN.CREATED` is
   new. A schedule whose first PayPal payment saves the method after the capture (vault `APPROVED`) waits up to
-  three days for that event instead of lapsing at its next charge.
+  three days for the token instead of lapsing at its next charge: the schedules worker reads the order again
+  (needs `worker().schedules` exported, as schedules already do), and the event, when it comes, is a faster path.
+- **`METHOD_NOT_SAVED`** is a new `scheduleFailed` `declineCode` (`checkoutId: null`, `final: true`):
+  that wait ran out. Nothing was charged or refused; word it as a payment method that couldn't be saved,
+  not a failed payment, and ask for another method.
 - `PaymentsAdminPage` has no `skipApproval` prop: it reads the server's `adminApi({ skipApproval })`
   through the `access` query, so the page and the server can't disagree. Remove the prop (TypeScript
   refuses it now).
