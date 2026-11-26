@@ -474,8 +474,8 @@ type CheckoutDoc = Doc<'checkouts'>
  * A schedule that never started because its first checkout expired or failed, whose first payment
  * arrived anyway on a checkout the payer didn't cancel: it starts after all.
  */
-const revivable = (s: Doc<'schedules'>, c: Pick<CheckoutDoc, 'schedulePeriod' | 'cancelledByBuyerAt'>) =>
-  s.status === 'cancelled' && s.neverStarted === true && c.cancelledByBuyerAt === undefined && c.schedulePeriod === s.firstPeriod
+const revivable = (s: Doc<'schedules'>, c: Pick<CheckoutDoc, 'schedulePeriod' | 'cancelledByBuyerAt' | 'replacedBy'>) =>
+  s.status === 'cancelled' && s.neverStarted === true && (c.cancelledByBuyerAt === undefined || c.replacedBy !== undefined) && c.schedulePeriod === s.firstPeriod
 
 /** A schedule's first payment arrived (or is on its way): it starts. */
 async function start(ctx: MutationCtx, s: Doc<'schedules'>, c: CheckoutDoc, now: number) {
@@ -528,15 +528,18 @@ export async function scheduleFailed(ctx: MutationCtx, c: CheckoutDoc, f: { reas
   )
 }
 
-/** A starting schedule's first checkout was abandoned or failed: the schedule never starts. */
-export async function scheduleAbandoned(ctx: MutationCtx, c: CheckoutDoc, now: number) {
+/**
+ * A starting schedule's first checkout was abandoned or failed: the schedule never starts. Quiet: closed by another press
+ * in the same attempt (replaces, or another payment of the chain came first), which the app follows by the press itself.
+ */
+export async function scheduleAbandoned(ctx: MutationCtx, c: CheckoutDoc, now: number, o: { quiet?: boolean } = {}) {
   const s = c.scheduleId ? await ctx.db.get(c.scheduleId) : null
-  if (s?.status === 'starting') await notStarted(ctx, s, 'The first payment wasn’t completed.', now)
+  if (s?.status === 'starting') await notStarted(ctx, s, 'The first payment wasn’t completed.', now, o.quiet)
 }
 
-async function notStarted(ctx: MutationCtx, s: Doc<'schedules'>, reason: string, now: number) {
+async function notStarted(ctx: MutationCtx, s: Doc<'schedules'>, reason: string, now: number, quiet = false) {
   await ctx.db.patch(s._id, { status: 'cancelled', endReason: reason, endedAt: now, updatedAt: now, neverStarted: true })
-  await changed(ctx, s, ['not_started'], { reason, now })
+  if (!quiet) await changed(ctx, s, ['not_started'], { reason, now })
 }
 
 const paypalSaved = v.object({

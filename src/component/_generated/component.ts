@@ -268,6 +268,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           giveBack?: { key: string; windowMs: number };
           id: string;
           now: number;
+          replaced?: boolean;
         },
         | { outcome: "abandoned" }
         | { outcome: "being_paid" }
@@ -685,7 +686,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           now?: number;
           paymentRef?: string;
         },
-        | { outcome: "processing" }
+        | { closed?: Array<string>; outcome: "processing" }
         | {
             outcome: "already_handled";
             status:
@@ -932,7 +933,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           processorCheckoutId?: string;
           processorFeeCents?: number;
         },
-        | { outcome: "paid" }
+        | { closed?: Array<string>; outcome: "paid" }
         | { outcome: "refund_needed"; reason: string; refundId: string }
         | {
             outcome: "already_handled";

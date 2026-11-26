@@ -417,6 +417,35 @@ export const defined = app.defineModules({
       },
     }),
   },
+  /** A gift on the host's own form, the way ed-schedule's donate page uses startOnPage: one ref for the whole attempt, one-off or monthly. */
+  give: {
+    onPage: app.action({
+      args: {
+        processor: v.union(v.literal('stripe'), v.literal('paypal')),
+        method: v.union(v.literal('card'), v.literal('ach'), v.literal('paypal')),
+        amountCents: v.optional(v.number()),
+        monthly: v.optional(v.boolean()),
+        replaces: v.optional(v.string()),
+        email: v.optional(v.string()),
+        gift: v.optional(v.string()),
+      },
+      handler: async (ctx, a): Promise<StartedOnPage & { scheduleId?: string }> =>
+        await payments.startOnPage(ctx, {
+          ref: { type: 'gift', id: a.gift ?? 'g1' },
+          purpose: 'donation',
+          description: a.monthly ? 'Monthly gift' : 'Gift',
+          amountCents: a.amountCents ?? 2500,
+          processor: a.processor,
+          method: a.method,
+          payer: { email: a.email ?? 'd1@example.org' },
+          returnPath: '/donate/thanks',
+          cancelPath: '/donate',
+          context: {},
+          replaces: a.replaces,
+          ...(a.monthly ? { schedule: { owner: { type: 'donor', id: 'd1' } } } : {}),
+        }),
+    }),
+  },
   payments: { ...payments.adminApi({ skipApproval: true }), ...payments.publicApi() },
   paymentsWorker: payments.worker(),
 })

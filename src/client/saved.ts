@@ -177,10 +177,10 @@ export async function settleIntent(p: Payments, ctx: RunActionCtx, c: Checkout, 
   const pm = typeof pi.payment_method === 'object' && pi.payment_method ? pi.payment_method : null
   const method = (pm && savedMethodKind(pm.type)) ?? undefined
   if (intentState(pi) === 'processing' || state === 'processing') {
-    await ctx.runMutation(p.component.checkouts.markProcessing, { id: c.id, paymentRef: pi.id, method, now: Date.now() })
+    await closeAtProcessor(p, ctx, await ctx.runMutation(p.component.checkouts.markProcessing, { id: c.id, paymentRef: pi.id, method, now: Date.now() }))
     if (intentState(pi) !== 'paid') return true
   }
-  await ctx.runMutation(p.component.checkouts.settlePaid, {
+  const res = await ctx.runMutation(p.component.checkouts.settlePaid, {
     id: c.id,
     paymentRef: pi.id,
     paidCents: pi.amount_received,
@@ -189,7 +189,27 @@ export async function settleIntent(p: Payments, ctx: RunActionCtx, c: Checkout, 
     method,
     now: Date.now(),
   })
+  await closeAtProcessor(p, ctx, res)
   return true
+}
+
+/**
+ * The checkouts settling a chain's first payment closed in the ledger (closeChain) are closed at Stripe too, so the
+ * buyer's other tab can't pay them: a PaymentIntent canceled, a session expired. PayPal orders need nothing, as a closed
+ * checkout's order is never captured. Best effort: a payment that comes anyway is owed back.
+ */
+export async function closeAtProcessor(p: Payments, ctx: RunActionCtx, settled: object) {
+  for (const id of 'closed' in settled && Array.isArray(settled.closed) ? settled.closed : []) {
+    if (typeof id !== 'string') continue
+    const c = await ctx.runQuery(p.component.checkouts.get, { id })
+    if (c?.processor !== 'stripe' || !c.processorCheckoutId) continue
+    try {
+      if (c.kind === 'onPage') await stripe.cancelPaymentIntent(p.stripeKeys(), c.processorCheckoutId, { fetch: p.fetch })
+      else await stripe.expireSession(p.stripeKeys(), c.processorCheckoutId, { fetch: p.fetch })
+    } catch (err) {
+      console.warn(`payments: couldn’t close ${c.processorCheckoutId} at Stripe after another payment in its chain came first: ${errorText(err)}`)
+    }
+  }
 }
 
 const declineText = (err: ProcessorError) => (err.code === 'authentication_required' ? 'The card needs the buyer to confirm the payment, which can’t happen without them.' : err.message)

@@ -38,7 +38,17 @@ import { paypalHistory, type PaypalHistory, type PaypalHistoryArgs, type PaypalH
 import { reconcile, type ReconcileResult } from './reconcile.js'
 import { chargeNow, removeSavedMethod, retryOnSession, retryWithPaypal, savedMethods, setupPaymentMethod, verifyMethodOwner, type SavedMethod, type VerifiedMethod } from './saved.js'
 import { savePaypalMethod, setupPaypalMethod } from './paypalVault.js'
-import { runSchedules, startSchedule, startScheduleCheckout, updateSchedule, type ScheduleView, type StartScheduleArgs, type StartScheduleCheckoutArgs } from './schedules.js'
+import {
+  runSchedules,
+  startOnPage,
+  startSchedule,
+  startScheduleCheckout,
+  updateSchedule,
+  type ScheduleView,
+  type StartOnPageArgs,
+  type StartScheduleArgs,
+  type StartScheduleCheckoutArgs,
+} from './schedules.js'
 import { cleanPayer } from './util.js'
 import {
   callbackArgs,
@@ -73,6 +83,7 @@ export type {
   ScheduleView,
   StartScheduleArgs,
   StartScheduleCheckoutArgs,
+  StartOnPageArgs,
 }
 export * from './validators.js'
 export { fromEnv, isLive, stripeProblems, paypalProblems, type KeySource, type Problem } from './env.js'
@@ -723,6 +734,18 @@ export class Payments<C extends GenericValidator = GenericValidator> {
   async startScheduleCheckout(ctx: RunActionCtx, a: StartScheduleCheckoutArgs<Infer<C>>): Promise<(StartedRedirect | StartedEmbedded | StartedOnPage) & { scheduleId: string }>
   async startScheduleCheckout(ctx: RunActionCtx, a: StartScheduleCheckoutArgs<Infer<C>>): Promise<(StartedRedirect | StartedEmbedded | StartedOnPage) & { scheduleId: string }> {
     return await startScheduleCheckout(this, ctx, a)
+  }
+
+  /**
+   * The on-page start for a whole attempt to pay for one thing: a one-off, or with `schedule` a schedule's first
+   * payment that saves the method. The app keeps one ref (and purpose) for the attempt; switching one-off and
+   * monthly, the amount or the method is another press with `replaces` (the checkout the last press got), and the
+   * reuse, double-press and dead-start rules of start apply. Within a chain of presses the first payment to settle is
+   * the one paid: the others are closed, and a payment on any of them later is owed back (refund_needed), so the app
+   * hears one onPaid per attempt. A schedule a press closes ends without a scheduleChanged callback. Rate-limited like start.
+   */
+  async startOnPage(ctx: RunActionCtx, a: StartOnPageArgs<Infer<C>>): Promise<StartedOnPage & { scheduleId?: string }> {
+    return await startOnPage(this, ctx, a)
   }
 
   /**

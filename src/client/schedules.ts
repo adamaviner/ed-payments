@@ -8,9 +8,9 @@ import { createFunctionHandle } from 'convex/server'
 import { ConvexError } from 'convex/values'
 import { DEFAULT_CHARGE_HOUR_UTC, DEFAULT_RETRY_DAYS, anchorDayOf, isAnchorDay } from '../core/schedule.js'
 import { isMethodFor, type Method, type Payer, type Processor, type Ref } from '../core/types.js'
-import type { Payments, RunActionCtx, RunMutationCtx, RunQueryCtx, SchedulerCtx, StartUi, StartedEmbedded, StartedOnPage, StartedRedirect } from './index.js'
+import type { Payments, RunActionCtx, RunMutationCtx, RunQueryCtx, SchedulerCtx, StartArgs, StartUi, StartedEmbedded, StartedOnPage, StartedRedirect } from './index.js'
 import { getOrderOrNull, orderVault } from '../core/paypal.js'
-import { MAX_REPLACED_HOPS, STALE_PRESS, paypalSavedArgs, reuseOrClose, type Replaced } from './hosted.js'
+import { MAX_REPLACED_HOPS, STALE_PRESS, paypalSavedArgs, reuseOrClose, start, type Replaced } from './hosted.js'
 import { ensureCustomer } from './saved.js'
 import { cleanPayer, errorText } from './util.js'
 
@@ -59,6 +59,32 @@ export interface StartScheduleCheckoutArgs<T> extends ScheduleBaseArgs<T> {
   expiresAt?: number
   limitKey?: string
   stripeCustomerId?: string
+}
+
+export interface StartOnPageArgs<T> extends Omit<StartArgs<T>, 'ui'> {
+  /**
+   * A schedule's first payment instead of a one-off: whose method it saves (owner), the day of the month and a Stripe
+   * Customer to adopt, as for startScheduleCheckout. Its ref, purpose, description, payer, amount and context are the press's.
+   */
+  schedule?: { owner: Ref; anchorDay?: number; stripeCustomerId?: string }
+}
+
+/**
+ * One on-page start for a whole attempt to pay for one thing (one ref): a one-off, or a schedule's first payment.
+ * Switching between them, or changing the amount or method, is another press with replaces, under the same ref and
+ * purpose, so the reuse, double-press and dead-start rules of start apply across the switch, and the first payment in
+ * the chain to settle is the one paid.
+ */
+export async function startOnPage<T>(p: Payments, ctx: RunActionCtx, a: StartOnPageArgs<T>): Promise<StartedOnPage & { scheduleId?: string }> {
+  const { schedule, ...rest } = a
+  if (schedule) {
+    const first = await startScheduleCheckout(p, ctx, { ...rest, ...schedule, ui: 'onPage' })
+    if (!('onPage' in first)) throw new Error('An on-page start returned no on-page payment.')
+    return first
+  }
+  const started = await start(p, ctx, { ...rest, ui: 'onPage' })
+  if (!('onPage' in started)) throw new Error('An on-page start returned no on-page payment.')
+  return started
 }
 
 /** Throws unless the app wired what schedules need: the three schedule callbacks and worker().schedules. */

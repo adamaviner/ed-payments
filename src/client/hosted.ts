@@ -8,7 +8,7 @@ import { stripeMethodType } from '../core/savedMethods.js'
 import { paymentIntentId, savedMethodKind, savedMethodLabel, sessionState, stripe, stripeFee, type StripeSession } from '../core/stripe.js'
 import { ProcessorError, isMethodFor, parseTag, tagFor, type Method, type Payer, type Processor, type Ref } from '../core/types.js'
 import type { Checkout, CheckoutStatus, EmbeddedPayment, OnPagePayment, Payments, RunActionCtx, StartArgs, StartedEmbedded, StartedOnPage, StartedRedirect } from './index.js'
-import { REUSABLE_INTENT, completeIntentReturn, settleIntent } from './saved.js'
+import { REUSABLE_INTENT, closeAtProcessor, completeIntentReturn, settleIntent } from './saved.js'
 import { anchorDayOf } from '../core/schedule.js'
 import { PAYPAL_DECLINED, cleanPayer, errorText, sameValue, withParam } from './util.js'
 
@@ -196,12 +196,18 @@ async function startPaypal(p: Payments, ctx: RunActionCtx, checkoutId: string, a
   return { id: order.id, url }
 }
 
+/** A settlement passed on after what it closed in its chain is closed at the processor too. */
+async function closedAtProcessor<R extends object>(p: Payments, ctx: RunActionCtx, res: R): Promise<R> {
+  await closeAtProcessor(p, ctx, res)
+  return res
+}
+
 /** @internal Records a paid Stripe session, then (best effort) the fee Stripe kept. */
 export async function settleStripeSession(p: Payments, ctx: RunActionCtx, checkoutId: string, s: StripeSession) {
   const state = sessionState(s)
   const pi = paymentIntentId(s)
   if (pi && (state === 'paid' || state === 'processing')) await saveForSchedule(p, ctx, checkoutId, { stripePaymentIntent: pi })
-  if (state === 'processing') return await ctx.runMutation(p.component.checkouts.markProcessing, { id: checkoutId, paymentRef: pi ?? undefined, now: Date.now() })
+  if (state === 'processing') return await closedAtProcessor(p, ctx, await ctx.runMutation(p.component.checkouts.markProcessing, { id: checkoutId, paymentRef: pi ?? undefined, now: Date.now() }))
   if (state !== 'paid') return null
   // Without an amount there is nothing safe to record; throwing makes the webhook answer 500 and Stripe retry.
   if (s.amount_total === null) throw new Error(`Stripe session ${s.id} is paid but has no amount.`)
@@ -214,6 +220,7 @@ export async function settleStripeSession(p: Payments, ctx: RunActionCtx, checko
     processorCheckoutId: s.id,
     now: Date.now(),
   })
+  await closeAtProcessor(p, ctx, res)
   if (fee === null && pi && res.outcome !== 'already_handled') {
     try {
       const full = await stripe.retrievePaymentIntent(p.stripeKeys(), pi, { fetch: p.fetch })
@@ -234,16 +241,20 @@ export async function settlePaypalOrder(p: Payments, ctx: RunActionCtx, checkout
   if (capture.status === 'COMPLETED' || capture.status === 'PARTIALLY_REFUNDED' || capture.status === 'REFUNDED') {
     const paidCents = moneyCents(capture.amount)
     if (paidCents === null) throw new Error(`PayPal capture ${capture.id} has no USD amount.`)
-    return await ctx.runMutation(p.component.checkouts.settlePaid, {
-      id: checkoutId,
-      paymentRef: capture.id,
-      paidCents,
-      processorFeeCents: captureFee(capture) ?? undefined,
-      processorCheckoutId: order.id || undefined,
-      now: Date.now(),
-    })
+    return await closedAtProcessor(
+      p,
+      ctx,
+      await ctx.runMutation(p.component.checkouts.settlePaid, {
+        id: checkoutId,
+        paymentRef: capture.id,
+        paidCents,
+        processorFeeCents: captureFee(capture) ?? undefined,
+        processorCheckoutId: order.id || undefined,
+        now: Date.now(),
+      }),
+    )
   }
-  if (capture.status === 'PENDING') return await ctx.runMutation(p.component.checkouts.markProcessing, { id: checkoutId, paymentRef: capture.id, now: Date.now() })
+  if (capture.status === 'PENDING') return await closedAtProcessor(p, ctx, await ctx.runMutation(p.component.checkouts.markProcessing, { id: checkoutId, paymentRef: capture.id, now: Date.now() }))
   // A saved method's charge declined later (a pending capture, then PAYMENT.CAPTURE.DECLINED) marks the method too.
   const c = await ctx.runQuery(p.component.checkouts.get, { id: checkoutId })
   // On the app's page, in time, a declined capture of the checkout's own order goes on under a new order
@@ -473,7 +484,7 @@ async function reorderedReturn(p: Payments, ctx: RunActionCtx, token: string) {
  * Only for a checkout id the buyer was given by start (the id is the buyer's secret; anyone holding
  * it can close the unpaid checkout, nothing more). publicApi().cancelCheckout wraps p.
  */
-export async function cancel(p: Payments, ctx: RunActionCtx, checkoutId: string, o: { limitKey?: string } = {}): Promise<{ status: CheckoutStatus } | null> {
+export async function cancel(p: Payments, ctx: RunActionCtx, checkoutId: string, o: { limitKey?: string; replaced?: boolean } = {}): Promise<{ status: CheckoutStatus } | null> {
   const c = await ctx.runQuery(p.component.checkouts.get, { id: checkoutId })
   if (!c || c.app !== p.app || (c.kind !== 'hosted' && c.kind !== 'onPage')) return null
   if (c.status !== 'created' && c.status !== 'pending') return { status: c.status }
@@ -505,7 +516,13 @@ export async function cancel(p: Payments, ctx: RunActionCtx, checkoutId: string,
   const limits = await p.limits(ctx, 'start', c.payer.email, 1, o.limitKey)
   const own = limits?.find((l) => !l.key.endsWith(':all'))
   const close = (checked: boolean) =>
-    ctx.runMutation(p.component.checkouts.cancel, { id: c.id, giveBack: own && { key: own.key, windowMs: own.windowMs }, checked: checked || undefined, now: Date.now() })
+    ctx.runMutation(p.component.checkouts.cancel, {
+      id: c.id,
+      giveBack: own && { key: own.key, windowMs: own.windowMs },
+      checked: checked || undefined,
+      replaced: o.replaced || undefined,
+      now: Date.now(),
+    })
   let r = await close(false)
   if (r.outcome === 'check_processor' && c.processorCheckoutId) {
     // A capture claimed it and never finished: PayPal says whether the money was taken.
@@ -637,7 +654,7 @@ async function reuseOrCloseChecked(p: Payments, ctx: RunActionCtx, c: Checkout, 
   }
   // Another press is still starting it: closing it now would hand that press a closed checkout.
   if (c.status === 'created' && !c.processorCheckoutId && c.createdAt > Date.now() - STARTING_MS) throw new ConvexError(STILL_STARTING)
-  const closed = await cancel(p, ctx, c.id, { limitKey: want.limitKey })
+  const closed = await cancel(p, ctx, c.id, { limitKey: want.limitKey, replaced: true })
   if (closed) refuse(closed.status)
   return null
 }

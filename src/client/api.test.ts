@@ -276,6 +276,7 @@ describe('rate limits on the saved-method entries', () => {
     ['savedMethods', 12, (t) => t.action(api.bids.methods, { user: 'u1' })],
     ['verifyMethodOwner', 12, (t) => t.action(api.bids.verify, { user: 'u1', paymentMethodId: 'pm_nobody' })],
     ['removeSavedMethod', 3, (t) => t.action(api.bids.remove, { user: 'u1', paymentMethodId: 'pm_nobody' })],
+    ['startOnPage', 3, (t) => t.action(api.give.onPage, { processor: 'stripe', method: 'card', email: 'u1@example.org' })],
   ]
   test.each(cases)('%s is limited per payer', async (_name, allowed, call) => {
     const t = createTest()
