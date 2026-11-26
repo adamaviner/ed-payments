@@ -121,7 +121,8 @@ Then register the webhooks: `npx ed-payments webhooks --stripe https://<deployme
 
 The browser side of the payment paths, for an app's React code, over the functions it exported in steps 2 and 4:
 
-- paying on the app's own page: `StripeOnPagePayment` and `PaypalOnPagePayment` (a new payment whose fields sit in
+- paying on the app's own page: `OnPagePayment` (the whole payment step: tabs, the quoted card fields, PayPal's
+  button, the fallback, `replaces` between presses, and a retry mode), built from `StripeOnPagePayment` and `PaypalOnPagePayment` (a new payment whose fields sit in
   the app's form, started at the press), `PaypalButtons` and `StripeEmbeddedCheckout` (an embedded checkout),
   `PaypalCardPayment` (a schedule's first payment by card at PayPal), `StripeRetryPayment` (a retry after a decline);
 - saving a method to charge later: `PaypalCardFields`, `PaypalSaveButton`, `StripeSaveMethod`, and
@@ -237,6 +238,57 @@ merely opening forms use up a payer's tries.
   save before checking). Pass `search` from the router in a server-rendered app; without it the address is
   read from `window.location` (none on the server, so hydration matches). On `saved`: Stripe saved the method, but what `onSaved` was to do with it (place
   the bid) didn't happen, so say so and let the payer finish with it; `savedMethods` lists it.
+
+**The whole payment step: `OnPagePayment`.** The tabs, the fields and the presses of an app's own form in one
+component, built from the pieces below. The app gives the tabs it allows and their words, the amount, its fee rates
+(the `fees` it gives `definePayments`) and two actions; the component does the rest:
+
+- **Tabs** for the methods in `tabs` (`'card' | 'ach' | 'paypal'`), in that order, each with the app's `label`,
+  `submitLabel`, `note` and a `hint` shown in the tab (e.g. "Save $0.53 with bank"). A tab whose processor has no key
+  (`stripePublishableKey`, `paypalClientId`) isn't shown. `method` / `onMethodChange` let the app keep the tab.
+- **The card fields** are the processor `quote({ amountCents, method: 'card', coverFee }, feeRates(fees))` gives among
+  the processors with keys, so the page and the server's `payments.quote` agree. Crossing the price line swaps
+  Stripe's Payment Element for PayPal's card fields (or back), which clears a half-typed card. Stripe's form shows the
+  quote's total for the tab; the bank tab changes the same form in place, as do `saveForLater` and the amount.
+- **PayPal's tab** is PayPal's own button. Its `createOrder` calls the app's `start`, so nothing is made before its press
+  either; a decline (including PayPal's "declined, reordered") is said under it, and its next press starts again.
+- **`start({ method, processor, replaces })`** is the app's action around `payments.startOnPage`, returning
+  `StartedOnPage`. The component keeps the `checkoutId` the last press got and passes it as `replaces`; the app keeps
+  nothing. The server prices with `payments.quote` for `method` and should refuse a `processor` that differs (the page's
+  rates are out of date): the page says what it throws.
+- **Fallback.** When Stripe.js or PayPal's script is slow or fails, the payer is offered "Pay on Stripe's site instead";
+  its press calls the app's `startRedirect({ method, processor, replaces })` (`payments.start`, a redirect) and goes to
+  its `redirectUrl` (`leave`, default a full page load). Nothing is started until that press.
+- **Look.** `appearance` and `paypalStyle` from `usePageTheme`, `paypalButtonStyle` for PayPal's button, and
+  `classNames` (`root`, `tabList`, `tab`, `selectedTab`, `hint`, `panel`, `fallback`) added to the library's own.
+- **Retry mode** (`retry={{ amountCents, start, onPaid, returnUrl? }}`): paying a declined off-session charge on the
+  page (a bid's retry). The amount is the checkout's. The card tab is Stripe's form for a card or a bank account (the
+  PaymentIntent `retryOnSession` makes allows both, so a bank tab isn't shown); the PayPal tab is PayPal's button.
+  `start({ method })` returns `payments.retryOnSession`'s answer for a card and `payments.retryWithPaypal`'s for PayPal,
+  each called at its press. Stripe's outcome goes to `onPaid`; PayPal goes to the order's return page.
+
+```tsx
+const theme = usePageTheme(COLORS)
+;<OnPagePayment
+  stripePublishableKey={STRIPE_PUBLISHABLE_KEY}
+  paypalClientId={PAYPAL_CLIENT_ID}
+  completeReturn={api.payments.completeReturn}
+  tabs={[
+    { method: 'card', label: 'Card', submitLabel: `Give ${dollars(total)}` },
+    { method: 'ach', label: 'Bank', submitLabel: `Give ${dollars(bankTotal)}`, hint: `Save ${dollars(saving)}` },
+    { method: 'paypal', label: 'PayPal', submitLabel: 'PayPal' },
+  ]}
+  amountCents={amountCents}
+  coverFee={coverFee}
+  fees={FEES} // the same rates as definePayments
+  saveForLater={monthly}
+  payer={{ name, email }}
+  start={(a) => startDonation({ ...form, ...a })} // payments.startOnPage(ctx, { ..., replaces: a.replaces })
+  startRedirect={(a) => startDonationRedirect({ ...form, ...a })} // payments.start(ctx, { ..., ui: 'redirect' })
+  appearance={theme?.stripe}
+  paypalStyle={theme?.paypal}
+/>
+```
 
 **A new payment in the app's own form: `StripeOnPagePayment` and `PaypalOnPagePayment`.** The payment fields
 sit in the app's form with one button, and nothing is made at Stripe or PayPal until the payer presses it, so
@@ -759,7 +811,7 @@ the wire code (`stripe.*`, `paypal.*`, signatures, parsers) and `STRIPE_EVENTS` 
 
 ### `@earthdance/payments/react`
 
-`StripeOnPagePayment`, `PaypalOnPagePayment`, `PaypalButtons`, `StripeEmbeddedCheckout`, `PaypalCardPayment`, `PaypalCardFields`,
+`OnPagePayment`, `StripeOnPagePayment`, `PaypalOnPagePayment`, `PaypalButtons`, `StripeEmbeddedCheckout`, `PaypalCardPayment`, `PaypalCardFields`,
 `PaypalSaveButton`, `StripeSaveMethod`, `StripeRetryPayment`, `useStripeSetupReturn`, `useCheckoutReturn`, `checkoutReturnToken`,
 `usePageTheme`, `PaymentsAdminPage` and helpers; see
 "The React package" above.
@@ -861,6 +913,10 @@ the webhooks registered on the live deployment:
   for a card; the method now comes from the order (`paypal`). Existing rows aren't changed.
 - **Admin page:** `refundable`'s `CheckoutSummary` has `context`, so a `refundQuestion` can ask from it.
 - **`savedMethods({ forAmountCents })`** leaves out declined methods and sorts the rest by fee, each with `feeCents`.
+- **`OnPagePayment`** (React) is the whole payment step: the app's tabs, the quoted processor's card fields, PayPal's button
+  started at its press, the fallback to the processor's page and `replaces` kept between presses, plus a retry mode for a
+  declined off-session charge. An app that built its own tabs, card-field swap or `replaces` ref can drop them. The
+  on-page components take `onLoad` to report how their script loads.
 - **`chargeSaved`**: pass the stored customer id as `stripeCustomerId` for any method; it is ignored for a PayPal one.
 
 ### v0.10.0

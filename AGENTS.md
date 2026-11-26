@@ -37,7 +37,11 @@ The README has the API and the "Adopt in 5 steps" set-up.
    refunds (partial ones checked against what is left), approvals and issues. Add
    `@source '../node_modules/@earthdance/payments/dist';` to your CSS. Never show a refund or payment
    as done before the server says so.
-10. **Paying on your own page:** with the fields in your own form, `<StripeOnPagePayment>` / `<PaypalOnPagePayment>`
+10. **Paying on your own page:** use `<OnPagePayment>` for the whole payment step (the tabs, the card fields of the
+    quoted processor, PayPal's button, the fallback, `replaces`): give it your tabs' words, your `fees` (the same as
+    `definePayments`'), a `start({ method, processor, replaces })` around `startOnPage` that prices with `payments.quote`
+    and refuses a processor the quote doesn't give, and a `startRedirect` for the fallback. Don't build your own tabs,
+    card-field swap or `replaces` ref beside it. For a part of it only, `<StripeOnPagePayment>` / `<PaypalOnPagePayment>`
     whose `start` calls your action around `startOnPage(ctx, { ..., replaces, schedule? })` at the press (pass the
     `checkoutId` your last press got as `replaces`; never start when the form opens). Keep one `ref` for the whole
     attempt (one-off or monthly, any amount or method): don't make a new ref per change, don't keep your own
