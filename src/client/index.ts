@@ -26,7 +26,19 @@ import {
 } from 'convex/server'
 import { ConvexError, v, type GenericValidator, type Infer } from 'convex/values'
 import type { ComponentApi } from '../component/_generated/component.js'
-import { cheaperCardProcessor, DEFAULT_FEE_RATES, feeRates, feeSchedule, type CardProcessorChoice, type FeeRates, type FeeRatesInput, type FeeSchedule } from '../core/fees.js'
+import {
+  cheaperCardProcessor,
+  DEFAULT_FEE_RATES,
+  feeRates,
+  feeSchedule,
+  quote,
+  type CardProcessorChoice,
+  type FeeRates,
+  type FeeRatesInput,
+  type FeeSchedule,
+  type Quote,
+  type QuoteArgs,
+} from '../core/fees.js'
 import { PAYPAL_LIVE_API, PAYPAL_SANDBOX_API, paypalToken, paypalTokenOf, type PaypalKeys, type PaypalOrder } from '../core/paypal.js'
 import type { StripeKeys, StripeSession } from '../core/stripe.js'
 import { METHOD_NOT_SAVED } from '../core/declines.js'
@@ -353,9 +365,23 @@ export class Payments<C extends GenericValidator = GenericValidator> {
    */
   cardProcessorFor(amountCents: number): CardProcessorChoice {
     const choice = cheaperCardProcessor(amountCents, this.fees)
-    const has = { stripe: !!this.options.stripe?.()?.secretKey, paypal: !!this.options.paypal?.()?.clientId }
-    if (!has[choice.processor] && has[choice.processor === 'stripe' ? 'paypal' : 'stripe']) return { ...choice, processor: choice.processor === 'stripe' ? 'paypal' : 'stripe' }
-    return choice
+    const has = this.cardProcessors()
+    return has.length === 1 ? { ...choice, processor: has[0] } : choice
+  }
+
+  /**
+   * What a payment costs and who takes it at this app's rates (core's quote): a card goes to the cheaper processor for
+   * the amount among those this deployment has keys for. Price on the server with it before startOnPage; the page shows
+   * the same quote from core's quote with the same rates.
+   */
+  quote(a: QuoteArgs): Quote {
+    const has = this.cardProcessors()
+    return quote(a, this.fees, { cardProcessors: has.length ? has : undefined })
+  }
+
+  /** The processors this deployment has keys for. */
+  private cardProcessors(): Processor[] {
+    return (['stripe', 'paypal'] as const).filter((x) => (x === 'stripe' ? !!this.options.stripe?.()?.secretKey : !!this.options.paypal?.()?.clientId))
   }
 
   /** @internal */

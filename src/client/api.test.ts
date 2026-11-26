@@ -299,3 +299,14 @@ test('a PayPal webhook sent more than ten minutes ago is refused before PayPal i
   expect(res.status).toBe(400)
   expect(pp.calls.filter((c) => c.path === '/v1/notifications/verify-webhook-signature')).toHaveLength(0)
 })
+
+test('payments.quote prices with the app’s fee rates, and gives a card only to a processor the app has keys for', () => {
+  expect(payments.quote({ amountCents: 10_000, method: 'card', coverFee: true })).toEqual({ processor: 'paypal', method: 'card', amountCents: 10_000, feeCents: 254, totalCents: 10_254 })
+  const stripeOnly = definePayments(app.components.payments, {
+    app: 'test',
+    context,
+    stripe: () => ({ secretKey: 'sk_test_fake', webhookSecret: 'whsec_fake' }),
+    fees: { paypal: { card: { basisPoints: 199, fixedCents: 49, capCents: null } } },
+  }).withCallbacks(wiring)
+  expect(stripeOnly.quote({ amountCents: 10_000, method: 'card', coverFee: true })).toMatchObject({ processor: 'stripe', feeCents: 330 })
+})

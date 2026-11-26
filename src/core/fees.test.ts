@@ -14,6 +14,7 @@ import {
   isLargeTransaction,
   processingFeeFor,
   processingFeeFromAmounts,
+  quote,
   type FeeSchedule,
 } from './fees.js'
 
@@ -168,5 +169,42 @@ describe('compareProcessingFees', () => {
     const { cardFeeCents, achFeeCents } = compareProcessingFees(50_000, false, { card, ach })
     expect(cardFeeCents).toBe(1480)
     expect(achFeeCents).toBe(400)
+  })
+})
+
+describe('quote', () => {
+  const nonprofit: FeeSchedule = { basisPoints: 199, fixedCents: 49, capCents: null }
+  const rates = feeRates({ paypal: { card: nonprofit, paypal: nonprofit } })
+
+  test('a card goes to the cheaper processor for the amount, Stripe below the crossover and PayPal above it', () => {
+    expect(quote({ amountCents: 1000, method: 'card', coverFee: false }, rates)).toEqual({ processor: 'stripe', method: 'card', amountCents: 1000, feeCents: 59, totalCents: 1000 })
+    expect(quote({ amountCents: 10_000, method: 'card', coverFee: false }, rates)).toEqual({ processor: 'paypal', method: 'card', amountCents: 10_000, feeCents: 248, totalCents: 10_000 })
+  })
+
+  test('covering the fee adds the gross-up, at the processor whose gross-up is lower', () => {
+    expect(quote({ amountCents: 10_000, method: 'card', coverFee: true }, rates)).toEqual({ processor: 'paypal', method: 'card', amountCents: 10_000, feeCents: 254, totalCents: 10_254 })
+    expect(quote({ amountCents: 1000, method: 'card', coverFee: true }, rates)).toEqual({ processor: 'stripe', method: 'card', amountCents: 1000, feeCents: 61, totalCents: 1061 })
+  })
+
+  test('a bank account is Stripe’s and a PayPal account PayPal’s, whatever the amount', () => {
+    expect(quote({ amountCents: 100_000, method: 'ach', coverFee: true }, rates)).toEqual({ processor: 'stripe', method: 'ach', amountCents: 100_000, feeCents: 500, totalCents: 100_500 })
+    expect(quote({ amountCents: 500, method: 'paypal', coverFee: false }, rates)).toMatchObject({ processor: 'paypal', feeCents: 59 })
+  })
+
+  test('only the processors the app has take a card, and a tie goes to Stripe', () => {
+    expect(quote({ amountCents: 10_000, method: 'card', coverFee: false }, rates, { cardProcessors: ['stripe'] })).toMatchObject({ processor: 'stripe', feeCents: 320 })
+    expect(quote({ amountCents: 1000, method: 'card', coverFee: false }, rates, { cardProcessors: ['paypal'] })).toMatchObject({ processor: 'paypal', feeCents: 69 })
+    expect(quote({ amountCents: 1000, method: 'card', coverFee: false }, DEFAULT_FEE_RATES).processor).toBe('stripe')
+    expect(() => quote({ amountCents: 1000, method: 'card', coverFee: false }, rates, { cardProcessors: [] })).toThrow()
+  })
+
+  test('agrees with processingFeeFor at every amount', () => {
+    for (const coverFee of [true, false]) {
+      for (const net of NET_AMOUNTS) {
+        const q = quote({ amountCents: net, method: 'card', coverFee }, rates)
+        expect(q.feeCents).toBe(Math.min(processingFeeFor(net, rates.stripe.card, coverFee), processingFeeFor(net, rates.paypal.card, coverFee)))
+        expect(q.totalCents).toBe(net + (coverFee ? q.feeCents : 0))
+      }
+    }
   })
 })

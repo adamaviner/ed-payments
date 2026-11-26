@@ -122,6 +122,44 @@ export function compareProcessingFees(netCents: number, covered: boolean, schedu
   return { cardFeeCents, achFeeCents, achSavingsCents: Math.max(0, cardFeeCents - achFeeCents), steerToAch: isLargeTransaction(cardTotalCents, thresholdCents) }
 }
 
+export interface QuoteArgs {
+  /** What the thing costs, before any fee the payer covers. */
+  amountCents: number
+  method: Method
+  /** The payer adds the fee, so that amountCents is left after the processor's cut. */
+  coverFee: boolean
+}
+
+export interface Quote {
+  /** Who takes it: the cheaper for a card (of those the app has), Stripe for a bank account, PayPal for a PayPal account. */
+  processor: Processor
+  method: Method
+  amountCents: number
+  /** The processor's fee on this payment: the gross-up when the payer covers it, else its cut of amountCents. */
+  feeCents: number
+  /** What the payer is charged: amountCents, plus feeCents when they cover it. */
+  totalCents: number
+}
+
+/**
+ * What a payment costs and who takes it, from the app's fee rates: the same answer on the server (price before start)
+ * and on the page (which card fields to show, the price line). A card goes to the processor whose fee is lower for this
+ * amount (its gross-up when the payer covers the fee), Stripe on a tie, among `cardProcessors` (default both; e.g. only
+ * Stripe when the app has no PayPal keys).
+ */
+export function quote(a: QuoteArgs, rates: FeeRates, o: { cardProcessors?: readonly Processor[] } = {}): Quote {
+  assertCents('amountCents', a.amountCents)
+  const fee = (processor: Processor) => processingFeeFor(a.amountCents, feeSchedule(rates, processor, a.method), a.coverFee)
+  let processor: Processor
+  if (a.method === 'card') {
+    const allowed = (['stripe', 'paypal'] as const).filter((x) => !o.cardProcessors || o.cardProcessors.includes(x))
+    if (allowed.length === 0) throw new Error('No processor here takes cards.')
+    processor = allowed.reduce((best, x) => (fee(x) < fee(best) ? x : best))
+  } else processor = a.method === 'ach' ? 'stripe' : 'paypal'
+  const feeCents = fee(processor)
+  return { processor, method: a.method, amountCents: a.amountCents, feeCents, totalCents: a.amountCents + (a.coverFee ? feeCents : 0) }
+}
+
 /** What a card charge of this amount costs at each processor, and the cheaper one. */
 export interface CardProcessorChoice {
   processor: Processor
