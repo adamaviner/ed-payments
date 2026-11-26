@@ -541,6 +541,18 @@ async function chainOf(ctx: QueryCtx, c: Doc<'checkouts'>): Promise<Doc<'checkou
   return rows.filter((x) => x._id !== c._id && chain.has(x._id))
 }
 
+/** How another checkout in a checkout's chain of presses stands when it was paid or is being paid by bank; null when none was. */
+export const chainPaid = query({
+  args: { id: v.string() },
+  returns: v.union(v.literal('paid'), v.literal('processing'), v.null()),
+  handler: async (ctx, { id }) => {
+    const nid = ctx.db.normalizeId('checkouts', id)
+    const c = nid ? await ctx.db.get(nid) : null
+    const paid = c ? (await chainOf(ctx, c)).find((x) => x.status === 'paid' || x.status === 'processing') : undefined
+    return paid?.status === 'paid' || paid?.status === 'processing' ? paid.status : null
+  },
+})
+
 /** Whether another checkout in c's chain of presses was paid, or is being paid by bank. */
 async function paidInChain(ctx: QueryCtx, c: Doc<'checkouts'>): Promise<boolean> {
   return (await chainOf(ctx, c)).some((x) => x.status === 'paid' || x.status === 'processing')

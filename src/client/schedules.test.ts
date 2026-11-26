@@ -552,6 +552,16 @@ describe('startOnPage: one ref for the whole attempt, one-off or monthly', () =>
     expect(await calls('onPaid')).toHaveLength(1)
   })
 
+  test('once a payment in the chain came first, the next press naming the closed checkout is told it is paid, not given a new payment', async () => {
+    const { t, status } = setup()
+    const first = await press(t)
+    const second = await press(t, { amountCents: 3000, replaces: first.checkoutId })
+    await t.fetch('/stripe/webhook', await stripe.confirm((await status(first.checkoutId)).processorCheckoutId!))
+    expect(await status(second.checkoutId)).toMatchObject({ status: 'abandoned' })
+    await expect(press(t, { amountCents: 3000, replaces: second.checkoutId })).rejects.toThrow('This is already paid.')
+    await expect(press(t, { monthly: true, replaces: second.checkoutId })).rejects.toThrow('This is already paid.')
+  })
+
   test('a bank payment on its way counts as the first: a later card payment in the chain is owed back', async () => {
     const { t, calls, status } = setup()
     const bank = await press(t, { method: 'ach' })

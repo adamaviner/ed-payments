@@ -286,6 +286,13 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           },
         Name
       >;
+      chainPaid: FunctionReference<
+        "query",
+        "internal",
+        { id: string },
+        "paid" | "processing" | null,
+        Name
+      >;
       claimCapture: FunctionReference<
         "mutation",
         "internal",

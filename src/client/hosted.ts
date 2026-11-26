@@ -663,6 +663,9 @@ async function reuseOrCloseChecked(p: Payments, ctx: RunActionCtx, c: Checkout, 
     if (sentence) throw new ConvexError(sentence)
   }
   refuse(c.status)
+  // Another payment of the attempt came first (closing this one): the next press is told so, not given a payment to be owed back.
+  const chain = await ctx.runQuery(p.component.checkouts.chainPaid, { id: c.id })
+  if (chain) refuse(chain)
   if (c.status !== 'created' && c.status !== 'pending') return null
   const schedule = c.scheduleId ? await ctx.runQuery(p.component.schedules.get, { id: c.scheduleId }) : null
   const sameSchedule = want.schedule
