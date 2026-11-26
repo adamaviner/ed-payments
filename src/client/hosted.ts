@@ -3,10 +3,10 @@
 // sweep), capturing an approved PayPal order, and the buyer closing one they won't pay. Payments
 // (index.ts) is the facade; these take it as `p`.
 import { ConvexError } from 'convex/values'
-import { RECURRING_USAGE_PATTERN, approveUrl, captureFee, getOrderOrNull, moneyCents, orderCapture, orderVault, orderVaultWaiting, paypal, type PaypalOrder } from '../core/paypal.js'
+import { RECURRING_USAGE_PATTERN, approveUrl, captureFee, getOrderOrNull, moneyCents, orderCapture, orderCustomId, orderVault, orderVaultWaiting, paypal, type PaypalOrder } from '../core/paypal.js'
 import { stripeMethodType } from '../core/savedMethods.js'
 import { paymentIntentId, savedMethodKind, savedMethodLabel, sessionState, stripe, stripeFee, type StripeSession } from '../core/stripe.js'
-import { ProcessorError, isMethodFor, tagFor, type Method, type Payer, type Processor, type Ref } from '../core/types.js'
+import { ProcessorError, isMethodFor, parseTag, tagFor, type Method, type Payer, type Processor, type Ref } from '../core/types.js'
 import type { Checkout, CheckoutStatus, EmbeddedPayment, OnPagePayment, Payments, RunActionCtx, StartArgs, StartedEmbedded, StartedOnPage, StartedRedirect } from './index.js'
 import { REUSABLE_INTENT, completeIntentReturn, settleIntent } from './saved.js'
 import { anchorDayOf } from '../core/schedule.js'
@@ -15,6 +15,27 @@ import { PAYPAL_DECLINED, cleanPayer, errorText, sameValue, withParam } from './
 const DEFAULT_EXPIRY_MS = 3 * 60 * 60_000
 
 const FINAL: ReadonlySet<CheckoutStatus> = new Set(['paid', 'refund_needed', 'failed', 'abandoned'])
+
+/** @internal Another press already replaced the checkout named in replaces: the one that did, to decide from again. */
+export interface Replaced {
+  replacedBy: string
+}
+
+/** How many checkouts a press follows through replacedBy (a press naming an old checkout after several changes) before giving up. */
+export const MAX_REPLACED_HOPS = 4
+
+/** @internal What a press says when it can't catch up with the presses after it. */
+export const STALE_PRESS = 'This payment was changed in another tab or press. Please reload the page and try again.'
+
+/** @internal start for a one-off: a checkout another press already replaced is followed to the one that replaced it. */
+export async function start(p: Payments, ctx: RunActionCtx, a: StartArgs<unknown>): Promise<StartedRedirect | StartedEmbedded | StartedOnPage> {
+  for (let hop = 0; hop < MAX_REPLACED_HOPS; hop++) {
+    const r = await begin(p, ctx, a)
+    if (!('replacedBy' in r)) return r
+    a = { ...a, replaces: r.replacedBy }
+  }
+  throw new ConvexError(STALE_PRESS)
+}
 
 /**
  * @internal start, and for a schedule's first payment (startScheduleCheckout) the schedule it
@@ -25,7 +46,7 @@ export async function begin(
   ctx: RunActionCtx,
   a: StartArgs<unknown>,
   save?: { scheduleId: string; schedulePeriod: string; stripeCustomerId?: string; paypalCustomerId?: string },
-): Promise<StartedRedirect | StartedEmbedded | StartedOnPage> {
+): Promise<StartedRedirect | StartedEmbedded | StartedOnPage | Replaced> {
   if (!isMethodFor(a.processor, a.method)) throw new ConvexError(`${a.processor === 'stripe' ? 'Stripe' : 'PayPal'} doesn’t take ${a.method} payments here.`)
   if (!Number.isInteger(a.amountCents) || a.amountCents < 1) throw new ConvexError('A checkout needs an amount of at least one cent.')
   p.checkContext(a.context)
@@ -33,14 +54,16 @@ export async function begin(
   else p.paypalKeys()
   // A schedule's first payment decides reuse before its schedule is made (startScheduleCheckout).
   if (a.replaces && !save) {
-    const reused = await reuseOrClose(p, ctx, a.replaces, { ...a, schedule: null })
+    const replaces = await ctx.runQuery(p.component.checkouts.latest, { id: a.replaces })
+    a = { ...a, replaces }
+    const reused = await reuseOrClose(p, ctx, replaces, { ...a, schedule: null })
     if (reused) return { checkoutId: reused.checkoutId, onPage: reused.onPage, reused: true }
   }
   const now = Date.now()
   const expiresAt = a.expiresAt ?? now + DEFAULT_EXPIRY_MS
   const returnUrl = p.url(a.returnPath)
   const cancelUrl = p.url(a.cancelPath)
-  const checkoutId = await ctx.runMutation(p.component.checkouts.create, {
+  const row = {
     app: p.app,
     ref: a.ref,
     purpose: a.purpose,
@@ -48,7 +71,7 @@ export async function begin(
     amountCents: a.amountCents,
     processor: a.processor,
     method: a.method,
-    kind: a.ui === 'onPage' ? 'onPage' : 'hosted',
+    kind: a.ui === 'onPage' ? ('onPage' as const) : ('hosted' as const),
     payer: cleanPayer(a.payer),
     returnUrl,
     cancelUrl,
@@ -58,10 +81,15 @@ export async function begin(
     limits: await p.limits(ctx, 'start', a.payer.email, 1, a.limitKey),
     ...(save ? { scheduleId: save.scheduleId, schedulePeriod: save.schedulePeriod, stripeCustomerId: save.stripeCustomerId } : {}),
     now,
-  })
+  }
+  const made = a.replaces
+    ? await ctx.runMutation(p.component.checkouts.createReplacing, { ...row, replaces: a.replaces })
+    : { id: await ctx.runMutation(p.component.checkouts.create, row), created: true }
+  if (!made.created) return { replacedBy: made.id }
+  const checkoutId = made.id
   try {
     const made = a.processor === 'stripe' ? await startStripe(p, checkoutId, a, returnUrl, cancelUrl, expiresAt, now, save) : await startPaypal(p, ctx, checkoutId, a, returnUrl, cancelUrl, save)
-    await ctx.runMutation(p.component.checkouts.attach, { id: checkoutId, processorCheckoutId: made.id })
+    await attachStarted(p, ctx, checkoutId, made.id)
     if (made.onPage) return { checkoutId, onPage: made.onPage, reused: false }
     return made.embedded ? { checkoutId, embedded: made.embedded } : { checkoutId, redirectUrl: made.url }
   } catch (err) {
@@ -218,6 +246,15 @@ export async function settlePaypalOrder(p: Payments, ctx: RunActionCtx, checkout
   if (capture.status === 'PENDING') return await ctx.runMutation(p.component.checkouts.markProcessing, { id: checkoutId, paymentRef: capture.id, now: Date.now() })
   // A saved method's charge declined later (a pending capture, then PAYMENT.CAPTURE.DECLINED) marks the method too.
   const c = await ctx.runQuery(p.component.checkouts.get, { id: checkoutId })
+  // On the app's page, in time, a declined capture of the checkout's own order goes on under a new order
+  // (a webhook after a capture that never answered); one of an order it has moved on from changes nothing.
+  if (c?.kind === 'onPage' && (c.status === 'pending' || c.status === 'created')) {
+    if (order.id && c.processorCheckoutId && order.id !== c.processorCheckoutId) return null
+    if (c.expiresAt > Date.now()) {
+      await orderSpent(p, ctx, c)
+      return null
+    }
+  }
   return await ctx.runMutation(p.component.checkouts.settleFailed, {
     id: checkoutId,
     reason: `PayPal ${capture.status.toLowerCase()} the payment.`,
@@ -320,8 +357,11 @@ export async function capturePaypal(p: Payments, ctx: RunActionCtx, checkoutId: 
   // taken; another capture under way (or a closed checkout) means there is nothing to do here.
   // The claim also checks the order is still the checkout's, as a re-order may have replaced it since the read above.
   if (!(await ctx.runMutation(p.component.checkouts.claimCapture, { id: checkoutId, orderId, now: Date.now() })).claimed) return undefined
-  const requestId = by === 'buyer' ? `capture-${checkoutId}-${Date.now().toString(36)}` : `capture-${checkoutId}`
-  const order = await p.withPaypal(ctx, async (call) => {
+  // Per order, as a re-ordered checkout's new order must not get the old one's answer replayed.
+  const requestId = by === 'buyer' ? `capture-${orderId}-${Date.now().toString(36)}` : `capture-${orderId}`
+  // A new order only for an on-page checkout still in time; an expired one is left for the sweep to close.
+  const spent = c.kind === 'onPage' && c.expiresAt > Date.now() ? ('spent' as const) : ('declined' as const)
+  const captured = await p.withPaypal(ctx, async (call) => {
     try {
       return await paypal.captureOrder(call, orderId, requestId)
     } catch (err) {
@@ -333,20 +373,15 @@ export async function capturePaypal(p: Payments, ctx: RunActionCtx, checkoutId: 
         const now = await paypal.getOrder(call, orderId)
         if (now.status === 'COMPLETED') return now
       } else if (!(err instanceof ProcessorError && err.code && ORDER_SPENT.has(err.code))) throw err
-      // A new order only for an on-page checkout still in time; an expired one is left for the sweep to close.
-      return c.kind === 'onPage' && c.expiresAt > Date.now() ? ('spent' as const) : ('declined' as const)
+      return spent
     }
   })
-  if (order === 'spent') {
-    // PayPal won't take this order again, so no money moved: the buyer's next press pays a new one under the same checkout.
-    await ctx.runMutation(p.component.checkouts.releaseCapture, { id: checkoutId })
-    const fresh = await reorder(p, ctx, c).catch((err: unknown) => {
-      console.error(`payments: a new PayPal order for checkout ${checkoutId} failed: ${errorText(err)}`)
-      return null
-    })
-    await ctx.runMutation(p.component.checkouts.noteError, { id: checkoutId, error: PAYPAL_DECLINED })
-    return fresh ? 'reordered' : 'declined'
-  }
+  // A card declined by Card Fields' capture comes back 201 with the order COMPLETED and its capture
+  // DECLINED, and PayPal then takes no other card on that order (order-card-capture-declined.json); a
+  // capture refused as already made, with nothing paid, is the same order. On the app's page the
+  // payment goes on under a new order, as for a spent one.
+  const order = c.kind === 'onPage' && captured && typeof captured === 'object' && !orderPaid(captured) ? spent : captured
+  if (order === 'spent') return await orderSpent(p, ctx, c)
   // No money moved: the claim goes. A capture that threw keeps it, as its outcome is unknown; once
   // stale, cancel asks PayPal before closing the checkout.
   if (order === 'declined' || !order) await ctx.runMutation(p.component.checkouts.releaseCapture, { id: checkoutId })
@@ -356,6 +391,21 @@ export async function capturePaypal(p: Payments, ctx: RunActionCtx, checkoutId: 
   }
   if (order) await settlePaypalOrder(p, ctx, checkoutId, order)
   return undefined
+}
+
+/**
+ * An on-page checkout's PayPal order took no money and won't take another card (spent, or a declined
+ * capture): no money moved, so the claim goes, and the payer's next press pays a new order under the
+ * same checkout (no start counted).
+ */
+async function orderSpent(p: Payments, ctx: RunActionCtx, c: Checkout): Promise<'reordered' | 'declined'> {
+  await ctx.runMutation(p.component.checkouts.releaseCapture, { id: c.id })
+  const fresh = await reorder(p, ctx, c).catch((err: unknown) => {
+    console.error(`payments: a new PayPal order for checkout ${c.id} failed: ${errorText(err)}`)
+    return null
+  })
+  await ctx.runMutation(p.component.checkouts.noteError, { id: c.id, error: PAYPAL_DECLINED })
+  return fresh ? 'reordered' : 'declined'
 }
 
 /**
@@ -375,6 +425,7 @@ export async function completeReturn(
 ): Promise<{ checkoutId: string; ref: Ref; purpose: string; status: CheckoutStatus; declined?: true; reordered?: true } | null> {
   if (!token || token.length > 255) return null
   const found = await ctx.runQuery(p.component.checkouts.byProcessorId, { processorCheckoutId: token })
+  if (!found && processor === 'paypal') return await reorderedReturn(p, ctx, token)
   if (!found || found.processor !== processor || found.app !== p.app) return null
   let outcome: 'declined' | 'reordered' | undefined
   if (!FINAL.has(found.status) || found.status === 'abandoned') {
@@ -395,6 +446,20 @@ export async function completeReturn(
     status: now?.status ?? found.status,
     ...(outcome === 'declined' ? { declined: true as const } : outcome === 'reordered' ? { declined: true as const, reordered: true as const } : {}),
   }
+}
+
+/**
+ * A PayPal order no checkout has any more: when it is one an open on-page checkout of this app moved
+ * on from (re-ordered by the webhook or the sweep before the buyer came back), the buyer hears
+ * declined + reordered, so the next press gets the new order.
+ */
+async function reorderedReturn(p: Payments, ctx: RunActionCtx, token: string) {
+  const order = await p.withPaypal(ctx, (call) => getOrderOrNull(call, token))
+  const tag = parseTag(order ? orderCustomId(order) : null)
+  if (!tag || tag.app !== p.app) return null
+  const c = await ctx.runQuery(p.component.checkouts.get, { id: tag.id })
+  if (!c || c.app !== p.app || c.kind !== 'onPage' || c.processor !== 'paypal' || c.processorCheckoutId === token || (c.status !== 'pending' && c.status !== 'created')) return null
+  return { checkoutId: c.id, ref: c.ref, purpose: c.purpose, status: c.status, declined: true as const, reordered: true as const }
 }
 
 /**
@@ -446,7 +511,7 @@ export async function cancel(p: Payments, ctx: RunActionCtx, checkoutId: string,
     // A capture claimed it and never finished: PayPal says whether the money was taken.
     const orderId = c.processorCheckoutId
     const order = await p.withPaypal(ctx, (call) => getOrderOrNull(call, orderId))
-    if (order?.status === 'COMPLETED') {
+    if (order && orderPaid(order)) {
       await settlePaypalOrder(p, ctx, c.id, order)
       return { status: (await ctx.runQuery(p.component.checkouts.get, { id: c.id }))?.status ?? c.status }
     }
@@ -457,13 +522,17 @@ export async function cancel(p: Payments, ctx: RunActionCtx, checkoutId: string,
   return { status: r.outcome === 'already_handled' ? r.status : 'abandoned' }
 }
 
+const PAID_OR_PENDING: ReadonlySet<string> = new Set(['COMPLETED', 'PENDING', 'PARTIALLY_REFUNDED', 'REFUNDED'])
+
+/** Whether an order's capture took money (or is taking it); a declined or failed capture, or none, did not. */
+const orderPaid = (order: PaypalOrder) => PAID_OR_PENDING.has(orderCapture(order)?.status ?? '')
+
 /** PayPal's issues when an order can't be paid again (too many tries on it, or it ran out); a new order can be. */
 const ORDER_SPENT: ReadonlySet<string> = new Set(['MAX_NUMBER_OF_PAYMENT_ATTEMPTS_EXCEEDED', 'ORDER_EXPIRED'])
 
 /** A new PayPal order for an on-page checkout, under the same checkout: no new start is counted. Returns its id, or null when the checkout has moved on. */
 async function reorder(p: Payments, ctx: RunActionCtx, c: Checkout): Promise<string | null> {
-  const owner = c.scheduleId ? (await ctx.runQuery(p.component.schedules.get, { id: c.scheduleId }))?.owner : undefined
-  const paypalCustomerId = owner ? ((await ctx.runQuery(p.component.customers.paypalCustomer, { app: p.app, owner })) ?? undefined) : undefined
+  const paypalCustomerId = await schedulePaypalCustomer(p, ctx, c)
   const order = await createPaypalOrder(
     p,
     ctx,
@@ -566,30 +635,71 @@ async function reuseOrCloseChecked(p: Payments, ctx: RunActionCtx, c: Checkout, 
     const now = await ctx.runQuery(p.component.checkouts.get, { id: c.id })
     if (now) refuse(now.status)
   }
+  // Another press is still starting it: closing it now would hand that press a closed checkout.
+  if (c.status === 'created' && !c.processorCheckoutId && c.createdAt > Date.now() - STARTING_MS) throw new ConvexError(STILL_STARTING)
   const closed = await cancel(p, ctx, c.id, { limitKey: want.limitKey })
   if (closed) refuse(closed.status)
   return null
 }
 
+const STILL_STARTING = 'This payment is still starting. Please try again in a moment.'
+
+/** How long a checkout with nothing at the processor yet counts as being started by another press, rather than left behind by one that died. */
+const STARTING_MS = 60_000
+
 /** A reused checkout must have this long left, so the payer isn't handed one the sweep is about to close. */
 const REUSE_MARGIN_MS = 10 * 60_000
+
+/**
+ * An on-page checkout another press made and is still starting (two presses at once): its
+ * PaymentIntent or order is asked for again under the same idempotency key, so the processor answers
+ * with the same one (or refuses while the first request is under way, and the payer presses again).
+ */
+/** Records the processor's object on a checkout; throws when the checkout was closed meanwhile (another press replaced it), so no one is handed a payment for a closed checkout. */
+async function attachStarted(p: Payments, ctx: RunActionCtx, checkoutId: string, processorCheckoutId: string) {
+  const r = await ctx.runMutation(p.component.checkouts.attach, { id: checkoutId, processorCheckoutId })
+  if (r.outcome === 'already_handled' && (r.status === 'abandoned' || r.status === 'failed')) throw new Error(`Checkout ${checkoutId} was closed while it started.`)
+}
+
+async function resume(p: Payments, ctx: RunActionCtx, c: Checkout): Promise<OnPagePayment> {
+  const a = { ...c, payer: c.payer, returnPath: '', cancelPath: '', ui: 'onPage' as const }
+  const made = await (
+    c.processor === 'stripe'
+      ? startStripe(p, c.id, a, c.returnUrl, c.cancelUrl, c.expiresAt, Date.now(), { stripeCustomerId: c.stripeCustomerId ?? undefined })
+      : schedulePaypalCustomer(p, ctx, c).then((paypalCustomerId) => startPaypal(p, ctx, c.id, a, c.returnUrl, c.cancelUrl, c.scheduleId ? { paypalCustomerId } : undefined))
+  ).catch((err: unknown) => {
+    // Stripe refuses a key whose first request is still under way (409).
+    if (err instanceof ProcessorError && err.status === 409) throw new ConvexError(STILL_STARTING)
+    throw err
+  })
+  if (!made.onPage) throw new Error(`Checkout ${c.id} started without an on-page payment.`)
+  await attachStarted(p, ctx, c.id, made.id)
+  return made.onPage
+}
+
+/** The PayPal customer a schedule's owner has, so a schedule's order saves its method under it. */
+async function schedulePaypalCustomer(p: Payments, ctx: RunActionCtx, c: Checkout) {
+  const owner = c.scheduleId ? (await ctx.runQuery(p.component.schedules.get, { id: c.scheduleId }))?.owner : undefined
+  return owner ? ((await ctx.runQuery(p.component.customers.paypalCustomer, { app: p.app, owner })) ?? undefined) : undefined
+}
 
 /** What the browser needs to pay an open on-page checkout again, or null when it can't be (canceled at Stripe; settled here if it was paid meanwhile). */
 async function reopen(p: Payments, ctx: RunActionCtx, c: Checkout): Promise<OnPagePayment | null> {
   const id = c.processorCheckoutId
-  if (!id) return null
+  if (!id) return c.status === 'created' && c.kind === 'onPage' ? await resume(p, ctx, c) : null
   if (c.processor === 'stripe') {
     const pi = await stripe.paymentIntent(p.stripeKeys(), id, { fetch: p.fetch })
     if (await settleIntent(p, ctx, c, pi)) return null
     return REUSABLE_INTENT.has(pi.status) && pi.client_secret ? { processor: 'stripe', clientSecret: pi.client_secret, returnUrl: c.returnUrl } : null
   }
   const order = await p.withPaypal(ctx, (call) => getOrderOrNull(call, id))
-  if (order?.status === 'COMPLETED') {
+  if (order && orderPaid(order)) {
     await settlePaypalOrder(p, ctx, c.id, order)
     return null
   }
   const saves = c.scheduleId ? { method: c.method } : null
-  if (order && order.status !== 'VOIDED') return paypalPayment(p, id, c.returnUrl, saves)
+  // An order with a declined capture takes no other card, though PayPal reads it back as CREATED.
+  if (order && order.status !== 'VOIDED' && order.status !== 'COMPLETED' && !orderCapture(order)) return paypalPayment(p, id, c.returnUrl, saves)
   const fresh = await reorder(p, ctx, c)
   return fresh ? paypalPayment(p, fresh, c.returnUrl, saves) : null
 }

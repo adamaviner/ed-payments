@@ -227,19 +227,20 @@ describe('on-page payments through the library', () => {
     expect(await t.action(api.shop.back, { processor: 'paypal', token: started.onPage.orderId })).toEqual({ checkoutId: started.checkoutId, status: 'paid' })
   })
 
-  test('a declined card: the return doesn’t call it paid, the order takes no other card, and the next press (replaces) pays a new order', async () => {
+  test('a declined card: the return says declined and re-ordered, the old order takes no other card, and the next press (replaces) pays the new order on the same checkout', async () => {
     const { t } = harness()
     const pp = await paypalAs()
     const first = await t.action(api.shop.buyOnPage, { processor: 'paypal', method: 'card', amountCents: 2500 })
     if (first.onPage.processor !== 'paypal') throw new Error('expected a PayPal on-page payment')
     const orderId = first.onPage.orderId
     expect((await pp('POST', `/v2/checkout/orders/${orderId}/confirm-payment-source`, cardSource('CCREJECT-REFUSED'))).status).toBe(200)
-    expect(await t.action(api.shop.back, { processor: 'paypal', token: orderId })).not.toMatchObject({ status: 'paid' })
+    expect(await t.action(api.shop.back, { processor: 'paypal', token: orderId })).toEqual({ checkoutId: first.checkoutId, status: 'pending', declined: true, reordered: true })
     const another = await pp('POST', `/v2/checkout/orders/${orderId}/confirm-payment-source`, cardSource(`Sandbox Donor ${appRun}`))
     expect([another.status, ((await another.json()) as { details: { issue: string }[] }).details[0].issue]).toEqual([422, 'ORDER_ALREADY_CAPTURED'])
 
     const next = await t.action(api.shop.buyOnPage, { processor: 'paypal', method: 'card', amountCents: 2500, replaces: first.checkoutId })
     if (next.onPage.processor !== 'paypal') throw new Error('expected a PayPal on-page payment')
+    expect(next).toMatchObject({ checkoutId: first.checkoutId, reused: true })
     expect(next.onPage.orderId).not.toBe(orderId)
     expect((await pp('POST', `/v2/checkout/orders/${next.onPage.orderId}/confirm-payment-source`, cardSource(`Sandbox Donor ${appRun}`))).status).toBe(200)
     expect(await t.action(api.shop.back, { processor: 'paypal', token: next.onPage.orderId })).toMatchObject({ checkoutId: next.checkoutId, status: 'paid' })

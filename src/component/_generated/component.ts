@@ -454,6 +454,49 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         },
         Name
       >;
+      createReplacing: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          amountCents: number;
+          app: string;
+          callbacks: {
+            onDispute?: string;
+            onFailed?: string;
+            onPaid?: string;
+            onProcessing?: string;
+            onRefundNeeded?: string;
+            onRefunded?: string;
+          };
+          cancelUrl: string;
+          chargeKey?: string;
+          context?: any;
+          description: string;
+          expiresAt: number;
+          kind?: "hosted" | "offSession" | "onSession" | "onPage";
+          limits?: Array<{
+            key: string;
+            max: number;
+            message: string;
+            windowMs: number;
+          }>;
+          method: "card" | "ach" | "paypal";
+          now: number;
+          payer: { email: string; name?: string };
+          paymentMethodId?: string;
+          processor: "stripe" | "paypal";
+          purpose: string;
+          ref: { id: string; type: string };
+          replaces: string;
+          retryOf?: string;
+          returnUrl: string;
+          scheduleId?: string;
+          schedulePeriod?: string;
+          stripeCustomerId?: string;
+        },
+        { created: boolean; id: string },
+        Name
+      >;
       due: FunctionReference<
         "query",
         "internal",
@@ -559,6 +602,13 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             | "refund_needed";
           stripeCustomerId: string | null;
         } | null,
+        Name
+      >;
+      latest: FunctionReference<
+        "query",
+        "internal",
+        { id: string },
+        string,
         Name
       >;
       list: FunctionReference<

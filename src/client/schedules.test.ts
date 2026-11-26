@@ -405,6 +405,17 @@ describe('a schedule started with a payment that saves the method', () => {
     expect(await schedule(changed.scheduleId)).toMatchObject({ status: 'active', amountCents: 5000 })
   })
 
+  test('on-page: a second press naming a first payment already replaced gets the replacing checkout and schedule back, and keeps no extra schedule', async () => {
+    const { t, status } = setup()
+    const first = await t.action(api.monthly.startCheckout, { donor: 'd1', processor: 'stripe', method: 'card', ui: 'onPage' })
+    const one = await t.action(api.monthly.startCheckout, { donor: 'd1', processor: 'stripe', method: 'card', amountCents: 5000, ui: 'onPage', replaces: first.checkoutId })
+    const two = await t.action(api.monthly.startCheckout, { donor: 'd1', processor: 'stripe', method: 'card', amountCents: 5000, ui: 'onPage', replaces: first.checkoutId })
+    expect(one).toMatchObject({ reused: false })
+    expect(two).toEqual({ ...one, reused: true })
+    expect((await status(first.checkoutId)).status).toBe('abandoned')
+    expect((await t.query(api.monthly.list, { donor: 'd1' })).map((s) => s.status).sort()).toEqual(['cancelled', 'starting'])
+  })
+
   test('on-page: a changed anchor day or context is not reused; the starting schedule ends and a fresh one starts', async () => {
     const { t, schedule, status } = setup()
     const first = await t.action(api.monthly.startCheckout, { donor: 'd1', processor: 'stripe', method: 'card', ui: 'onPage', anchorDay: 5 })

@@ -222,7 +222,7 @@ export interface StartArgs<T> {
    * with ten minutes or more left, it is returned again and no start is counted. Otherwise one for the same ref and
    * purpose is cancelled (its start given back) and a new one started; one for another thing is left alone. A paid or
    * processing one for the same ref and purpose is refused ("This is already paid."). Each press with it counts against
-   * a separate 'replace' limit.
+   * a separate 'replace' limit. Two presses naming the same checkout make one new checkout: the later one gets it back.
    */
   replaces?: string
 }
@@ -453,7 +453,7 @@ export class Payments<C extends GenericValidator = GenericValidator> {
   async start(ctx: RunActionCtx, a: StartArgs<Infer<C>> & { ui?: 'redirect' }): Promise<StartedRedirect>
   async start(ctx: RunActionCtx, a: StartArgs<Infer<C>>): Promise<StartedRedirect | StartedEmbedded | StartedOnPage>
   async start(ctx: RunActionCtx, a: StartArgs<Infer<C>>): Promise<StartedRedirect | StartedEmbedded | StartedOnPage> {
-    return await this.begin(ctx, a)
+    return await hosted.start(this, ctx, a)
   }
 
   /** @internal See hosted.ts. */
@@ -461,7 +461,7 @@ export class Payments<C extends GenericValidator = GenericValidator> {
     ctx: RunActionCtx,
     a: StartArgs<Infer<C>>,
     save?: { scheduleId: string; schedulePeriod: string; stripeCustomerId?: string; paypalCustomerId?: string },
-  ): Promise<StartedRedirect | StartedEmbedded | StartedOnPage> {
+  ): Promise<StartedRedirect | StartedEmbedded | StartedOnPage | hosted.Replaced> {
     return await hosted.begin(this, ctx, a, save)
   }
 

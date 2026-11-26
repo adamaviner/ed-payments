@@ -139,6 +139,11 @@ export default defineSchema({
      * while the claim is live; once stale, cancel asks PayPal for the order first.
      */
     captureClaimedAt: v.optional(v.number()),
+    /**
+     * On-page: the checkout a later press started in this one's place (start with replaces), set in the
+     * same transaction that made it, so a second press naming this one finds that checkout instead of making another.
+     */
+    replacedBy: v.optional(v.id('checkouts')),
     callbacks,
     /** Passed to every callback as it was given to start. */
     context: v.optional(v.any()),

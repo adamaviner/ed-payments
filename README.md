@@ -710,11 +710,14 @@ processor, method, payer, description, context and return page, and the same sch
 anchor day and context) or none, the same client secret or order comes back with `reused: true` and no start is counted.
 Otherwise one for the same `ref` and `purpose` is cancelled (its start given back; a starting schedule ends as
 `not_started`), one for another thing is left alone, and a new one started. One for the same `ref` and `purpose` that is paid or on its way is refused ("This is
-already paid." / "A payment for this is already on its way."). After a PayPal card decline the same order comes back; when
-PayPal won't take it again (`MAX_NUMBER_OF_PAYMENT_ATTEMPTS_EXCEEDED`, `ORDER_EXPIRED`, or the order is gone) the library makes
-a new order under the same checkout, counting no new start, and never captures the old one; `completeReturn` then answers
-`declined: true` with `reordered: true`, and the next `start` with `replaces` returns the new order (`ORDER_COMPLETED_OR_VOIDED`
-counts too, once PayPal shows the order unpaid).
+already paid." / "A payment for this is already on its way."). The new checkout is recorded on the old one (`replacedBy`) in the
+transaction that makes it, so two presses naming the same checkout make one: the later press follows `replacedBy` and
+reuses that checkout (or, if it differs, replaces it in turn). After a PayPal decline at the capture (`INSTRUMENT_DECLINED`) the same order comes back. When
+PayPal won't take it again the library makes a new order under the same checkout, counting no new start, and never captures the
+old one; `completeReturn` then answers `declined: true` with `reordered: true`, and the next `start` with `replaces` returns the
+new order. That covers a card declined in Card Fields (PayPal answers the capture 201 with the order `COMPLETED` and its capture
+`DECLINED`, then takes no other card on that order), `ORDER_ALREADY_CAPTURED` with nothing paid, `MAX_NUMBER_OF_PAYMENT_ATTEMPTS_EXCEEDED`,
+`ORDER_EXPIRED`, `ORDER_COMPLETED_OR_VOIDED` with the order unpaid, and an order that is gone.
 
 `adminApi` functions take an optional `auth` argument, passed to `authorize.admin` as it came (for apps
 with their own session tokens); apps on Convex auth leave it out, as the caller's identity carries

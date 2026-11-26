@@ -598,6 +598,7 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
           ...capture,
           ...(name === 'PAYMENT.CAPTURE.COMPLETED' && breakdown ? { seller_receivable_breakdown: breakdown } : {}),
           links: [{ href: `${apiBase}/v2/checkout/orders/${id}`, rel: 'up', method: 'GET' }],
+          supplementary_data: { related_ids: { order_id: id } },
         }),
       )
     },
