@@ -16,6 +16,27 @@ const DEFAULT_EXPIRY_MS = 3 * 60 * 60_000
 
 const FINAL: ReadonlySet<CheckoutStatus> = new Set(['paid', 'refund_needed', 'failed', 'abandoned'])
 
+/** @internal Another press already replaced the checkout named in replaces: the one that did, to decide from again. */
+export interface Replaced {
+  replacedBy: string
+}
+
+/** How many checkouts a press follows through replacedBy (a press naming an old checkout after several changes) before giving up. */
+export const MAX_REPLACED_HOPS = 4
+
+/** @internal What a press says when it can't catch up with the presses after it. */
+export const STALE_PRESS = 'This payment was changed in another tab or press. Please reload the page and try again.'
+
+/** @internal start for a one-off: a checkout another press already replaced is followed to the one that replaced it. */
+export async function start(p: Payments, ctx: RunActionCtx, a: StartArgs<unknown>): Promise<StartedRedirect | StartedEmbedded | StartedOnPage> {
+  for (let hop = 0; hop < MAX_REPLACED_HOPS; hop++) {
+    const r = await begin(p, ctx, a)
+    if (!('replacedBy' in r)) return r
+    a = { ...a, replaces: r.replacedBy }
+  }
+  throw new ConvexError(STALE_PRESS)
+}
+
 /**
  * @internal start, and for a schedule's first payment (startScheduleCheckout) the schedule it
  * starts and the payer's customer at the processor, so the method that pays is saved with it.
@@ -25,7 +46,7 @@ export async function begin(
   ctx: RunActionCtx,
   a: StartArgs<unknown>,
   save?: { scheduleId: string; schedulePeriod: string; stripeCustomerId?: string; paypalCustomerId?: string },
-): Promise<StartedRedirect | StartedEmbedded | StartedOnPage> {
+): Promise<StartedRedirect | StartedEmbedded | StartedOnPage | Replaced> {
   if (!isMethodFor(a.processor, a.method)) throw new ConvexError(`${a.processor === 'stripe' ? 'Stripe' : 'PayPal'} doesn’t take ${a.method} payments here.`)
   if (!Number.isInteger(a.amountCents) || a.amountCents < 1) throw new ConvexError('A checkout needs an amount of at least one cent.')
   p.checkContext(a.context)
@@ -40,7 +61,7 @@ export async function begin(
   const expiresAt = a.expiresAt ?? now + DEFAULT_EXPIRY_MS
   const returnUrl = p.url(a.returnPath)
   const cancelUrl = p.url(a.cancelPath)
-  const checkoutId = await ctx.runMutation(p.component.checkouts.create, {
+  const row = {
     app: p.app,
     ref: a.ref,
     purpose: a.purpose,
@@ -48,7 +69,7 @@ export async function begin(
     amountCents: a.amountCents,
     processor: a.processor,
     method: a.method,
-    kind: a.ui === 'onPage' ? 'onPage' : 'hosted',
+    kind: a.ui === 'onPage' ? ('onPage' as const) : ('hosted' as const),
     payer: cleanPayer(a.payer),
     returnUrl,
     cancelUrl,
@@ -58,7 +79,12 @@ export async function begin(
     limits: await p.limits(ctx, 'start', a.payer.email, 1, a.limitKey),
     ...(save ? { scheduleId: save.scheduleId, schedulePeriod: save.schedulePeriod, stripeCustomerId: save.stripeCustomerId } : {}),
     now,
-  })
+  }
+  const made = a.replaces
+    ? await ctx.runMutation(p.component.checkouts.createReplacing, { ...row, replaces: a.replaces })
+    : { id: await ctx.runMutation(p.component.checkouts.create, row), created: true }
+  if (!made.created) return { replacedBy: made.id }
+  const checkoutId = made.id
   try {
     const made = a.processor === 'stripe' ? await startStripe(p, checkoutId, a, returnUrl, cancelUrl, expiresAt, now, save) : await startPaypal(p, ctx, checkoutId, a, returnUrl, cancelUrl, save)
     await ctx.runMutation(p.component.checkouts.attach, { id: checkoutId, processorCheckoutId: made.id })
@@ -476,8 +502,7 @@ const ORDER_SPENT: ReadonlySet<string> = new Set(['MAX_NUMBER_OF_PAYMENT_ATTEMPT
 
 /** A new PayPal order for an on-page checkout, under the same checkout: no new start is counted. Returns its id, or null when the checkout has moved on. */
 async function reorder(p: Payments, ctx: RunActionCtx, c: Checkout): Promise<string | null> {
-  const owner = c.scheduleId ? (await ctx.runQuery(p.component.schedules.get, { id: c.scheduleId }))?.owner : undefined
-  const paypalCustomerId = owner ? ((await ctx.runQuery(p.component.customers.paypalCustomer, { app: p.app, owner })) ?? undefined) : undefined
+  const paypalCustomerId = await schedulePaypalCustomer(p, ctx, c)
   const order = await createPaypalOrder(
     p,
     ctx,
@@ -588,10 +613,32 @@ async function reuseOrCloseChecked(p: Payments, ctx: RunActionCtx, c: Checkout, 
 /** A reused checkout must have this long left, so the payer isn't handed one the sweep is about to close. */
 const REUSE_MARGIN_MS = 10 * 60_000
 
+/**
+ * An on-page checkout another press made and is still starting (two presses at once): its
+ * PaymentIntent or order is asked for again under the same idempotency key, so the processor answers
+ * with the same one (or refuses while the first request is under way, and the payer presses again).
+ */
+async function resume(p: Payments, ctx: RunActionCtx, c: Checkout): Promise<OnPagePayment> {
+  const a = { ...c, payer: c.payer, returnPath: '', cancelPath: '', ui: 'onPage' as const }
+  const made =
+    c.processor === 'stripe'
+      ? await startStripe(p, c.id, a, c.returnUrl, c.cancelUrl, c.expiresAt, Date.now(), { stripeCustomerId: c.stripeCustomerId ?? undefined })
+      : await startPaypal(p, ctx, c.id, a, c.returnUrl, c.cancelUrl, c.scheduleId ? { paypalCustomerId: await schedulePaypalCustomer(p, ctx, c) } : undefined)
+  if (!made.onPage) throw new Error(`Checkout ${c.id} started without an on-page payment.`)
+  await ctx.runMutation(p.component.checkouts.attach, { id: c.id, processorCheckoutId: made.id })
+  return made.onPage
+}
+
+/** The PayPal customer a schedule's owner has, so a schedule's order saves its method under it. */
+async function schedulePaypalCustomer(p: Payments, ctx: RunActionCtx, c: Checkout) {
+  const owner = c.scheduleId ? (await ctx.runQuery(p.component.schedules.get, { id: c.scheduleId }))?.owner : undefined
+  return owner ? ((await ctx.runQuery(p.component.customers.paypalCustomer, { app: p.app, owner })) ?? undefined) : undefined
+}
+
 /** What the browser needs to pay an open on-page checkout again, or null when it can't be (canceled at Stripe; settled here if it was paid meanwhile). */
 async function reopen(p: Payments, ctx: RunActionCtx, c: Checkout): Promise<OnPagePayment | null> {
   const id = c.processorCheckoutId
-  if (!id) return null
+  if (!id) return c.status === 'created' && c.kind === 'onPage' ? await resume(p, ctx, c) : null
   if (c.processor === 'stripe') {
     const pi = await stripe.paymentIntent(p.stripeKeys(), id, { fetch: p.fetch })
     if (await settleIntent(p, ctx, c, pi)) return null

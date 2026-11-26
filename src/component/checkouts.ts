@@ -113,6 +113,26 @@ export const createCharge = mutation({
   },
 })
 
+/**
+ * create for a press that replaces an earlier checkout (start with replaces). The earlier one, when it
+ * is this app's for the same ref and purpose, is marked replacedBy in the same transaction, so two
+ * presses at once make one checkout: a press that finds it already replaced gets the replacing
+ * checkout's id back (created: false), with nothing made and no start counted.
+ */
+export const createReplacing = mutation({
+  args: { ...createArgs, replaces: v.string() },
+  returns: v.object({ id: v.string(), created: v.boolean() }),
+  handler: async (ctx, { replaces, ...a }) => {
+    const oldId = ctx.db.normalizeId('checkouts', replaces)
+    const old = oldId ? await ctx.db.get(oldId) : null
+    const same = old && old.app === a.app && old.ref.type === a.ref.type && old.ref.id === a.ref.id && old.purpose === a.purpose ? old : null
+    if (same?.replacedBy) return { id: same.replacedBy, created: false }
+    const made = await insertCheckout(ctx, a)
+    if (same) await ctx.db.patch(same._id, { replacedBy: made.id })
+    return made
+  },
+})
+
 /** The processor made its checkout: remember its id; the buyer is on their way. */
 export const attach = mutation({
   args: { id: v.string(), processorCheckoutId: v.string() },

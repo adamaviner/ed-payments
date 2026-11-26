@@ -10,7 +10,7 @@ import { DEFAULT_CHARGE_HOUR_UTC, DEFAULT_RETRY_DAYS, anchorDayOf, isAnchorDay }
 import { isMethodFor, type Method, type Payer, type Processor, type Ref } from '../core/types.js'
 import type { Payments, RunActionCtx, RunMutationCtx, RunQueryCtx, SchedulerCtx, StartUi, StartedEmbedded, StartedOnPage, StartedRedirect } from './index.js'
 import { getOrderOrNull, orderVault } from '../core/paypal.js'
-import { paypalSavedArgs, reuseOrClose } from './hosted.js'
+import { MAX_REPLACED_HOPS, STALE_PRESS, paypalSavedArgs, reuseOrClose, type Replaced } from './hosted.js'
 import { ensureCustomer } from './saved.js'
 import { cleanPayer, errorText } from './util.js'
 
@@ -112,6 +112,20 @@ export async function startSchedule<T>(p: Payments, ctx: SchedulerCtx, a: StartS
 }
 
 export async function startScheduleCheckout<T>(p: Payments, ctx: RunActionCtx, a: StartScheduleCheckoutArgs<T>): Promise<(StartedRedirect | StartedEmbedded | StartedOnPage) & { scheduleId: string }> {
+  // A first payment another press already replaced is followed to the one that replaced it.
+  for (let hop = 0; hop < MAX_REPLACED_HOPS; hop++) {
+    const r = await startScheduleCheckoutOnce(p, ctx, a)
+    if (!('replacedBy' in r)) return r
+    a = { ...a, replaces: r.replacedBy }
+  }
+  throw new ConvexError(STALE_PRESS)
+}
+
+async function startScheduleCheckoutOnce<T>(
+  p: Payments,
+  ctx: RunActionCtx,
+  a: StartScheduleCheckoutArgs<T>,
+): Promise<((StartedRedirect | StartedEmbedded | StartedOnPage) & { scheduleId: string }) | Replaced> {
   if (!isMethodFor(a.processor, a.method)) throw new ConvexError(`${a.processor === 'stripe' ? 'Stripe' : 'PayPal'} doesn’t take ${a.method} payments here.`)
   checkBase(p, a)
   const ui = a.ui ?? 'embedded'
@@ -167,14 +181,24 @@ export async function startScheduleCheckout<T>(p: Payments, ctx: RunActionCtx, a
         limitKey: a.limitKey,
         context: a.context,
         ui,
+        replaces: a.replaces,
       },
       { scheduleId, schedulePeriod: schedule?.period ?? '', stripeCustomerId, paypalCustomerId },
     )
+    if ('replacedBy' in started) {
+      await discard(p, ctx, scheduleId)
+      return started
+    }
     return { ...started, scheduleId }
   } catch (err) {
-    await ctx.runMutation(p.component.schedules.discard, { id: scheduleId }).catch((e: unknown) => console.warn(`payments: couldn’t discard schedule ${scheduleId}: ${errorText(e)}`))
+    await discard(p, ctx, scheduleId)
     throw err
   }
+}
+
+/** A schedule made for a first payment that didn't start (no checkout was made for it) is removed. */
+async function discard(p: Payments, ctx: RunActionCtx, scheduleId: string) {
+  await ctx.runMutation(p.component.schedules.discard, { id: scheduleId }).catch((e: unknown) => console.warn(`payments: couldn’t discard schedule ${scheduleId}: ${errorText(e)}`))
 }
 
 /**
