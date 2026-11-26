@@ -166,6 +166,20 @@ test('on-page: an order PayPal won’t take again (re-ordered under the same che
   expect(capture.mock.calls).toEqual([[{ processor: 'paypal', token: 'ORDER1' }], [{ processor: 'paypal', token: 'ORDER1B' }]])
 })
 
+test('on-page: a card PayPal declined at the capture (the checkout failed) is said under the fields; the next press starts again', async () => {
+  capture.mockResolvedValueOnce({ status: 'failed' }).mockResolvedValueOnce({ status: 'paid' })
+  const start = vi.fn().mockResolvedValueOnce(paypalOnPage('ORDER1')).mockResolvedValueOnce(paypalOnPage('ORDER2'))
+  const navigate = vi.fn()
+  render(<PaypalOnPagePayment clientId="client-1" start={start} completeReturn={completeReturn} submitLabel="Give $25" navigate={navigate} />)
+  await loaded('Give $25')
+  fireEvent.click(screen.getByRole('button', { name: 'Give $25' }))
+  expect(await screen.findByText('The card was declined. Try another card.')).toBeTruthy()
+  expect(navigate).not.toHaveBeenCalled()
+  await waitFor(() => expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Give $25' }).disabled).toBe(false))
+  fireEvent.click(screen.getByRole('button', { name: 'Give $25' }))
+  await waitFor(() => expect(navigate).toHaveBeenCalledWith('https://app.example.org/donate/thanks?token=ORDER2'))
+})
+
 test('on-page: the app refusing to start is said in its words, and nothing is captured', async () => {
   vi.spyOn(console, 'warn').mockImplementation(() => {})
   const start = vi.fn(() => Promise.reject(new Error('Give at least $5.')))

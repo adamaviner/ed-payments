@@ -364,7 +364,16 @@ type CardOrder = { orderId: string; returnUrl: string }
  * decline is said under the fields and the payer can press again; anything else after the capture has started
  * goes to the return page, which asks the server how it stands.
  */
-function useCardPayment(a: { clientId: string; orderKey?: string; order: () => Promise<CardOrder>; completeReturn: CompleteReturnRef; navigate?: (url: string) => void; style?: PaypalFieldStyle }) {
+function useCardPayment(a: {
+  clientId: string
+  orderKey?: string
+  order: () => Promise<CardOrder>
+  completeReturn: CompleteReturnRef
+  navigate?: (url: string) => void
+  style?: PaypalFieldStyle
+  /** A capture that failed the checkout is said as a decline and the payer stays, as the next press starts afresh (on-page only). */
+  failedIsDecline?: boolean
+}) {
   const capture = useAction(a.completeReturn)
   // null: no capture asked for yet; capturing: asked, no answer (yet).
   const outcome = useRef<'capturing' | 'paid' | 'declined' | null>(null)
@@ -396,7 +405,7 @@ function useCardPayment(a: { clientId: string; orderKey?: string; order: () => P
         onApprove: async ({ orderID }) => {
           outcome.current = 'capturing'
           const r = await latest.current.capture({ processor: 'paypal', token: orderID })
-          outcome.current = r?.declined ? 'declined' : 'paid'
+          outcome.current = r?.declined || (a.failedIsDecline && r?.status === 'failed') ? 'declined' : 'paid'
         },
         onError: (err) => console.error('payments: PayPal card fields:', err),
       }) ?? null
@@ -474,7 +483,10 @@ export interface PaypalOnPagePaymentProps {
 
 /**
  * PayPal's card fields for a new payment on the app's own page: nothing is made at PayPal until the press, when the
- * app's start makes the order, PayPal checks the card and the payment is captured, as PaypalCardPayment does.
+ * app's start makes the order, PayPal checks the card and the payment is captured, as PaypalCardPayment does. A
+ * declined card is said under the fields, whether PayPal let the checkout take another order (declined, reordered)
+ * or the checkout failed (PayPal answers a declined card with a COMPLETED order that takes no other card); either
+ * way the next press calls start again.
  */
 export function PaypalOnPagePayment({ clientId, start, completeReturn, submitLabel, navigate, note, disabled, style, className }: PaypalOnPagePaymentProps) {
   const order = async (): Promise<CardOrder> => {
@@ -482,6 +494,6 @@ export function PaypalOnPagePayment({ clientId, start, completeReturn, submitLab
     if (onPage.processor !== 'paypal' || onPage.clientId !== clientId) throw new Error(WRONG_PROCESSOR)
     return { orderId: onPage.orderId, returnUrl: onPage.returnUrl }
   }
-  const { boxes, load, error, busy, submit } = useCardPayment({ clientId, order, completeReturn, navigate, style })
+  const { boxes, load, error, busy, submit } = useCardPayment({ clientId, order, completeReturn, navigate, style, failedIsDecline: true })
   return <CardForm boxes={boxes} load={load} note={note} error={error} label={busy ? 'Paying…' : submitLabel} disabled={!!disabled || busy} onSubmit={() => void submit()} className={className} />
 }
