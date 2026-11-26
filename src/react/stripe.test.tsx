@@ -290,6 +290,31 @@ test('on-page: a schedule’s first payment saves the method; a new amount is sh
   expect(made[0].updates).toEqual([{ amount: 5_000 }])
 })
 
+test('on-page: switching between one-off and monthly, or between methods, changes the form in place, keeping what the payer typed', async () => {
+  const props = { publishableKey: 'pk_test_1', amountCents: 2_500, start: () => Promise.resolve(stripeOnPage(1)), submitLabel: 'Give $25' }
+  const { rerender } = render(<StripeOnPagePayment {...props} />)
+  await ready('Give $25')
+  rerender(<StripeOnPagePayment {...props} saveForLater />)
+  rerender(<StripeOnPagePayment {...props} />)
+  rerender(<StripeOnPagePayment {...props} methods={['ach']} />)
+  expect(made).toHaveLength(1)
+  expect(made[0].destroyed).toBe(false)
+  expect(made[0].updates).toEqual([
+    { setupFutureUsage: 'off_session', allowedPaymentMethodTypes: [...SAVED_METHOD_TYPES], paymentMethodOptions: SAVED_METHOD_OPTIONS },
+    { setupFutureUsage: null, allowedPaymentMethodTypes: [...SAVED_METHOD_TYPES], paymentMethodOptions: SAVED_METHOD_OPTIONS },
+    { setupFutureUsage: null, allowedPaymentMethodTypes: ['us_bank_account'], paymentMethodOptions: SAVED_METHOD_OPTIONS },
+  ])
+})
+
+test('on-page: a frequency chosen while Stripe.js loads is in the form it mounts', async () => {
+  const props = { publishableKey: 'pk_test_1', amountCents: 2_500, start: () => Promise.resolve(stripeOnPage(1)), submitLabel: 'Give $25' }
+  const { rerender } = render(<StripeOnPagePayment {...props} />)
+  rerender(<StripeOnPagePayment {...props} saveForLater />)
+  await ready('Give $25')
+  expect(made).toHaveLength(1)
+  expect(made[0].options).toEqual(onPagePaymentElementsOptions(2_500, { saveForLater: true }, {}))
+})
+
 test('on-page: methods narrows the form to what start asks for, as the PaymentIntent is made', async () => {
   render(<StripeOnPagePayment publishableKey="pk_test_1" amountCents={2_500} methods={['ach']} start={() => Promise.resolve(stripeOnPage(1))} submitLabel="Give $25" />)
   await ready('Give $25')

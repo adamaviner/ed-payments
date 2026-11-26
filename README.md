@@ -279,8 +279,8 @@ const start = async () => {
 
 - **Options.** `onPagePaymentElementsOptions(amountCents, { saveForLater, methods })` (exported): the method types
   (`methods`, both a card and a bank account by default, as `StripeSaveMethod`) and `setupFutureUsage: 'off_session'`
-  when saving, as the library's PaymentIntent is made. Changing `methods` or `saveForLater` mounts the form again
-  (clearing it); a new `amountCents` or `appearance` doesn't. The form waits for an amount Stripe takes (whole cents
+  when saving, as the library's PaymentIntent is made. A new `methods`, `saveForLater`, `amountCents` or `appearance`
+  changes the form in place (`elements.update`), keeping what the payer typed; a new `payer` (shown or not) mounts it again. The form waits for an amount Stripe takes (whole cents
   above zero) before it shows, and keeps the last one, with its button off, while the app's amount isn't one.
 - **`payer`** hides Stripe's own name and email fields and puts them on the payment method at the confirm (a bank
   account needs both). Without it Stripe asks for what a method needs.

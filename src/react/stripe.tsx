@@ -62,7 +62,7 @@ interface PaymentElement {
 interface Elements {
   create(type: 'payment', o: ElementOptions): PaymentElement
   submit(): Promise<{ error?: StripeError }>
-  update(o: { appearance?: StripeAppearance; amount?: number }): void
+  update(o: { appearance?: StripeAppearance; amount?: number } | InPlace): void
 }
 interface Confirm {
   elements: Elements
@@ -115,8 +115,15 @@ const ELEMENT_OPTIONS: ElementOptions = { paymentMethodOrder: [...SAVED_METHOD_T
 type Form = { stripe: StripeJs; elements: Elements }
 
 /**
+ * What elements.update changes on a mounted payment form (https://docs.stripe.com/js/elements_object/update), so a new
+ * frequency or method keeps what the payer typed; null takes setupFutureUsage off again (Stripe.js's own types allow it).
+ */
+type InPlace = Pick<StripeElementsOptions, 'allowedPaymentMethodTypes' | 'paymentMethodOptions'> & { setupFutureUsage: 'off_session' | null }
+
+/**
  * Loads Stripe.js and mounts a Payment Element in `box` for these options. Changing the options mounts
- * it again; changing only the appearance or the amount updates it in place, keeping what the payer typed. A
+ * it again; changing only the appearance or the amount updates it in place, keeping what the payer typed, as does
+ * changing the methods or setupFutureUsage when `inPlace` (a new payment's form, whose intent isn't made yet). A
  * payment form waits for an amount Stripe takes (a whole number of cents above zero) before it mounts, and an amount
  * that isn't one later leaves the form at the last one; `amountOk` says whether the current one is.
  */
@@ -126,6 +133,7 @@ function usePaymentElement(
   appearance: StripeAppearance | undefined,
   onChange: () => void,
   element: ElementOptions = ELEMENT_OPTIONS,
+  inPlace = false,
 ) {
   const box = useRef<HTMLDivElement>(null)
   const form = useRef<Form | null>(null)
@@ -134,7 +142,10 @@ function usePaymentElement(
   const [load, setLoad] = useState<Load>('loading')
   useSlow(load, setLoad)
   // Strings, so objects made fresh on every render don't mount the element again.
-  const optionsKey = JSON.stringify(options)
+  const { setupFutureUsage, allowedPaymentMethodTypes, paymentMethodOptions, ...fixed } = options
+  const changing: InPlace = { setupFutureUsage: setupFutureUsage ?? null, allowedPaymentMethodTypes, paymentMethodOptions }
+  const optionsKey = JSON.stringify(inPlace ? fixed : options)
+  const changingKey = JSON.stringify(inPlace ? changing : null)
   const elementKey = JSON.stringify(element)
   const appearanceKey = JSON.stringify(appearance ?? {})
   const amountOk = amount === undefined || (Number.isInteger(amount) && amount > 0)
@@ -143,7 +154,9 @@ function usePaymentElement(
   // Once there has been an amount, the form stays mounted through a moment without one (a field being retyped).
   const [mountable, setMountable] = useState(amountOk)
   if (amountOk && !mountable) setMountable(true)
-  const latest = useLatest({ appearanceKey, lastAmount, onChange })
+  const latest = useLatest({ appearanceKey, lastAmount, onChange, changing })
+  // The settings a form was mounted with or last updated to, so the update effect leaves a new form alone.
+  const shown = useRef<string | null>(null)
 
   useEffect(() => {
     elementsNow.current?.update({ appearance: JSON.parse(appearanceKey) as StripeAppearance })
@@ -152,6 +165,12 @@ function usePaymentElement(
   useEffect(() => {
     if (amount !== undefined && amountOk) elementsNow.current?.update({ amount })
   }, [amount, amountOk])
+
+  useEffect(() => {
+    if (changingKey === 'null' || shown.current === null || shown.current === changingKey) return
+    shown.current = changingKey
+    elementsNow.current?.update(JSON.parse(changingKey) as InPlace)
+  }, [changingKey])
 
   useEffect(() => {
     if (!mountable) return undefined
@@ -167,13 +186,16 @@ function usePaymentElement(
       if (!make) return failed(new Error('Stripe.js loaded without Stripe.'))
       try {
         const stripe = make(publishableKey)
-        const { lastAmount: amountNow, appearanceKey: appearanceNow } = latest.current
+        const { lastAmount: amountNow, appearanceKey: appearanceNow, changing: changingNow } = latest.current
+        const { setupFutureUsage: saveNow, ...typesNow } = changingNow
         const elements = stripe.elements({
           ...(JSON.parse(optionsKey) as StripeElementsOptions),
+          ...(inPlace ? { ...typesNow, ...(saveNow ? { setupFutureUsage: saveNow } : {}) } : {}),
           ...(amountNow === undefined ? {} : { amount: amountNow }),
           appearance: JSON.parse(appearanceNow) as StripeAppearance,
         })
         elementsNow.current = elements
+        if (inPlace) shown.current = JSON.stringify(changingNow)
         const made = elements.create('payment', JSON.parse(elementKey) as ElementOptions)
         element = made
         made.on('ready', () => {
@@ -194,7 +216,7 @@ function usePaymentElement(
       elementsNow.current = null
       element?.destroy()
     }
-  }, [publishableKey, optionsKey, elementKey, latest, mountable])
+  }, [publishableKey, optionsKey, elementKey, latest, mountable, inPlace])
 
   return { box, form, load, amountOk }
 }
@@ -405,7 +427,7 @@ export interface StripeOnPagePaymentProps {
   methods?: readonly SavedMethodKind[]
   /**
    * A schedule's first payment (payments.startScheduleCheckout): the method is saved for the next ones, and Stripe says
-   * so under the fields. Must match what start makes; changing it mounts the form again.
+   * so under the fields. Must match what start makes; changing it updates the form in place, keeping what the payer typed.
    */
   saveForLater?: boolean
   /**
@@ -455,6 +477,7 @@ export function StripeOnPagePayment({ publishableKey, amountCents, methods, save
     appearance,
     () => {},
     payer ? PAYER_FIELDS : ELEMENT_OPTIONS,
+    true,
   )
   const latest = useLatest({ start, payer, navigate })
 

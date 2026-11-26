@@ -7,7 +7,7 @@ import { PAYPAL_CARD_PAY_NAMESPACE, PaypalCardPayment, paypalCardPaySdkUrl, Payp
 import type { OnPagePayment } from '../client/index.js'
 
 type Options = { createOrder: () => Promise<string>; onApprove: (d: { orderID: string }) => Promise<void>; style?: Record<string, Record<string, string>> }
-const capture = vi.fn<(a: unknown) => Promise<{ status: string; declined?: true } | null>>()
+const capture = vi.fn<(a: unknown) => Promise<{ status: string; declined?: true; reordered?: true } | null>>()
 vi.mock('convex/react', () => ({ useAction: () => capture }))
 
 let scripts: HTMLScriptElement[]
@@ -149,6 +149,21 @@ test('on-page: a decline is said; the next press starts again and pays the order
   expect(start).toHaveBeenCalledTimes(2)
   expect(capture).toHaveBeenLastCalledWith({ processor: 'paypal', token: 'ORDER2' })
   expect(screen.queryByRole('alert')).toBeNull()
+})
+
+test('on-page: an order PayPal won’t take again (re-ordered under the same checkout) is a decline; the next press pays the new order start returns', async () => {
+  capture.mockResolvedValueOnce({ status: 'pending', declined: true, reordered: true }).mockResolvedValueOnce({ status: 'paid' })
+  const start = vi.fn().mockResolvedValueOnce(paypalOnPage('ORDER1')).mockResolvedValueOnce(paypalOnPage('ORDER1B'))
+  const navigate = vi.fn()
+  render(<PaypalOnPagePayment clientId="client-1" start={start} completeReturn={completeReturn} submitLabel="Give $25" navigate={navigate} />)
+  await loaded('Give $25')
+  fireEvent.click(screen.getByRole('button', { name: 'Give $25' }))
+  expect(await screen.findByText('The card was declined. Try another card.')).toBeTruthy()
+  expect(navigate).not.toHaveBeenCalled()
+  await waitFor(() => expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Give $25' }).disabled).toBe(false))
+  fireEvent.click(screen.getByRole('button', { name: 'Give $25' }))
+  await waitFor(() => expect(navigate).toHaveBeenCalledWith('https://app.example.org/donate/thanks?token=ORDER1B'))
+  expect(capture.mock.calls).toEqual([[{ processor: 'paypal', token: 'ORDER1' }], [{ processor: 'paypal', token: 'ORDER1B' }]])
 })
 
 test('on-page: the app refusing to start is said in its words, and nothing is captured', async () => {
