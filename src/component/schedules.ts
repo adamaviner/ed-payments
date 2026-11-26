@@ -478,8 +478,8 @@ type CheckoutDoc = Doc<'checkouts'>
  * A schedule that never started because its first checkout expired or failed, whose first payment
  * arrived anyway on a checkout the payer didn't cancel: it starts after all.
  */
-const revivable = (s: Doc<'schedules'>, c: Pick<CheckoutDoc, 'schedulePeriod' | 'cancelledByBuyerAt' | 'replacedBy'>) =>
-  s.status === 'cancelled' && s.neverStarted === true && (c.cancelledByBuyerAt === undefined || c.replacedBy !== undefined) && c.schedulePeriod === s.firstPeriod
+const revivable = (s: Doc<'schedules'>, c: Pick<CheckoutDoc, 'schedulePeriod' | 'cancelledByBuyerAt' | 'closedBy'>) =>
+  s.status === 'cancelled' && s.neverStarted === true && (c.cancelledByBuyerAt === undefined || c.closedBy === 'press') && c.schedulePeriod === s.firstPeriod
 
 /** A schedule's first payment arrived (or is on its way): it starts. */
 async function start(ctx: MutationCtx, s: Doc<'schedules'>, c: CheckoutDoc, now: number) {

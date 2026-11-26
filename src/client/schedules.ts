@@ -309,9 +309,13 @@ export async function changeScheduleMethod(
   ctx: RunActionCtx,
   a: { scheduleId: string; paymentMethodId?: string; paypalSetupTokenId?: string; amountCents?: number; by?: string; limitKey?: string },
 ): Promise<ScheduleView> {
-  await p.takeLimits(ctx, 'scheduleMethod', `schedule:${a.scheduleId.slice(0, 64)}`, 1, a.limitKey)
   if (!a.paymentMethodId === !a.paypalSetupTokenId) throw new ConvexError('Give one new method: a paymentMethodId or a PayPal setup token.')
+  if (a.amountCents !== undefined && (!Number.isInteger(a.amountCents) || a.amountCents < 1)) throw new ConvexError('A schedule needs an amount of at least one cent.')
+  await p.takeLimits(ctx, 'scheduleMethod', `schedule:${a.scheduleId.slice(0, 64)}`, 1, a.limitKey)
   const s = await mine(p, ctx, a.scheduleId)
+  // Refused as updateSchedule would, before a PayPal approval is spent on a schedule that can't take it.
+  if (s.status === 'cancelled') throw new ConvexError('This schedule was cancelled.')
+  if (s.status === 'starting') throw new ConvexError('This schedule hasn’t started yet.')
   const saved = a.paypalSetupTokenId
     ? await savePaypalMethod(p, ctx, { owner: s.owner, setupTokenId: a.paypalSetupTokenId, recurring: true, limitKey: a.limitKey })
     : await verifyOwner(p, ctx, { owner: s.owner, paymentMethodId: a.paymentMethodId ?? '' })

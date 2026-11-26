@@ -597,8 +597,10 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
       x.status = 'APPROVED'
       x.card = { name, last_digits: '1111', expiry: '2030-12', brand: 'VISA', type: 'CREDIT' }
     },
-    /** The buyer approves on PayPal's page; returns the CHECKOUT.ORDER.APPROVED webhook. */
-    /** The buyer approved with PayPal's own button (default) or the buttons' card form: the order's payment_source says which, as PayPal's does. */
+    /**
+     * The buyer approves on PayPal's page or the buttons, with PayPal's own button (default) or the buttons' card form:
+     * the order's payment_source says which, as PayPal's does. Returns the CHECKOUT.ORDER.APPROVED webhook.
+     */
     approve(id: string, o: { eventId?: string; with?: 'paypal' | 'card' } = {}) {
       const x = order(id)
       x.status = 'APPROVED'

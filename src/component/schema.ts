@@ -144,6 +144,11 @@ export default defineSchema({
      * same transaction that made it, so a second press naming this one finds that checkout instead of making another.
      */
     replacedBy: v.optional(v.id('checkouts')),
+    /**
+     * Closed by the attempt rather than by the buyer: 'press', by a later press (replaces); 'chain', because another
+     * payment of its chain of presses came first. A replaced one's payment still counts if it comes first; a chain-closed one's is owed back.
+     */
+    closedBy: v.optional(v.union(v.literal('press'), v.literal('chain'))),
     callbacks,
     /** Passed to every callback as it was given to start. */
     context: v.optional(v.any()),
@@ -162,7 +167,8 @@ export default defineSchema({
     .index('by_status_createdAt', ['status', 'createdAt'])
     .index('by_retryOf', ['retryOf'])
     .index('by_chargeKey', ['chargeKey'])
-    .index('by_scheduleId', ['scheduleId']),
+    .index('by_scheduleId', ['scheduleId'])
+    .index('by_replacedBy', ['replacedBy']),
 
   /**
    * Repeating charges of a saved method (monthly gifts): the library charges each due one with an

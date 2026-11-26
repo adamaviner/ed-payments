@@ -90,6 +90,8 @@ async function recordMethods(p: Payments, ctx: RunActionCtx, stripeCustomerId: s
 
 /** Both processors' saved methods of the owner, newest first, leaving out removed ones. A processor the app hasn't set up is skipped. */
 export async function savedMethods(p: Payments, ctx: RunActionCtx, a: { owner: Ref; stripeCustomerId?: string; limitKey?: string; forAmountCents?: number }): Promise<SavedMethod[]> {
+  const amount = a.forAmountCents
+  if (amount !== undefined && (!Number.isInteger(amount) || amount < 0)) throw new ConvexError('An amount is whole cents, zero or more.')
   // Each list asks Stripe; a page shows it on load, so it may be asked more often than a payment is started.
   await p.takeLimits(ctx, 'methods', ownerTag(a.owner), 4, a.limitKey)
   const out: SavedMethod[] = []
@@ -102,9 +104,7 @@ export async function savedMethods(p: Payments, ctx: RunActionCtx, a: { owner: R
   }
   if (p.options.paypal?.()) out.push(...(await paypalMethods(p, ctx, a.owner)))
   const newest = out.sort((x, y) => y.createdAt - x.createdAt)
-  const amount = a.forAmountCents
   if (amount === undefined) return newest
-  if (!Number.isInteger(amount) || amount < 0) throw new ConvexError('An amount is whole cents, zero or more.')
   // Sorted by fee in a stable sort, so of methods costing the same the newest stays first.
   return newest
     .filter((m) => !m.declined)

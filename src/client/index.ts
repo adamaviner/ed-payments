@@ -780,11 +780,6 @@ export class Payments<C extends GenericValidator = GenericValidator> {
   }
 
   /**
-   * Changes a schedule: the amount (from the next charge), the saved method (one of the owner's,
-   * checked as for chargeSaved), the day of the month, the description. A new method on a schedule
-   * being retried charges the refused period at once; on a lapsed one it starts again.
-   */
-  /**
    * Saves a new method for a schedule's owner and switches the schedule to it in one call: a Stripe paymentMethodId
    * (checked as the owner's) or a PayPal setup token (saved to the owner's vault). amountCents, when given, changes the
    * amount too (a fee recomputed for the new method). Gate it with the app's own check (e.g. a signed link). Rate-limited.
@@ -796,6 +791,11 @@ export class Payments<C extends GenericValidator = GenericValidator> {
     return await changeScheduleMethod(this, ctx, a)
   }
 
+  /**
+   * Changes a schedule: the amount (from the next charge), the saved method (one of the owner's,
+   * checked as for chargeSaved), the day of the month, the description. A new method on a schedule
+   * being retried charges the refused period at once; on a lapsed one it starts again.
+   */
   async updateSchedule(
     ctx: RunMutationCtx,
     a: { scheduleId: string; amountCents?: number; paymentMethodId?: string; stripeCustomerId?: string; anchorDay?: number; description?: string; by?: string },

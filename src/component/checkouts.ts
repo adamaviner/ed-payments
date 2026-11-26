@@ -433,7 +433,7 @@ export const cancel = mutation({
     if (c.status !== 'created' && c.status !== 'pending') return { outcome: 'already_handled' as const, status: c.status }
     if (c.captureClaimedAt !== undefined && now - c.captureClaimedAt < CAPTURE_CLAIM_MS) return { outcome: 'being_paid' as const }
     if (c.captureClaimedAt !== undefined && !checked) return { outcome: 'check_processor' as const }
-    await ctx.db.patch(c._id, { status: 'abandoned', settledAt: now, cancelledByBuyerAt: now })
+    await ctx.db.patch(c._id, { status: 'abandoned', settledAt: now, cancelledByBuyerAt: now, ...(replaced ? { closedBy: 'press' as const } : {}) })
     if (giveBack && c.createdAt > now - giveBack.windowMs) await giveBackOne(ctx, giveBack.key, now, giveBack.windowMs)
     await scheduleAbandoned(ctx, c, now, { quiet: replaced })
     return { outcome: 'abandoned' as const }
@@ -508,38 +508,38 @@ async function paidElsewhere(ctx: MutationCtx, c: Doc<'checkouts'>): Promise<boo
 }
 
 /**
- * A press that replaced another (replacedBy) closed it as the buyer's cancel does, but the two are one attempt to pay for
- * one thing: a payment on the replaced one is still the attempt's, and the chain decides which pays (paidInChain).
+ * A press that replaced another closed it as the buyer's cancel does (closedBy 'press'), but the two are one attempt to
+ * pay for one thing: a payment on the replaced one is still the attempt's, and the chain decides which pays (paidInChain).
+ * One the buyer cancelled themselves (Edit) stays cancelled even when a later press names it.
  */
-const cancelledByBuyer = (c: Doc<'checkouts'>) => c.cancelledByBuyerAt !== undefined && c.replacedBy === undefined
+const cancelledByBuyer = (c: Doc<'checkouts'>) => c.cancelledByBuyerAt !== undefined && c.closedBy !== 'press'
 
 /**
  * The other checkouts linked to c by presses (replacedBy, either way): one attempt to pay for one thing, of which the
- * first payment to settle is the one paid. createReplacing links only checkouts of one app, ref and purpose, so the
- * chain is found among the ref's checkouts. Off-session charges are never replaced.
+ * first payment to settle is the one paid. createReplacing links only checkouts of one app, ref and purpose. Off-session
+ * charges are never replaced.
  */
 async function chainOf(ctx: QueryCtx, c: Doc<'checkouts'>): Promise<Doc<'checkouts'>[]> {
   if (c.kind !== 'hosted' && c.kind !== 'onPage') return []
-  const rows = (
-    await ctx.db
+  const seen = new Map<string, Doc<'checkouts'>>([[c._id, c]])
+  const todo: Doc<'checkouts'>[] = [c]
+  for (let x = todo.pop(); x && seen.size < MAX_CHAIN; x = todo.pop()) {
+    const next = x.replacedBy ? await ctx.db.get(x.replacedBy) : null
+    const before = await ctx.db
       .query('checkouts')
-      .withIndex('by_ref', (q) => q.eq('ref.type', c.ref.type).eq('ref.id', c.ref.id))
-      .order('desc')
-      .take(100)
-  ).filter((x) => x.app === c.app && x.purpose === c.purpose)
-  const chain = new Set<string>([c._id])
-  for (let grew = true; grew;) {
-    grew = false
-    for (const x of rows) {
-      const next = chain.has(x._id) ? x.replacedBy : x.replacedBy && chain.has(x.replacedBy) ? x._id : undefined
-      if (next && !chain.has(next)) {
-        chain.add(next)
-        grew = true
-      }
+      .withIndex('by_replacedBy', (q) => q.eq('replacedBy', x._id))
+      .take(MAX_CHAIN)
+    for (const y of next ? [next, ...before] : before) {
+      if (seen.has(y._id)) continue
+      seen.set(y._id, y)
+      todo.push(y)
     }
   }
-  return rows.filter((x) => x._id !== c._id && chain.has(x._id))
+  return [...seen.values()].filter((x) => x._id !== c._id)
 }
+
+/** Far more presses than one attempt makes (each is rate-limited); the walk stops there. */
+const MAX_CHAIN = 100
 
 /** How another checkout in a checkout's chain of presses stands when it was paid or is being paid by bank; null when none was. */
 export const chainPaid = query({
@@ -548,15 +548,21 @@ export const chainPaid = query({
   handler: async (ctx, { id }) => {
     const nid = ctx.db.normalizeId('checkouts', id)
     const c = nid ? await ctx.db.get(nid) : null
-    const paid = c ? (await chainOf(ctx, c)).find((x) => x.status === 'paid' || x.status === 'processing') : undefined
+    const paid = c ? (await chainOf(ctx, c)).find(counts) : undefined
     return paid?.status === 'paid' || paid?.status === 'processing' ? paid.status : null
   },
 })
 
 /** Whether another checkout in c's chain of presses was paid, or is being paid by bank. */
 async function paidInChain(ctx: QueryCtx, c: Doc<'checkouts'>): Promise<boolean> {
-  return (await chainOf(ctx, c)).some((x) => x.status === 'paid' || x.status === 'processing')
+  return (await chainOf(ctx, c)).some(counts)
 }
+
+/**
+ * A payment that came first in its chain: paid, or a bank payment on its way that was told to the app. One on a checkout
+ * the chain or the buyer had closed is owed back when it arrives, so it never counts, even while it is processing.
+ */
+const counts = (x: Doc<'checkouts'>) => (x.status === 'paid' || x.status === 'processing') && x.closedBy !== 'chain' && !cancelledByBuyer(x)
 
 /**
  * c's payment came first in its chain of presses: the others still open are closed, so the buyer's other tab can't pay
@@ -567,7 +573,7 @@ async function paidInChain(ctx: QueryCtx, c: Doc<'checkouts'>): Promise<boolean>
 async function closeChain(ctx: MutationCtx, c: Doc<'checkouts'>, now: number): Promise<{ closed?: string[] }> {
   const open = (await chainOf(ctx, c)).filter((x) => (x.status === 'created' || x.status === 'pending') && !(x.captureClaimedAt !== undefined && now - x.captureClaimedAt < CAPTURE_CLAIM_MS))
   for (const x of open) {
-    await ctx.db.patch(x._id, { status: 'abandoned', settledAt: now })
+    await ctx.db.patch(x._id, { status: 'abandoned', settledAt: now, closedBy: 'chain' })
     await scheduleAbandoned(ctx, x, now, { quiet: true })
   }
   return open.length ? { closed: open.map((x) => x._id) } : {}

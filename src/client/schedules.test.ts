@@ -562,6 +562,34 @@ describe('startOnPage: one ref for the whole attempt, one-off or monthly', () =>
     await expect(press(t, { monthly: true, replaces: second.checkoutId })).rejects.toThrow('This is already paid.')
   })
 
+  test('two bank payments on their way: the first stays the one paid, and the one that came second is owed back', async () => {
+    const { t, calls, status } = setup()
+    const a = await press(t, { method: 'ach' })
+    const b = await press(t, { method: 'ach', amountCents: 3000, replaces: a.checkoutId })
+    const piA = (await status(a.checkoutId)).processorCheckoutId!
+    const piB = (await status(b.checkoutId)).processorCheckoutId!
+    await t.fetch('/stripe/webhook', await stripe.confirm(piA, 'bank'))
+    await t.fetch('/stripe/webhook', await stripe.confirm(piB, 'bank'))
+    await t.fetch('/stripe/webhook', await stripe.settleBank(piA, true))
+    expect(await status(a.checkoutId)).toMatchObject({ status: 'paid' })
+    await t.fetch('/stripe/webhook', await stripe.settleBank(piB, true))
+    expect(await status(b.checkoutId)).toMatchObject({ status: 'refund_needed' })
+    expect(await calls('onPaid')).toMatchObject([{ checkoutId: a.checkoutId }])
+    expect(await calls('onProcessing')).toMatchObject([{ checkoutId: a.checkoutId }])
+  })
+
+  test('a payment the buyer cancelled (Edit) before pressing again is owed back when it arrives, and its schedule stays ended', async () => {
+    const { t, calls, schedule, status } = setup()
+    const first = await press(t, { monthly: true })
+    await t.action(api.payments.cancelCheckout, { checkoutId: first.checkoutId })
+    const again = await press(t, { monthly: true, amountCents: 3000, replaces: first.checkoutId })
+    expect(again.reused).toBe(false)
+    await t.fetch('/stripe/webhook', await stripe.confirm((await status(first.checkoutId)).processorCheckoutId!))
+    expect(await status(first.checkoutId)).toMatchObject({ status: 'refund_needed', lastError: 'The buyer cancelled this payment before it arrived.' })
+    expect(await schedule(first.scheduleId!)).toMatchObject({ status: 'cancelled' })
+    expect(await calls('onPaid')).toEqual([])
+  })
+
   test('a bank payment on its way counts as the first: a later card payment in the chain is owed back', async () => {
     const { t, calls, status } = setup()
     const bank = await press(t, { method: 'ach' })
