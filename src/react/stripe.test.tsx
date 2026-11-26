@@ -24,6 +24,8 @@ let scripts: HTMLScriptElement[]
 /** Every call the fake Stripe and the app's callbacks got, in order. */
 let calls: string[]
 let fieldsError: StripeError | undefined
+/** What the fake elements.update does: by default records the change and answers at once. */
+let updateWith: ((o: unknown) => Promise<void> | void) | null
 const confirmSetup =
   vi.fn<(o: { clientSecret: string; redirect: string; confirmParams: { return_url: string } }) => Promise<{ error?: StripeError; setupIntent?: { status: string; payment_method: string } }>>()
 const confirmPayment =
@@ -64,6 +66,7 @@ beforeEach(() => {
   made = []
   calls = []
   fieldsError = undefined
+  updateWith = null
   confirmSetup.mockReset().mockImplementation(async (o) => {
     calls.push(`confirmSetup ${o.clientSecret}`)
     return { setupIntent: { status: 'succeeded', payment_method: 'pm_1' } }
@@ -94,7 +97,10 @@ beforeEach(() => {
           calls.push('submit')
           return { error: fieldsError }
         },
-        update: (o: unknown) => m.updates.push(o),
+        update: (o: unknown) => {
+          m.updates.push(o)
+          return updateWith?.(o)
+        },
       }
     },
     confirmSetup,
@@ -304,6 +310,55 @@ test('on-page: switching between one-off and monthly, or between methods, change
     { setupFutureUsage: null, allowedPaymentMethodTypes: [...SAVED_METHOD_TYPES], paymentMethodOptions: SAVED_METHOD_OPTIONS },
     { setupFutureUsage: null, allowedPaymentMethodTypes: ['us_bank_account'], paymentMethodOptions: SAVED_METHOD_OPTIONS },
   ])
+})
+
+test('on-page: a frequency chosen during a press waits for it, and the press waits for a change Stripe is still applying', async () => {
+  let finishUpdate = () => {}
+  updateWith = () =>
+    new Promise<void>((resolve) => {
+      finishUpdate = () => {
+        calls.push('updated')
+        resolve()
+      }
+    })
+  let answer: (p: OnPagePayment) => void = () => {}
+  const start = vi.fn(() => {
+    calls.push('start')
+    return new Promise<OnPagePayment>((resolve) => (answer = resolve))
+  })
+  confirmPayment.mockImplementation(async (o) => {
+    calls.push(`confirmPayment ${o.clientSecret}`)
+    return { error: { message: 'Your card was declined.' } }
+  })
+  const props = { publishableKey: 'pk_test_1', amountCents: 2_500, start, submitLabel: 'Give $25' }
+  const { rerender } = render(<StripeOnPagePayment {...props} />)
+  const button = await ready('Give $25')
+  await press(button)
+  rerender(<StripeOnPagePayment {...props} saveForLater />)
+  expect(made[0].updates).toEqual([])
+  await act(async () => answer(stripeOnPage(1)))
+  await screen.findByText('Your card was declined.')
+  await waitFor(() => expect(made[0].updates).toHaveLength(1))
+  expect(made[0].updates[0]).toMatchObject({ setupFutureUsage: 'off_session' })
+
+  calls = []
+  await press(screen.getByRole('button', { name: 'Give $25' }))
+  expect(calls).toEqual([])
+  await act(async () => finishUpdate())
+  await waitFor(() => expect(calls).toEqual(['updated', 'submit', 'start']))
+  expect(made).toHaveLength(1)
+})
+
+test('on-page: a change Stripe.js refuses to make in place mounts the form again with it', async () => {
+  vi.spyOn(console, 'error').mockImplementation(() => {})
+  updateWith = () => Promise.reject(new Error('Unsupported update'))
+  const props = { publishableKey: 'pk_test_1', amountCents: 2_500, start: () => Promise.resolve(stripeOnPage(1)), submitLabel: 'Give $25' }
+  const { rerender } = render(<StripeOnPagePayment {...props} />)
+  await ready('Give $25')
+  rerender(<StripeOnPagePayment {...props} saveForLater />)
+  await waitFor(() => expect(made).toHaveLength(2))
+  expect(made[0].destroyed).toBe(true)
+  expect(made[1].options).toEqual(onPagePaymentElementsOptions(2_500, { saveForLater: true }, {}))
 })
 
 test('on-page: a frequency chosen while Stripe.js loads is in the form it mounts', async () => {

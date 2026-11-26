@@ -62,7 +62,8 @@ interface PaymentElement {
 interface Elements {
   create(type: 'payment', o: ElementOptions): PaymentElement
   submit(): Promise<{ error?: StripeError }>
-  update(o: { appearance?: StripeAppearance; amount?: number } | InPlace): void
+  /** Since Stripe.js dahlia, a Promise settled once every element has the change. */
+  update(o: { appearance?: StripeAppearance; amount?: number } | InPlace): void | Promise<unknown>
 }
 interface Confirm {
   elements: Elements
@@ -123,7 +124,9 @@ type InPlace = Pick<StripeElementsOptions, 'allowedPaymentMethodTypes' | 'paymen
 /**
  * Loads Stripe.js and mounts a Payment Element in `box` for these options. Changing the options mounts
  * it again; changing only the appearance or the amount updates it in place, keeping what the payer typed, as does
- * changing the methods or setupFutureUsage when `inPlace` (a new payment's form, whose intent isn't made yet). A
+ * changing the methods or setupFutureUsage when `inPlace` (a new payment's form, whose intent isn't made yet): held
+ * while `hold` (a press under way, so the form stays what the intent is made for), mounted again if Stripe.js refuses
+ * it, and `updated()` waits for one Stripe is still applying. A
  * payment form waits for an amount Stripe takes (a whole number of cents above zero) before it mounts, and an amount
  * that isn't one later leaves the form at the last one; `amountOk` says whether the current one is.
  */
@@ -134,6 +137,7 @@ function usePaymentElement(
   onChange: () => void,
   element: ElementOptions = ELEMENT_OPTIONS,
   inPlace = false,
+  hold = false,
 ) {
   const box = useRef<HTMLDivElement>(null)
   const form = useRef<Form | null>(null)
@@ -144,7 +148,9 @@ function usePaymentElement(
   // Strings, so objects made fresh on every render don't mount the element again.
   const { setupFutureUsage, allowedPaymentMethodTypes, paymentMethodOptions, ...fixed } = options
   const changing: InPlace = { setupFutureUsage: setupFutureUsage ?? null, allowedPaymentMethodTypes, paymentMethodOptions }
-  const optionsKey = JSON.stringify(inPlace ? fixed : options)
+  // A change Stripe.js refused to make in place is part of the key, so the form is made again with it.
+  const [refusedChange, setRefusedChange] = useState<string | null>(null)
+  const optionsKey = JSON.stringify({ mount: inPlace ? fixed : options, refusedChange })
   const changingKey = JSON.stringify(inPlace ? changing : null)
   const elementKey = JSON.stringify(element)
   const appearanceKey = JSON.stringify(appearance ?? {})
@@ -157,20 +163,30 @@ function usePaymentElement(
   const latest = useLatest({ appearanceKey, lastAmount, onChange, changing })
   // The settings a form was mounted with or last updated to, so the update effect leaves a new form alone.
   const shown = useRef<string | null>(null)
+  const updating = useRef<Promise<unknown> | null>(null)
 
   useEffect(() => {
-    elementsNow.current?.update({ appearance: JSON.parse(appearanceKey) as StripeAppearance })
+    void elementsNow.current?.update({ appearance: JSON.parse(appearanceKey) as StripeAppearance })
   }, [appearanceKey])
 
   useEffect(() => {
-    if (amount !== undefined && amountOk) elementsNow.current?.update({ amount })
+    if (amount !== undefined && amountOk) void elementsNow.current?.update({ amount })
   }, [amount, amountOk])
 
   useEffect(() => {
-    if (changingKey === 'null' || shown.current === null || shown.current === changingKey) return
+    const elements = elementsNow.current
+    if (hold || !elements || changingKey === 'null' || shown.current === null || shown.current === changingKey) return
     shown.current = changingKey
-    elementsNow.current?.update(JSON.parse(changingKey) as InPlace)
-  }, [changingKey])
+    const refused = (err: unknown) => {
+      console.error('payments: Stripe’s payment form couldn’t change in place, so it is made again:', err)
+      if (elementsNow.current === elements) setRefusedChange(changingKey)
+    }
+    try {
+      updating.current = Promise.resolve(elements.update(JSON.parse(changingKey) as InPlace)).catch(refused)
+    } catch (err) {
+      refused(err)
+    }
+  }, [changingKey, hold])
 
   useEffect(() => {
     if (!mountable) return undefined
@@ -189,7 +205,7 @@ function usePaymentElement(
         const { lastAmount: amountNow, appearanceKey: appearanceNow, changing: changingNow } = latest.current
         const { setupFutureUsage: saveNow, ...typesNow } = changingNow
         const elements = stripe.elements({
-          ...(JSON.parse(optionsKey) as StripeElementsOptions),
+          ...(JSON.parse(optionsKey) as { mount: StripeElementsOptions }).mount,
           ...(inPlace ? { ...typesNow, ...(saveNow ? { setupFutureUsage: saveNow } : {}) } : {}),
           ...(amountNow === undefined ? {} : { amount: amountNow }),
           appearance: JSON.parse(appearanceNow) as StripeAppearance,
@@ -218,7 +234,8 @@ function usePaymentElement(
     }
   }, [publishableKey, optionsKey, elementKey, latest, mountable, inPlace])
 
-  return { box, form, load, amountOk }
+  const updated = () => updating.current
+  return { box, form, load, amountOk, updated }
 }
 
 /** Loading and failure notes over the element, as PaypalCardFields has. */
@@ -471,17 +488,19 @@ export function StripeOnPagePayment({ publishableKey, amountCents, methods, save
   const paidRef = useRef(false)
   const [paid, setPaid] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const { box, form, load, amountOk } = usePaymentElement(
+  const { box, form, load, amountOk, updated } = usePaymentElement(
     publishableKey,
     onPagePaymentElementsOptions(amountCents, { saveForLater, methods }),
     appearance,
     () => {},
     payer ? PAYER_FIELDS : ELEMENT_OPTIONS,
     true,
+    busy,
   )
   const latest = useLatest({ start, payer, navigate })
 
   const pay = async ({ stripe, elements }: Form) => {
+    await updated()
     const checked = await elements.submit()
     if (checked.error) refused(checked.error, 'Check the payment details.')
     const onPage = await latest.current.start()

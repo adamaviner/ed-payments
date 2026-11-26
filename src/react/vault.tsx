@@ -61,6 +61,9 @@ const vaultSdk = () => (window as unknown as Record<string, VaultSdk | undefined
 const loadVaultSdk = (clientId: string) => loadScript(paypalVaultSdkUrl(clientId), PAYPAL_VAULT_NAMESPACE, { 'data-namespace': PAYPAL_VAULT_NAMESPACE })
 
 /** PayPal's own errors are codes (INVALID_NUMBER, UPDATE_VAULT_SETUP_TOKEN_CONTINGENCY, …), not words for a payer. */
+/** A payment the server recorded as failed: most often a card PayPal declined at the capture. */
+const PAYMENT_FAILED = 'The payment didn’t go through. Try another card.'
+
 const CARD_REFUSED = 'PayPal couldn’t check that card. Check the number, expiry date and security code, or use another card.'
 
 /**
@@ -371,12 +374,12 @@ function useCardPayment(a: {
   completeReturn: CompleteReturnRef
   navigate?: (url: string) => void
   style?: PaypalFieldStyle
-  /** A capture that failed the checkout is said as a decline and the payer stays, as the next press starts afresh (on-page only). */
+  /** A capture that failed the checkout (PayPal's declined card, or one too late) is said and the payer stays, as the next press starts afresh (on-page only). */
   failedIsDecline?: boolean
 }) {
   const capture = useAction(a.completeReturn)
   // null: no capture asked for yet; capturing: asked, no answer (yet).
-  const outcome = useRef<'capturing' | 'paid' | 'declined' | null>(null)
+  const outcome = useRef<'capturing' | 'paid' | 'declined' | 'failed' | null>(null)
   // What the app's start threw (said as it is), as PayPal only reports it as a failed submit.
   const startError = useRef<unknown>(null)
   // The order the press paid, for its return page.
@@ -405,7 +408,7 @@ function useCardPayment(a: {
         onApprove: async ({ orderID }) => {
           outcome.current = 'capturing'
           const r = await latest.current.capture({ processor: 'paypal', token: orderID })
-          outcome.current = r?.declined || (a.failedIsDecline && r?.status === 'failed') ? 'declined' : 'paid'
+          outcome.current = r?.declined ? 'declined' : a.failedIsDecline && r?.status === 'failed' ? 'failed' : 'paid'
         },
         onError: (err) => console.error('payments: PayPal card fields:', err),
       }) ?? null
@@ -431,6 +434,7 @@ function useCardPayment(a: {
         }
       }
       if (outcome.current === 'declined') return setError('The card was declined. Try another card.')
+      if (outcome.current === 'failed') return setError(PAYMENT_FAILED)
       // Set by createOrder and onApprove during submit, which TypeScript can't see from here. PayPal may report a
       // failed createOrder to onError and resolve submit, so no capture yet means nothing was paid.
       const order = paying.current as CardOrder | null

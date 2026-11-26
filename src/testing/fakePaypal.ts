@@ -90,7 +90,7 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
   }
 
   /** The order as PayPal shows it; `created` is the answer to creating it, which (as in the sandbox) has no create_time yet. */
-  function orderJson(o: Order, created = false): PaypalOrder {
+  function orderJson(o: Order, created = false, read = false): PaypalOrder {
     const base = fixture(created ? paypalObjectFixtures.orderCreated : paypalObjectFixtures.orderUnapproved) as unknown as PaypalOrder & { purchase_units: Record<string, unknown>[] }
     const unit = {
       ...base.purchase_units[0],
@@ -111,7 +111,9 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
       const { display_data: _shown, ...payee } = shown.payee as Record<string, unknown>
       shown.payee = payee
     }
-    return { ...base, id: o.id, status: o.status, purchase_units: [unit], links, ...(o.vaultId ? { payment_source: savedSource(o) } : o.card ? { payment_source: { card: o.card } } : {}) }
+    // Read back after a declined card's capture, the sandbox shows the order CREATED again, though it takes no other card.
+    const status = read && o.card && o.capture?.status === 'DECLINED' ? 'CREATED' : o.status
+    return { ...base, id: o.id, status, purchase_units: [unit], links, ...(o.vaultId ? { payment_source: savedSource(o) } : o.card ? { payment_source: { card: o.card } } : {}) }
   }
 
   /** An order's payment_source once vault-with-purchase saved its method, as the sandbox answered (order-vault-card-captured.json). */
@@ -267,7 +269,7 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
     if (path[1] === 'checkout' && path[2] === 'orders' && path[3]) {
       const o = orders.get(path[3])
       if (!o) return issue(404, 'RESOURCE_NOT_FOUND', 'INVALID_RESOURCE_ID', 'Specified resource ID does not exist.')
-      if (method === 'GET') return ok(vaultOrders.has(o.id) ? vaultOrderJson(o) : orderJson(o))
+      if (method === 'GET') return ok(vaultOrders.has(o.id) ? vaultOrderJson(o) : orderJson(o, false, true))
       if (path[4] === 'capture') {
         // A declined card's order shows COMPLETED, yet capturing it again tries the same card again (another DECLINED capture), as the sandbox does.
         if (o.status === 'COMPLETED' && !(o.card && o.capture?.status === 'DECLINED')) return Response.json(fixture(paypalObjectFixtures.errorOrderAlreadyCaptured), { status: 422 })
