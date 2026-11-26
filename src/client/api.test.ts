@@ -118,11 +118,12 @@ describe('adminApi', () => {
   test('an admin refunds part of a paid checkout through the page’s functions; the ledger records who', async () => {
     const t = createTest()
     await t.mutation(api.host.addAdmin, { token: 'boss', name: 'Bo' })
-    const { checkoutId } = await t.action(api.shop.buy, { processor: 'stripe', method: 'card' })
+    const { checkoutId } = await t.action(api.shop.buy, { processor: 'stripe', method: 'card', context: { bidId: 'b7' } })
     const sessionId = (await t.query(api.shop.status, { id: checkoutId }))!.processorCheckoutId!
     await t.fetch('/stripe/webhook', await stripe.pay(sessionId))
     const listed = await t.query(api.payments.refundable, { auth: 'boss', paginationOpts: page })
-    expect(listed.page).toMatchObject([{ id: checkoutId, paidCents: 2500, refundedCents: 0, description: 'A bowl' }])
+    // The checkout's context comes with it, so the page's refund question needs nothing else loaded.
+    expect(listed.page).toMatchObject([{ id: checkoutId, paidCents: 2500, refundedCents: 0, description: 'A bowl', context: { bidId: 'b7' } }])
     const refundId = await t.mutation(api.payments.requestRefund, { auth: 'boss', checkoutId, amountCents: 1000, reason: 'Chipped' })
     expect(await t.query(api.payments.openCount, { auth: 'boss' })).toBe(1)
     expect(await t.query(api.payments.openRefunds, { auth: 'boss' })).toMatchObject([{ id: refundId, requestedBy: 'Bo', checkout: { id: checkoutId, paymentRef: expect.stringMatching(/^pi_/) } }])

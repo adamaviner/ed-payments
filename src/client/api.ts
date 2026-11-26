@@ -108,6 +108,8 @@ export function adminApi<C extends GenericValidator>(p: Payments<C>, o: AdminApi
     amountCents: x.amountCents,
     paidCents: x.paidCents,
     refundedCents: x.refundedCents,
+    /** What the app passed as context, for the page's refundQuestion (e.g. which item to put back on sale). */
+    context: x.context,
     createdAt: x.createdAt,
   })
 
