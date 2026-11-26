@@ -250,6 +250,24 @@ describe('fake PayPal answers in PayPal’s shapes', () => {
     expect(drift(done, captured)).toEqual([])
     expect(drift(await json(await send(pp, `/v2/checkout/orders/${order.id}/capture`)), fixture(paypalObjectFixtures.errorOrderAlreadyCaptured))).toEqual([])
     expect(drift(await json(await pp.fetch(`${B}/v2/checkout/orders/NOPE`)), notFound)).toEqual([])
+    // A declined card (Card Fields): the capture answers 201 with the order COMPLETED and the capture DECLINED, and capturing again declines again, as the sandbox does.
+    const card = (await json(await send(pp, '/v2/checkout/orders', { purchase_units: [{ custom_id: 'a:2', amount: { currency_code: 'USD', value: '25.00' } }] }))) as { id: string }
+    pp.approveWithCard(card.id, 'CCREJECT-REFUSED')
+    pp.capturesCome('DECLINED')
+    type Captured = { status: string; purchase_units: { payments: { captures: { status: string }[] } }[] }
+    const declined = (await json(await send(pp, `/v2/checkout/orders/${card.id}/capture`))) as Captured
+    expect([declined.status, declined.purchase_units[0].payments.captures[0].status]).toEqual(['COMPLETED', 'DECLINED'])
+    const shownAs = fixture(paypalObjectFixtures.orderCardCaptureDeclined)
+    // The fake's orders are built from orderUnapproved, which has a brand name and an invoice id; the declined card's order had neither.
+    const unit = shownAs.purchase_units[0]
+    const realCard = { ...shownAs, purchase_units: [{ ...unit, payee: { ...unit.payee, display_data: { brand_name: '' } }, invoice_id: '' }] }
+    expect(drift(declined, realCard)).toEqual([])
+    const again = (await json(await send(pp, `/v2/checkout/orders/${card.id}/capture`))) as Captured
+    expect(again.purchase_units[0].payments.captures[0].status).toBe('DECLINED')
+    const read = (await json(await pp.fetch(`${B}/v2/checkout/orders/${card.id}`))) as Captured
+    expect([read.status, read.purchase_units[0].payments.captures[0].status]).toEqual(['CREATED', 'DECLINED'])
+    expect(drift(read, realCard)).toEqual([])
+    pp.capturesCome('COMPLETED')
     const captureId = done.purchase_units[0].payments.captures[0].id
     expect(drift(await json(await pp.fetch(`${B}/v2/payments/captures/${captureId}`)), capture)).toEqual([])
     expect(drift(await json(await pp.fetch(`${B}/v2/payments/captures/NOPE`)), notFound)).toEqual([])

@@ -1,0 +1,101 @@
+{
+  "_source": "Captured from the PayPal sandbox 2026-11-25: an order made for Card Fields (no payment_source), a card confirmed on it as Card Fields would (confirm-payment-source) under the name CCREJECT-REFUSED, then captured: 201, the order COMPLETED and its capture DECLINED (processor_response 0500). The order then refuses another card (confirm-payment-source answers 422 ORDER_ALREADY_CAPTURED), and capturing it again makes another DECLINED capture. Ids, emails and custom ids scrubbed.",
+  "id": "FAKEID1",
+  "intent": "CAPTURE",
+  "status": "COMPLETED",
+  "payment_source": {
+    "card": {
+      "name": "CCREJECT-REFUSED",
+      "last_digits": "1111",
+      "expiry": "2030-12",
+      "brand": "VISA",
+      "type": "CREDIT",
+      "bin_details": {}
+    }
+  },
+  "purchase_units": [
+    {
+      "reference_id": "default",
+      "amount": {
+        "currency_code": "USD",
+        "value": "25.00"
+      },
+      "payee": {
+        "email_address": "merchant@example.org",
+        "merchant_id": "FAKEMERCHANT"
+      },
+      "description": "Sandbox",
+      "custom_id": "sandbox:fixture",
+      "soft_descriptor": "TESTFACILIT",
+      "supplementary_data": {
+        "risk": {
+          "risk_level_indicator": "LOW_RISK"
+        }
+      },
+      "payments": {
+        "captures": [
+          {
+            "id": "FAKEID2",
+            "status": "DECLINED",
+            "amount": {
+              "currency_code": "USD",
+              "value": "25.00"
+            },
+            "final_capture": true,
+            "seller_protection": {
+              "status": "NOT_ELIGIBLE"
+            },
+            "seller_receivable_breakdown": {
+              "gross_amount": {
+                "currency_code": "USD",
+                "value": "25.00"
+              },
+              "paypal_fee": {
+                "currency_code": "USD",
+                "value": "1.14"
+              },
+              "net_amount": {
+                "currency_code": "USD",
+                "value": "23.86"
+              }
+            },
+            "custom_id": "sandbox:fixture",
+            "links": [
+              {
+                "href": "https://api.sandbox.paypal.com/v2/payments/captures/FAKEID2",
+                "rel": "self",
+                "method": "GET"
+              },
+              {
+                "href": "https://api.sandbox.paypal.com/v2/checkout/orders/FAKEID1",
+                "rel": "up",
+                "method": "GET"
+              }
+            ],
+            "create_time": "2026-11-26T00:23:09Z",
+            "update_time": "2026-11-26T00:23:09Z",
+            "network_transaction_reference": {
+              "id": "000000000000000",
+              "date": "0203",
+              "network": "VISA"
+            },
+            "processor_response": {
+              "avs_code": "G",
+              "cvv_code": "P",
+              "response_code": "0500"
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "create_time": "2026-11-26T00:23:09Z",
+  "update_time": "2026-11-26T00:23:09Z",
+  "links": [
+    {
+      "href": "https://api.sandbox.paypal.com/v2/checkout/orders/FAKEID1",
+      "rel": "self",
+      "method": "GET"
+    }
+  ]
+}
