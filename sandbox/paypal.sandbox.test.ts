@@ -1,8 +1,9 @@
 // Real calls to the PayPal sandbox with the library's own wire code: a token, an order made and read
 // (and the same one back for the same request id), a capture before approval refused, the signature
 // check answering FAILURE for a made-up signature, Transaction Search, and the webhook CLI (its
-// sandbox webhook removed again). Run by `npm run test:sandbox`, only with sandbox keys.
-import { describe, expect, test } from 'vitest'
+// sandbox webhook removed again). Also on-page payments through the whole library (its test app):
+// the order made at the press, the card put on it here as Card Fields would, a declined card and the next press. Run by `npm run test:sandbox`, only with sandbox keys.
+import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import { paypalWebhook } from '../src/cli/webhooks.js'
 import {
   PAYPAL_EVENTS,
@@ -21,6 +22,7 @@ import {
 } from '../src/core/index.js'
 import { keyDiff } from '../src/testing/drift.js'
 import { fixture, paypalObjectFixtures } from '../src/testing/fixtures.js'
+import { api, cardSource, endSandbox, harness, paypalAs, run as appRun, useSandbox } from './harness.js'
 
 const keys = { clientId: process.env.SANDBOX_PAYPAL_CLIENT_ID ?? '', clientSecret: process.env.SANDBOX_PAYPAL_CLIENT_SECRET ?? '', apiBase: PAYPAL_SANDBOX_API }
 if (!keys.clientId || !keys.clientSecret) throw new Error('The sandbox suite needs PayPal sandbox keys.')
@@ -47,6 +49,23 @@ describe('orders', () => {
     // The fixture's order was made with a brand name and an invoice id; this one has neither.
     expect(keyDiff(read, fixture(paypalObjectFixtures.orderUnapproved), { ignore: ['.purchase_units[n].payee.display_data', '.purchase_units[n].invoice_id'] })).toEqual([])
     await expect(paypal.captureOrder(c, order.id, `sb-cap-${run}`)).rejects.toMatchObject({ status: 422, code: 'ORDER_NOT_APPROVED' })
+  })
+
+  test('a card declined at the capture: 201 with the order COMPLETED and its capture DECLINED; the order then takes no other card, declines again, and reads as CREATED', async () => {
+    const c = await call()
+    const input = { customId: `sandbox:${run}-d`, description: 'Sandbox', amountCents: 2500, returnUrl: 'https://example.org/ok', cancelUrl: 'https://example.org/no', embedded: true }
+    const order = await paypal.createOrder(c, input, `sb-${run}-d`)
+    const card = (name: string) => ({ payment_source: { card: { number: '4111111111111111', expiry: '2030-12', name, security_code: '123' } } })
+    await paypalCall(c.apiBase, c.token, 'POST', `/v2/checkout/orders/${order.id}/confirm-payment-source`, card('CCREJECT-REFUSED'), o)
+    const captured = await paypal.captureOrder(c, order.id, `sb-cap-d-${run}`)
+    expect([captured.status, orderCapture(captured)?.status]).toEqual(['COMPLETED', 'DECLINED'])
+    expect(keyDiff(captured, fixture(paypalObjectFixtures.orderCardCaptureDeclined), { ignore: BIN_FIELDS })).toEqual([])
+    await expect(paypalCall(c.apiBase, c.token, 'POST', `/v2/checkout/orders/${order.id}/confirm-payment-source`, card('Sandbox Donor'), o)).rejects.toMatchObject({
+      status: 422,
+      code: 'ORDER_ALREADY_CAPTURED',
+    })
+    expect(orderCapture(await paypal.captureOrder(c, order.id, `sb-cap-d2-${run}`))?.status).toBe('DECLINED')
+    expect((await paypal.getOrder(c, order.id)).status).toBe('CREATED')
   })
 
   test('an order for the buttons (no payment_source) is made and waits for the buyer', async () => {
@@ -190,5 +209,40 @@ describe('the vault', () => {
       { ...o, requestId: `sb-setup-bad-${run}` },
     )
     await expect(refused).rejects.toMatchObject({ status: 422, code: 'INVALID_PAYMENT_SOURCE' })
+  })
+})
+
+describe('on-page payments through the library', () => {
+  beforeAll(useSandbox)
+  afterAll(endSandbox)
+
+  test('the order is made at the press for Card Fields, a card is put on it as they would, and the return captures it', async () => {
+    const { t } = harness()
+    const started = await t.action(api.shop.buyOnPage, { processor: 'paypal', method: 'card', amountCents: 2500 })
+    if (started.onPage.processor !== 'paypal') throw new Error('expected a PayPal on-page payment')
+    expect(started.onPage).toMatchObject({ clientId: keys.clientId, returnUrl: `https://app.example.org/checkout/o1/return?token=${started.onPage.orderId}` })
+    const pp = await paypalAs()
+    expect(((await (await pp('GET', `/v2/checkout/orders/${started.onPage.orderId}`)).json()) as { status: string }).status).toBe('CREATED')
+    expect((await pp('POST', `/v2/checkout/orders/${started.onPage.orderId}/confirm-payment-source`, cardSource(`Sandbox Donor ${appRun}`))).status).toBe(200)
+    expect(await t.action(api.shop.back, { processor: 'paypal', token: started.onPage.orderId })).toEqual({ checkoutId: started.checkoutId, status: 'paid' })
+  })
+
+  test('a declined card: the return doesn’t call it paid, the order takes no other card, and the next press (replaces) pays a new order', async () => {
+    const { t } = harness()
+    const pp = await paypalAs()
+    const first = await t.action(api.shop.buyOnPage, { processor: 'paypal', method: 'card', amountCents: 2500 })
+    if (first.onPage.processor !== 'paypal') throw new Error('expected a PayPal on-page payment')
+    const orderId = first.onPage.orderId
+    expect((await pp('POST', `/v2/checkout/orders/${orderId}/confirm-payment-source`, cardSource('CCREJECT-REFUSED'))).status).toBe(200)
+    expect(await t.action(api.shop.back, { processor: 'paypal', token: orderId })).not.toMatchObject({ status: 'paid' })
+    const another = await pp('POST', `/v2/checkout/orders/${orderId}/confirm-payment-source`, cardSource(`Sandbox Donor ${appRun}`))
+    expect([another.status, ((await another.json()) as { details: { issue: string }[] }).details[0].issue]).toEqual([422, 'ORDER_ALREADY_CAPTURED'])
+
+    const next = await t.action(api.shop.buyOnPage, { processor: 'paypal', method: 'card', amountCents: 2500, replaces: first.checkoutId })
+    if (next.onPage.processor !== 'paypal') throw new Error('expected a PayPal on-page payment')
+    expect(next.onPage.orderId).not.toBe(orderId)
+    expect((await pp('POST', `/v2/checkout/orders/${next.onPage.orderId}/confirm-payment-source`, cardSource(`Sandbox Donor ${appRun}`))).status).toBe(200)
+    expect(await t.action(api.shop.back, { processor: 'paypal', token: next.onPage.orderId })).toMatchObject({ checkoutId: next.checkoutId, status: 'paid' })
+    expect(await t.query(api.host.orders, {})).toHaveLength(1)
   })
 })
