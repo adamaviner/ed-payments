@@ -7,7 +7,7 @@
 // The SDK is loaded under its own namespace (window.paypalVault), so it never replaces the checkout
 // buttons' SDK (window.paypal, loaded with intent=capture) on a page that shows both.
 import { type RefObject, useEffect, useRef, useState } from 'react'
-import { loadScript, useSlow, type Load } from './embedded.js'
+import { loadScript, useReportLoad, useSlow, type Load } from './embedded.js'
 import { useAction } from 'convex/react'
 import type { EmbeddedPayment, OnPagePayment } from '../client/index.js'
 import { errorMessage } from './errors.js'
@@ -482,6 +482,8 @@ export interface PaypalOnPagePaymentProps {
   disabled?: boolean
   /** Colors and fonts inside PayPal's frames (usePageTheme's paypal), merged over the defaults; a new one draws the fields again, clearing them. */
   style?: PaypalFieldStyle
+  /** How PayPal's script and the fields are loading ('slow' or 'failed': offer the processor's own page, as OnPagePayment does). */
+  onLoad?: (load: Load) => void
   className?: string
 }
 
@@ -492,12 +494,13 @@ export interface PaypalOnPagePaymentProps {
  * or the checkout failed (PayPal answers a declined card with a COMPLETED order that takes no other card); either
  * way the next press calls start again.
  */
-export function PaypalOnPagePayment({ clientId, start, completeReturn, submitLabel, navigate, note, disabled, style, className }: PaypalOnPagePaymentProps) {
+export function PaypalOnPagePayment({ clientId, start, completeReturn, submitLabel, navigate, note, disabled, style, onLoad, className }: PaypalOnPagePaymentProps) {
   const order = async (): Promise<CardOrder> => {
     const onPage = await start()
     if (onPage.processor !== 'paypal' || onPage.clientId !== clientId) throw new Error(WRONG_PROCESSOR)
     return { orderId: onPage.orderId, returnUrl: onPage.returnUrl }
   }
   const { boxes, load, error, busy, submit } = useCardPayment({ clientId, order, completeReturn, navigate, style, failedIsDecline: true })
+  useReportLoad(load, onLoad)
   return <CardForm boxes={boxes} load={load} note={note} error={error} label={busy ? 'Paying…' : submitLabel} disabled={!!disabled || busy} onSubmit={() => void submit()} className={className} />
 }

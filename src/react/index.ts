@@ -8,7 +8,18 @@
 // (`auth` is passed through to its authorize.admin query), router or bundler.
 export { PaymentsAdminPage, type PaymentsAdminPageProps, type RefundQuestion } from './PaymentsAdminPage.js'
 export { checkoutReturnToken, useCheckoutReturn, type CheckoutReturn, type CheckoutReturnState } from './useCheckoutReturn.js'
-export { PaypalButtons, StripeEmbeddedCheckout, type PaypalButtonsProps, type StripeEmbeddedCheckoutProps } from './embedded.js'
+export { PaypalButtons, StripeEmbeddedCheckout, type Load, type PaypalButtonsProps, type StripeEmbeddedCheckoutProps } from './embedded.js'
+export {
+  OnPagePayment,
+  PAYPAL_DECLINED_NOTE,
+  type NewOnPagePaymentProps,
+  type OnPagePaymentClassNames,
+  type OnPagePaymentProps,
+  type OnPagePaymentTab,
+  type OnPageStartArgs,
+  type RetryOnPagePaymentProps,
+  type RetryStarted,
+} from './onPagePayment.js'
 export {
   PaypalCardFields,
   PaypalCardPayment,
