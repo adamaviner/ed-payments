@@ -16,7 +16,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { SAVED_METHOD_OPTIONS, SAVED_METHOD_TYPES, stripeMethodType, type SavedMethodType } from '../core/savedMethods.js'
 import type { SavedMethodKind } from '../core/types.js'
-import { loadScript, STRIPE_JS, useSlow, type Load } from './embedded.js'
+import { loadScript, STRIPE_JS, useReportLoad, useSlow, type Load } from './embedded.js'
 import { errorMessage } from './errors.js'
 import { useLatest, useOneAtATime } from './hooks.js'
 import { Button, cn, ErrorNote } from './ui.js'
@@ -364,17 +364,20 @@ export interface StripeRetryPaymentProps {
    * not this form, which doesn't read the address.
    */
   returnUrl?: string
+  /** How Stripe.js and the form are loading ('slow' or 'failed': the payer may need another way to pay). */
+  onLoad?: (load: Load) => void
   className?: string
 }
 
 /** Stripe's Payment Element and one button that pays a declined charge on the page (payments.retryOnSession). */
-export function StripeRetryPayment({ publishableKey, amountCents, createPayment, onPaid, submitLabel, disabled, note, appearance, returnUrl, className }: StripeRetryPaymentProps) {
+export function StripeRetryPayment({ publishableKey, amountCents, createPayment, onPaid, submitLabel, disabled, note, appearance, returnUrl, onLoad, className }: StripeRetryPaymentProps) {
   const { busy, run } = useOneAtATime()
   // A ref as well as state: a second press in the same tick must not pay again.
   const paidRef = useRef(false)
   const [paid, setPaid] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const { box, form, load } = usePaymentElement(publishableKey, retryPaymentElementsOptions(amountCents), appearance, () => {})
+  useReportLoad(load, onLoad)
   const latest = useLatest({ createPayment, onPaid })
 
   const settle = (pi: PaymentIntent | undefined) => {
@@ -470,6 +473,8 @@ export interface StripeOnPagePaymentProps {
   note?: string
   /** Stripe's Appearance API (usePageTheme's stripe); a new one restyles the form in place. */
   appearance?: StripeAppearance
+  /** How Stripe.js and the form are loading ('slow' or 'failed': offer the processor's own page, as OnPagePayment does). */
+  onLoad?: (load: Load) => void
   className?: string
 }
 
@@ -483,7 +488,21 @@ const PAYER_FIELDS: ElementOptions = { ...ELEMENT_OPTIONS, fields: { billingDeta
  * the press: then the fields are checked, the app's start makes the PaymentIntent, and Stripe confirms it here (a
  * card's security check on the page). A decline is said under the fields, and the next press starts again.
  */
-export function StripeOnPagePayment({ publishableKey, amountCents, methods, saveForLater, payer, start, submitLabel, navigate, disabled, note, appearance, className }: StripeOnPagePaymentProps) {
+export function StripeOnPagePayment({
+  publishableKey,
+  amountCents,
+  methods,
+  saveForLater,
+  payer,
+  start,
+  submitLabel,
+  navigate,
+  disabled,
+  note,
+  appearance,
+  onLoad,
+  className,
+}: StripeOnPagePaymentProps) {
   const { busy, run } = useOneAtATime()
   const paidRef = useRef(false)
   const [paid, setPaid] = useState(false)
@@ -497,6 +516,7 @@ export function StripeOnPagePayment({ publishableKey, amountCents, methods, save
     true,
     busy,
   )
+  useReportLoad(load, onLoad)
   const latest = useLatest({ start, payer, navigate })
 
   const pay = async ({ stripe, elements }: Form) => {

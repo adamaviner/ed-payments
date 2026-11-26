@@ -125,6 +125,14 @@ function Fallback({ load, site, onFallback }: { load: Load; site: string; onFall
   )
 }
 
+/** Tells the app how a processor's form is loading (onLoad), e.g. so it can offer the processor's own page when it fails. */
+export function useReportLoad(load: Load, onLoad: ((load: Load) => void) | undefined) {
+  const latest = useLatest(onLoad)
+  useEffect(() => {
+    latest.current?.(load)
+  }, [load, latest])
+}
+
 /** Marks the load slow after SLOW_MS unless it settled first. */
 export function useSlow(load: Load, setLoad: (l: Load) => void) {
   useEffect(() => {
