@@ -730,9 +730,11 @@ Switching between one-off and monthly, the amount or the method is another press
 across the switch. The checkouts linked by `replacedBy` are one attempt: the first payment among them to settle (paid, or
 a bank payment on its way) is the one paid, even on a checkout a later press replaced, and the others still open are
 closed (here and at Stripe; a starting schedule of theirs ends without a callback). A payment on any of them later settles
-as `refund_needed` ("This was already paid by another payment."), so the app hears one `paid` per attempt and learns the
+as `refund_needed` ("This was already paid by another payment."), as does one on a checkout the buyer cancelled themselves
+(`cancel`, Edit) even if a later press named it, so the app hears one `paid` per attempt and learns the
 amount, method and (from `scheduleCharged` / `scheduleChanged`) the frequency from the callbacks. Price with `quote` on the
-server before the press; the page shows the same quote from core's `quote` with the same rates.
+server before the press; the page shows the same quote from core's `quote` with the same rates. The starts of the checkouts
+the chain closes stay counted against the payer's start limit for its window (a press closed by a later press gives its start back).
 
 `adminApi` functions take an optional `auth` argument, passed to `authorize.admin` as it came (for apps
 with their own session tokens); apps on Convex auth leave it out, as the caller's identity carries
