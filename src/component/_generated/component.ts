@@ -1579,6 +1579,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           lastError: string | null;
           lastPaidPeriod: string | null;
           method: "card" | "ach" | "paypal";
+          methodLabel: string | null;
           nextChargeAt: number | null;
           owner: { id: string; type: string };
           pausedUntil: number | null;
@@ -1685,6 +1686,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           lastError: string | null;
           lastPaidPeriod: string | null;
           method: "card" | "ach" | "paypal";
+          methodLabel: string | null;
           nextChargeAt: number | null;
           owner: { id: string; type: string };
           pausedUntil: number | null;
@@ -1727,6 +1729,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           lastError: string | null;
           lastPaidPeriod: string | null;
           method: "card" | "ach" | "paypal";
+          methodLabel: string | null;
           nextChargeAt: number | null;
           owner: { id: string; type: string };
           pausedUntil: number | null;
@@ -1769,6 +1772,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           lastError: string | null;
           lastPaidPeriod: string | null;
           method: "card" | "ach" | "paypal";
+          methodLabel: string | null;
           nextChargeAt: number | null;
           owner: { id: string; type: string };
           pausedUntil: number | null;
@@ -1818,6 +1822,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           lastError: string | null;
           lastPaidPeriod: string | null;
           method: "card" | "ach" | "paypal";
+          methodLabel: string | null;
           nextChargeAt: number | null;
           owner: { id: string; type: string };
           pausedUntil: number | null;
@@ -1879,6 +1884,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           lastError: string | null;
           lastPaidPeriod: string | null;
           method: "card" | "ach" | "paypal";
+          methodLabel: string | null;
           nextChargeAt: number | null;
           owner: { id: string; type: string };
           pausedUntil: number | null;
@@ -1932,6 +1938,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           lastError: string | null;
           lastPaidPeriod: string | null;
           method: "card" | "ach" | "paypal";
+          methodLabel: string | null;
           nextChargeAt: number | null;
           owner: { id: string; type: string };
           pausedUntil: number | null;

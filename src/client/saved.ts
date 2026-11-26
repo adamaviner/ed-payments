@@ -114,7 +114,7 @@ export async function verifyMethodOwner(p: Payments, ctx: RunActionCtx, a: { own
 }
 
 /** verifyMethodOwner without the rate limit, for the library's own calls. */
-async function verifyOwner(p: Payments, ctx: RunActionCtx, a: { owner: Ref; paymentMethodId: string; stripeCustomerId?: string }): Promise<VerifiedMethod> {
+export async function verifyOwner(p: Payments, ctx: RunActionCtx, a: { owner: Ref; paymentMethodId: string; stripeCustomerId?: string }): Promise<VerifiedMethod> {
   if (paypalTokenOf(a.paymentMethodId)) return await verifyPaypalOwner(p, ctx, a.owner, a.paymentMethodId)
   const customer = await ensureCustomer(p, ctx, a.owner, null, a.stripeCustomerId)
   if (!customer || !/^pm_[A-Za-z0-9_]+$/.test(a.paymentMethodId)) throw new ConvexError(UNUSABLE)

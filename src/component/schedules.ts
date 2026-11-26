@@ -40,6 +40,8 @@ export const scheduleView = v.object({
   processor,
   method,
   paymentMethodId: v.union(v.string(), v.null()),
+  /** The method's label as savedMethods gives it ("Visa •••• 4242"); null without a method. */
+  methodLabel: v.union(v.string(), v.null()),
   amountCents: v.number(),
   interval: v.literal('month'),
   anchorDay: v.number(),
@@ -65,7 +67,8 @@ export type ScheduleView = Infer<typeof scheduleView>
 const LIVE: ReadonlySet<Doc<'schedules'>['status']> = new Set(['active', 'paused', 'past_due'])
 const nextOf = (s: Doc<'schedules'>) => (LIVE.has(s.status) ? s.nextChargeAt : null)
 
-export function viewSchedule(s: Doc<'schedules'>): ScheduleView {
+export async function viewSchedule(ctx: QueryCtx, s: Doc<'schedules'>): Promise<ScheduleView> {
+  const saved = s.paymentMethodId ? await findSavedMethod(ctx, s.paymentMethodId) : null
   return {
     id: s._id,
     app: s.app,
@@ -77,6 +80,7 @@ export function viewSchedule(s: Doc<'schedules'>): ScheduleView {
     processor: s.processor,
     method: s.method,
     paymentMethodId: s.paymentMethodId ?? null,
+    methodLabel: saved?.label ?? null,
     amountCents: s.amountCents,
     interval: s.interval,
     anchorDay: s.anchorDay,
@@ -214,7 +218,7 @@ export const get = query({
   handler: async (ctx, { id }) => {
     const nid = ctx.db.normalizeId('schedules', id)
     const s = nid ? await ctx.db.get(nid) : null
-    return s ? viewSchedule(s) : null
+    return s ? await viewSchedule(ctx, s) : null
   },
 })
 
@@ -228,7 +232,7 @@ export const forOwner = query({
       .withIndex('by_owner', (q) => q.eq('app', app).eq('owner.type', owner.type).eq('owner.id', owner.id))
       .order('desc')
       .take(50)
-    return rows.map(viewSchedule)
+    return await Promise.all(rows.map((s) => viewSchedule(ctx, s)))
   },
 })
 
@@ -241,7 +245,7 @@ export const forRef = query({
       .withIndex('by_ref', (q) => q.eq('ref.type', ref.type).eq('ref.id', ref.id))
       .order('desc')
       .take(50)
-    return rows.map(viewSchedule)
+    return await Promise.all(rows.map((s) => viewSchedule(ctx, s)))
   },
 })
 
@@ -770,7 +774,7 @@ export const update = mutation({
     }
     await ctx.db.patch(s._id, patch)
     if (changes.length) await changed(ctx, s, changes, { by, now })
-    return viewSchedule(await load(ctx, id))
+    return await viewSchedule(ctx, await load(ctx, id))
   },
 })
 
@@ -785,7 +789,7 @@ export const pause = mutation({
     if (until > now + MAX_AHEAD_MS) throw new ConvexError('A pause can’t be longer than two years.')
     await ctx.db.patch(s._id, { status: 'paused', pausedUntil: until, failures: 0, firstFailedAt: undefined, periodAttempts: 0, ...restartAt(s, until), updatedAt: now })
     await changed(ctx, s, ['paused'], { by, now })
-    return viewSchedule(await load(ctx, id))
+    return await viewSchedule(ctx, await load(ctx, id))
   },
 })
 
@@ -810,7 +814,7 @@ export const resume = mutation({
       updatedAt: now,
     })
     await changed(ctx, s, ['resumed'], { by, now })
-    return viewSchedule(await load(ctx, id))
+    return await viewSchedule(ctx, await load(ctx, id))
   },
 })
 
@@ -820,10 +824,10 @@ export const cancel = mutation({
   returns: scheduleView,
   handler: async (ctx, { id, app, by, now, reason }) => {
     const s = await owned(ctx, id, app)
-    if (s.status === 'cancelled') return viewSchedule(s)
+    if (s.status === 'cancelled') return await viewSchedule(ctx, s)
     await ctx.db.patch(s._id, { status: 'cancelled', endReason: reason, endedBy: by, endedAt: now, updatedAt: now })
     await changed(ctx, s, ['cancelled'], { reason, by, now })
-    return viewSchedule(await load(ctx, id))
+    return await viewSchedule(ctx, await load(ctx, id))
   },
 })
 

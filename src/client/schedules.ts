@@ -11,7 +11,8 @@ import { isMethodFor, type Method, type Payer, type Processor, type Ref } from '
 import type { Payments, RunActionCtx, RunMutationCtx, RunQueryCtx, SchedulerCtx, StartArgs, StartUi, StartedEmbedded, StartedOnPage, StartedRedirect } from './index.js'
 import { getOrderOrNull, orderVault } from '../core/paypal.js'
 import { MAX_REPLACED_HOPS, STALE_PRESS, paypalSavedArgs, reuseOrClose, start, type Replaced } from './hosted.js'
-import { ensureCustomer } from './saved.js'
+import { ensureCustomer, verifyOwner } from './saved.js'
+import { savePaypalMethod } from './paypalVault.js'
 import { cleanPayer, errorText } from './util.js'
 
 export type ScheduleView = NonNullable<Awaited<ReturnType<Payments['getSchedule']>>>
@@ -295,6 +296,26 @@ async function mine(p: Payments, ctx: RunQueryCtx, scheduleId: string) {
   const s = await ctx.runQuery(p.component.schedules.get, { id: scheduleId })
   if (!s || s.app !== p.app) throw new ConvexError('There is no such schedule.')
   return s
+}
+
+/**
+ * The payer gives a schedule a new method: a Stripe PaymentMethod (`paymentMethodId`, from StripeSaveMethod, checked
+ * as the schedule owner's and recorded) or a PayPal setup token (`paypalSetupTokenId`, saved to the owner's vault as for
+ * savePaypalMethod), and the schedule is switched to it in the same call, with a new amount when the app recomputes a fee.
+ * Limited per schedule (else per signed-in user or limitKey), before anything is asked of a processor.
+ */
+export async function changeScheduleMethod(
+  p: Payments,
+  ctx: RunActionCtx,
+  a: { scheduleId: string; paymentMethodId?: string; paypalSetupTokenId?: string; amountCents?: number; by?: string; limitKey?: string },
+): Promise<ScheduleView> {
+  await p.takeLimits(ctx, 'scheduleMethod', `schedule:${a.scheduleId.slice(0, 64)}`, 1, a.limitKey)
+  if (!a.paymentMethodId === !a.paypalSetupTokenId) throw new ConvexError('Give one new method: a paymentMethodId or a PayPal setup token.')
+  const s = await mine(p, ctx, a.scheduleId)
+  const saved = a.paypalSetupTokenId
+    ? await savePaypalMethod(p, ctx, { owner: s.owner, setupTokenId: a.paypalSetupTokenId, recurring: true, limitKey: a.limitKey })
+    : await verifyOwner(p, ctx, { owner: s.owner, paymentMethodId: a.paymentMethodId ?? '' })
+  return await updateSchedule(p, ctx, { scheduleId: s.id, paymentMethodId: saved.paymentMethodId, amountCents: a.amountCents, by: a.by })
 }
 
 export async function updateSchedule(

@@ -51,6 +51,7 @@ import { reconcile, type ReconcileResult } from './reconcile.js'
 import { chargeNow, removeSavedMethod, retryOnSession, retryWithPaypal, savedMethods, setupPaymentMethod, verifyMethodOwner, type SavedMethod, type VerifiedMethod } from './saved.js'
 import { savePaypalMethod, setupPaypalMethod } from './paypalVault.js'
 import {
+  changeScheduleMethod,
   runSchedules,
   startOnPage,
   startSchedule,
@@ -779,6 +780,18 @@ export class Payments<C extends GenericValidator = GenericValidator> {
    * checked as for chargeSaved), the day of the month, the description. A new method on a schedule
    * being retried charges the refused period at once; on a lapsed one it starts again.
    */
+  /**
+   * Saves a new method for a schedule's owner and switches the schedule to it in one call: a Stripe paymentMethodId
+   * (checked as the owner's) or a PayPal setup token (saved to the owner's vault). amountCents, when given, changes the
+   * amount too (a fee recomputed for the new method). Gate it with the app's own check (e.g. a signed link). Rate-limited.
+   */
+  async changeScheduleMethod(
+    ctx: RunActionCtx,
+    a: { scheduleId: string; paymentMethodId?: string; paypalSetupTokenId?: string; amountCents?: number; by?: string; limitKey?: string },
+  ): Promise<ScheduleView> {
+    return await changeScheduleMethod(this, ctx, a)
+  }
+
   async updateSchedule(
     ctx: RunMutationCtx,
     a: { scheduleId: string; amountCents?: number; paymentMethodId?: string; stripeCustomerId?: string; anchorDay?: number; description?: string; by?: string },

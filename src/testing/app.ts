@@ -405,6 +405,15 @@ export const defined = app.defineModules({
       args: { donor: v.string(), paymentMethodId: v.string() },
       handler: async (ctx, a) => await payments.verifyMethodOwner(ctx, { owner: { type: 'donor', id: a.donor }, paymentMethodId: a.paymentMethodId }),
     }),
+    changeMethod: app.action({
+      args: { scheduleId: v.string(), paymentMethodId: v.optional(v.string()), paypalSetupTokenId: v.optional(v.string()), amountCents: v.optional(v.number()) },
+      handler: async (ctx, a) => await payments.changeScheduleMethod(ctx, { ...a, by: 'donor' }),
+    }),
+    paypalSetup: app.action({
+      args: { donor: v.string(), kind: v.union(v.literal('card'), v.literal('paypal')) },
+      handler: async (ctx, a): Promise<{ setupTokenId: string; clientId: string }> =>
+        await payments.setupPaypalMethod(ctx, { owner: { type: 'donor', id: a.donor }, payer: { email: `${a.donor}@example.org` }, kind: a.kind, recurring: true }),
+    }),
     methods: app.action({
       args: { donor: v.string() },
       handler: async (ctx, a) => await payments.savedMethods(ctx, { owner: { type: 'donor', id: a.donor } }),

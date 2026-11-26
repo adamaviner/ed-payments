@@ -213,6 +213,39 @@ describe('a schedule on a saved method', () => {
     await expect(t.mutation(api.monthly.update, { scheduleId, amountCents: 100 })).rejects.toThrow(/cancelled/)
   })
 
+  test('the view names its method as savedMethods does', async () => {
+    const { t, schedule, saved, start } = setup()
+    const pm = await saved()
+    const { scheduleId } = await start(pm)
+    const [method] = await t.action(api.monthly.methods, { donor: 'd1' })
+    expect(await schedule(scheduleId)).toMatchObject({ paymentMethodId: pm, methodLabel: method.label })
+  })
+
+  test('changeScheduleMethod: a new Stripe card, checked as the owner’s, saved and switched to in one call, with a new amount', async () => {
+    const { t, schedule, calls, saved, start } = setup()
+    const { scheduleId } = await start(await saved())
+    const { stripeCustomerId } = await t.action(api.monthly.setup, { donor: 'd1' })
+    const fresh = stripe.saveMethod(stripeCustomerId)
+    const view = await t.action(api.monthly.changeMethod, { scheduleId, paymentMethodId: fresh, amountCents: 3100 })
+    expect(view).toMatchObject({ paymentMethodId: fresh, amountCents: 3100, methodLabel: expect.any(String) })
+    expect(await schedule(scheduleId)).toMatchObject({ paymentMethodId: fresh, amountCents: 3100 })
+    expect((await calls('scheduleChanged')).at(-1)).toMatchObject({ changes: expect.arrayContaining(['amount', 'method']) })
+    const { stripeCustomerId: someoneElse } = await t.action(api.monthly.setup, { donor: 'd2' })
+    await expect(t.action(api.monthly.changeMethod, { scheduleId, paymentMethodId: stripe.saveMethod(someoneElse) })).rejects.toThrow(/couldn’t be used/)
+    expect(await schedule(scheduleId)).toMatchObject({ paymentMethodId: fresh })
+  })
+
+  test('changeScheduleMethod: a PayPal setup token is saved to the owner’s vault and the schedule switched to it', async () => {
+    const { t, schedule, saved, start } = setup()
+    const { scheduleId } = await start(await saved())
+    const { setupTokenId } = await t.action(api.monthly.paypalSetup, { donor: 'd1', kind: 'card' })
+    pp.approveSetup(setupTokenId, { card: { last4: '0004' } })
+    const view = await t.action(api.monthly.changeMethod, { scheduleId, paypalSetupTokenId: setupTokenId })
+    expect(view).toMatchObject({ processor: 'paypal', method: 'card', paymentMethodId: expect.stringMatching(/^paypal:/), methodLabel: expect.stringContaining('0004') })
+    expect(await schedule(scheduleId)).toMatchObject({ processor: 'paypal', paymentMethodId: view.paymentMethodId })
+    await expect(t.action(api.monthly.changeMethod, { scheduleId })).rejects.toThrow(/one new method/)
+  })
+
   test('a method in use can’t be removed; one detached at Stripe cancels its schedules', async () => {
     const { t, calls, schedule, saved, start } = setup()
     const pm = await saved()
