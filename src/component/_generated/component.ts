@@ -604,6 +604,13 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         } | null,
         Name
       >;
+      latest: FunctionReference<
+        "query",
+        "internal",
+        { id: string },
+        string,
+        Name
+      >;
       list: FunctionReference<
         "query",
         "internal",

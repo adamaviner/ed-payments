@@ -133,6 +133,23 @@ export const createReplacing = mutation({
   },
 })
 
+/** The last checkout in a chain of presses (replacedBy), from the one an app kept; the id itself when it wasn't replaced. */
+export const latest = query({
+  args: { id: v.string() },
+  returns: v.string(),
+  handler: async (ctx, { id }) => {
+    let at = ctx.db.normalizeId('checkouts', id)
+    let last = id
+    for (let i = 0; at && i < 50; i++) {
+      const c: Doc<'checkouts'> | null = await ctx.db.get(at)
+      if (!c?.replacedBy) break
+      last = c.replacedBy
+      at = c.replacedBy
+    }
+    return last
+  },
+})
+
 /** The processor made its checkout: remember its id; the buyer is on their way. */
 export const attach = mutation({
   args: { id: v.string(), processorCheckoutId: v.string() },

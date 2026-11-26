@@ -130,7 +130,9 @@ async function startScheduleCheckoutOnce<T>(
   checkBase(p, a)
   const ui = a.ui ?? 'embedded'
   if (a.replaces) {
-    const reused = await reuseOrClose(p, ctx, a.replaces, { ...a, ui, schedule: { owner: a.owner, anchorDay: a.anchorDay } })
+    const replaces = await ctx.runQuery(p.component.checkouts.latest, { id: a.replaces })
+    a = { ...a, replaces }
+    const reused = await reuseOrClose(p, ctx, replaces, { ...a, ui, schedule: { owner: a.owner, anchorDay: a.anchorDay } })
     if (reused?.scheduleId) return { checkoutId: reused.checkoutId, onPage: reused.onPage, reused: true, scheduleId: reused.scheduleId }
   }
   const callbacks = await handles(p)
