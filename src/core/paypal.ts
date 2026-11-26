@@ -503,6 +503,11 @@ export function orderVault(order: PaypalOrder): {
   return { paymentTokenId: vault.id, customerId: vault.customer.id, kind: what.kind, label: what.label, ...(networkRef ? { networkRef } : {}) }
 }
 
+/** How an order was paid, from its payment_source: PayPal's own button (paypal) or a card (Card Fields, the buttons' card form). Null when it doesn't say. */
+export function orderMethod(order: PaypalOrder): 'card' | 'paypal' | null {
+  return order.payment_source?.paypal ? 'paypal' : order.payment_source?.card ? 'card' : null
+}
+
 /** A card's network reference from an order's capture, which later recurring charges quote. */
 export function orderNetworkRef(order: PaypalOrder): { id: string; network?: string; date?: string } | null {
   const ntr = order.payment_source?.card ? orderCapture(order)?.network_transaction_reference : undefined

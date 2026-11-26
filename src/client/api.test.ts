@@ -254,6 +254,20 @@ describe('worker and crons', () => {
     expect(Object.keys(own.crons)).toEqual(['payments sweep', 'payments reconcile', 'payments issues digest', 'payments cleanup'])
   })
 
+  test('a dispute sends the issues digest at once, not at the nightly run', async () => {
+    const t = createTest()
+    const { checkoutId } = await t.action(api.shop.buy, { processor: 'stripe', method: 'card' })
+    const sessionId = (await t.query(api.shop.status, { id: checkoutId }))!.processorCheckoutId!
+    await t.fetch('/stripe/webhook', await stripe.pay(sessionId))
+    const pi = (await t.query(api.shop.status, { id: checkoutId }))!.paymentRef!
+    await t.fetch('/stripe/webhook', await stripe.dispute(pi, 'created'))
+    await t.finishAllScheduledFunctions(() => vi.runAllTimers())
+    const sent = (await t.query(api.host.calls, {})).filter((x) => x.name === 'onIssues')
+    expect(sent).toHaveLength(1)
+    expect(sent[0].args).toMatchObject({ issues: [{ kind: 'dispute', checkoutId }] })
+    expect(await t.mutation(internal.paymentsWorker.issuesDigest, {})).toBe(0)
+  })
+
   test('the issues digest hands new issues to the app once', async () => {
     const t = createTest()
     const { checkoutId } = await t.action(api.shop.buy, { processor: 'stripe', method: 'card' })

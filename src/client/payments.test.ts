@@ -132,6 +132,21 @@ describe('Stripe checkouts', () => {
     expect((await calls('onFailed'))[0].args).toMatchObject({ checkoutId: b.checkoutId })
   })
 
+  test('callbacks carry what an app would otherwise read back: the amount on processing, the payment and whether it is all refunded on refunded', async () => {
+    const { t, post, calls, stripeCheckout } = setup()
+    const a = await stripeCheckout({ method: 'ach' })
+    await post('/stripe/webhook', await stripe.pay(a.sessionId))
+    expect((await calls('onProcessing'))[0].args).toMatchObject({ checkoutId: a.checkoutId, amountCents: 2500 })
+    await post('/stripe/webhook', await stripe.settleBank(a.sessionId, true))
+    const paymentRef = (await calls('onPaid'))[0].args.paymentRef
+    await t.action(api.shop.sendRefund, { refundId: await t.mutation(api.shop.requestRefund, { checkoutId: a.checkoutId, amountCents: 1000, reason: 'Part' }), skipApproval: true })
+    await t.action(api.shop.sendRefund, { refundId: await t.mutation(api.shop.requestRefund, { checkoutId: a.checkoutId, reason: 'The rest' }), skipApproval: true })
+    expect((await calls('onRefunded')).map((c) => c.args)).toMatchObject([
+      { paymentRef, full: false, refundedCents: 1000 },
+      { paymentRef, full: true, refundedCents: 2500 },
+    ])
+  })
+
   test('an expired session abandons the checkout', async () => {
     const { post, status, stripeCheckout } = setup()
     const { checkoutId, sessionId } = await stripeCheckout()
@@ -452,6 +467,25 @@ describe('embedded checkouts (shown on the app’s own page)', () => {
     expect(created).toMatchObject({ purchase_units: [{ custom_id: `test:${started.checkoutId}` }], application_context: { shipping_preference: 'NO_SHIPPING', brand_name: 'Test shop' } })
     const orderId = (await status(started.checkoutId)).processorCheckoutId!
     expect(started.embedded).toEqual({ processor: 'paypal', orderId, clientId: expect.any(String), returnUrl: `https://app.example.org/checkout/o1/return?token=${orderId}` })
+  })
+
+  test('PayPal: paid with PayPal’s own button, it is recorded and reported as paypal, not the card the checkout was started for', async () => {
+    const { t, post, status, calls } = setup()
+    const byReturn = await t.action(api.shop.buyEmbedded, { processor: 'paypal', method: 'card' })
+    if (byReturn.embedded.processor !== 'paypal') throw new Error('expected PayPal')
+    pp.approve(byReturn.embedded.orderId)
+    expect(await t.action(api.shop.back, { processor: 'paypal', token: byReturn.embedded.orderId })).toMatchObject({ status: 'paid' })
+    expect(await status(byReturn.checkoutId)).toMatchObject({ method: 'paypal' })
+    const byWebhook = await t.action(api.shop.buyEmbedded, { processor: 'paypal', method: 'card', email: 'bo@example.org' })
+    if (byWebhook.embedded.processor !== 'paypal') throw new Error('expected PayPal')
+    await post('/paypal/webhook', pp.approve(byWebhook.embedded.orderId))
+    expect(await status(byWebhook.checkoutId)).toMatchObject({ status: 'paid', method: 'paypal' })
+    expect((await calls('onPaid')).map((c) => c.args.method)).toEqual(['paypal', 'paypal'])
+    const byCard = await t.action(api.shop.buyEmbedded, { processor: 'paypal', method: 'card', email: 'cy@example.org' })
+    if (byCard.embedded.processor !== 'paypal') throw new Error('expected PayPal')
+    pp.approve(byCard.embedded.orderId, { with: 'card' })
+    await t.action(api.shop.back, { processor: 'paypal', token: byCard.embedded.orderId })
+    expect(await status(byCard.checkoutId)).toMatchObject({ status: 'paid', method: 'card' })
   })
 
   test('PayPal: the buttons’ approval captures through completeReturn; a declined card leaves it open for another try, the webhook answering 200', async () => {

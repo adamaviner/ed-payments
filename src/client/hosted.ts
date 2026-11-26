@@ -3,7 +3,20 @@
 // sweep), capturing an approved PayPal order, and the buyer closing one they won't pay. Payments
 // (index.ts) is the facade; these take it as `p`.
 import { ConvexError } from 'convex/values'
-import { RECURRING_USAGE_PATTERN, approveUrl, captureFee, getOrderOrNull, moneyCents, orderCapture, orderCustomId, orderVault, orderVaultWaiting, paypal, type PaypalOrder } from '../core/paypal.js'
+import {
+  RECURRING_USAGE_PATTERN,
+  orderMethod,
+  approveUrl,
+  captureFee,
+  getOrderOrNull,
+  moneyCents,
+  orderCapture,
+  orderCustomId,
+  orderVault,
+  orderVaultWaiting,
+  paypal,
+  type PaypalOrder,
+} from '../core/paypal.js'
 import { stripeMethodType } from '../core/savedMethods.js'
 import { paymentIntentId, savedMethodKind, savedMethodLabel, sessionState, stripe, stripeFee, type StripeSession } from '../core/stripe.js'
 import { ProcessorError, isMethodFor, parseTag, tagFor, type Method, type Payer, type Processor, type Ref } from '../core/types.js'
@@ -233,12 +246,35 @@ export async function settleStripeSession(p: Payments, ctx: RunActionCtx, checko
   return res
 }
 
+/**
+ * How a PayPal order was paid, so the checkout records and reports the button the buyer pressed (PayPal's own, or a
+ * card) rather than the method it was started for (a saved method's charge keeps its method). A webhook's capture carries no payment_source: the order is read
+ * again then, unless the checkout is already settled. Unknown (undefined) keeps the checkout's method.
+ */
+async function paidWith(p: Payments, ctx: RunActionCtx, checkoutId: string, order: PaypalOrder): Promise<Method | undefined> {
+  const c = await ctx.runQuery(p.component.checkouts.get, { id: checkoutId })
+  // A saved method's charge is paid by that method, whatever the order shows.
+  if (!c || c.kind === 'offSession') return undefined
+  const said = orderMethod(order)
+  if (said) return said
+  const orderId = order.id || c.processorCheckoutId
+  if (!orderId || (c.status !== 'created' && c.status !== 'pending' && c.status !== 'abandoned' && c.status !== 'failed')) return undefined
+  const read = await p
+    .withPaypal(ctx, (call) => getOrderOrNull(call, orderId))
+    .catch((err: unknown) => {
+      console.warn(`payments: couldn’t read PayPal order ${orderId} for how it was paid: ${errorText(err)}`)
+      return null
+    })
+  return (read && orderMethod(read)) ?? undefined
+}
+
 /** @internal Settles from a PayPal order that has a capture (COMPLETED, PENDING or DECLINED). */
 export async function settlePaypalOrder(p: Payments, ctx: RunActionCtx, checkoutId: string, order: PaypalOrder) {
   const capture = orderCapture(order)
   if (!capture) return null
   if (capture.status !== 'DECLINED' && capture.status !== 'FAILED') await saveForSchedule(p, ctx, checkoutId, { paypalOrder: order })
   if (capture.status === 'COMPLETED' || capture.status === 'PARTIALLY_REFUNDED' || capture.status === 'REFUNDED') {
+    const method = await paidWith(p, ctx, checkoutId, order)
     const paidCents = moneyCents(capture.amount)
     if (paidCents === null) throw new Error(`PayPal capture ${capture.id} has no USD amount.`)
     return await closedAtProcessor(
@@ -250,11 +286,15 @@ export async function settlePaypalOrder(p: Payments, ctx: RunActionCtx, checkout
         paidCents,
         processorFeeCents: captureFee(capture) ?? undefined,
         processorCheckoutId: order.id || undefined,
+        method,
         now: Date.now(),
       }),
     )
   }
-  if (capture.status === 'PENDING') return await closedAtProcessor(p, ctx, await ctx.runMutation(p.component.checkouts.markProcessing, { id: checkoutId, paymentRef: capture.id, now: Date.now() }))
+  if (capture.status === 'PENDING') {
+    const method = await paidWith(p, ctx, checkoutId, order)
+    return await closedAtProcessor(p, ctx, await ctx.runMutation(p.component.checkouts.markProcessing, { id: checkoutId, paymentRef: capture.id, method, now: Date.now() }))
+  }
   // A saved method's charge declined later (a pending capture, then PAYMENT.CAPTURE.DECLINED) marks the method too.
   const c = await ctx.runQuery(p.component.checkouts.get, { id: checkoutId })
   // On the app's page, in time, a declined capture of the checkout's own order goes on under a new order

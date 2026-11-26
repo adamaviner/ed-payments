@@ -209,7 +209,7 @@ export const markProcessing = mutation({
     // owed back when it arrives (settlePaid), so the sale isn't going ahead.
     if (cancelledByBuyer(c) || (await paidInChain(ctx, c))) return { outcome: 'processing' as const }
     await scheduleProcessing(ctx, { ...c, ...patch }, now ?? Date.now())
-    await notifyHost(ctx, { ...c, ...patch }, 'onProcessing', { paymentRef: patch.paymentRef ?? null }, now ?? Date.now())
+    await notifyHost(ctx, { ...c, ...patch }, 'onProcessing', { paymentRef: patch.paymentRef ?? null, amountCents: c.amountCents }, now ?? Date.now())
     return { outcome: 'processing' as const, ...(await closeChain(ctx, c, now ?? Date.now())) }
   },
 })

@@ -45,6 +45,8 @@ interface Order {
   vaultLater?: 'waiting' | 'saved'
   /** Card Fields put this card on the order (confirm-payment-source): it shows as payment_source.card, and its capture names the order by link. */
   card?: { name: string; last_digits: string; expiry: string; brand: string; type: string }
+  /** Approved on the buttons: with PayPal's own button, or their card form. */
+  paidWith?: 'paypal' | 'card'
 }
 
 export interface FakePaypalOptions {
@@ -113,7 +115,21 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
     }
     // Read back after a declined card's capture, the sandbox shows the order CREATED again, though it takes no other card.
     const status = read && o.card && o.capture?.status === 'DECLINED' ? 'CREATED' : o.status
-    return { ...base, id: o.id, status, purchase_units: [unit], links, ...(o.vaultId ? { payment_source: savedSource(o) } : o.card ? { payment_source: { card: o.card } } : {}) }
+    return {
+      ...base,
+      id: o.id,
+      status,
+      purchase_units: [unit],
+      links,
+      ...(o.vaultId ? { payment_source: savedSource(o) } : o.card ? { payment_source: { card: o.card } } : o.paidWith ? { payment_source: buttonSource(o.paidWith) } : {}),
+    }
+  }
+
+  /** What the buttons put on an order: a PayPal account as the sandbox showed one approved (order-approved.json), or a card from the buttons' card form. */
+  function buttonSource(paidWith: 'paypal' | 'card'): NonNullable<PaypalOrder['payment_source']> {
+    if (paidWith === 'card') return { card: { brand: 'VISA', last_digits: '1111' } }
+    const approved = fixture(paypalObjectFixtures.orderApproved) as unknown as PaypalOrder
+    return { paypal: approved.payment_source?.paypal ?? {} }
   }
 
   /** An order's payment_source once vault-with-purchase saved its method, as the sandbox answered (order-vault-card-captured.json). */
@@ -582,9 +598,11 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
       x.card = { name, last_digits: '1111', expiry: '2030-12', brand: 'VISA', type: 'CREDIT' }
     },
     /** The buyer approves on PayPal's page; returns the CHECKOUT.ORDER.APPROVED webhook. */
-    approve(id: string, o: { eventId?: string } = {}) {
+    /** The buyer approved with PayPal's own button (default) or the buttons' card form: the order's payment_source says which, as PayPal's does. */
+    approve(id: string, o: { eventId?: string; with?: 'paypal' | 'card' } = {}) {
       const x = order(id)
       x.status = 'APPROVED'
+      if (!x.card) x.paidWith = o.with ?? 'paypal'
       return webhook(paypalEvent('CHECKOUT.ORDER.APPROVED', { ...orderJson(x) }, o.eventId))
     },
     /** PAYMENT.CAPTURE.COMPLETED (or another capture event) for a captured order. */
