@@ -377,6 +377,8 @@ export class Payments<C extends GenericValidator = GenericValidator> {
    */
   quote(a: QuoteArgs): Quote {
     const has = this.cardProcessors()
+    const needs = a.method === 'ach' ? 'stripe' : a.method === 'paypal' ? 'paypal' : null
+    if (needs && has.length && !has.includes(needs)) throw new ConvexError(`${needs === 'stripe' ? 'Stripe' : 'PayPal'} isn’t set up on this deployment.`)
     return quote(a, this.fees, { cardProcessors: has.length ? has : undefined })
   }
 

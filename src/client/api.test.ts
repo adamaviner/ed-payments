@@ -325,4 +325,6 @@ test('payments.quote prices with the app’s fee rates, and gives a card only to
     fees: { paypal: { card: { basisPoints: 199, fixedCents: 49, capCents: null } } },
   }).withCallbacks(wiring)
   expect(stripeOnly.quote({ amountCents: 10_000, method: 'card', coverFee: true })).toMatchObject({ processor: 'stripe', feeCents: 330 })
+  expect(stripeOnly.quote({ amountCents: 10_000, method: 'ach', coverFee: false })).toMatchObject({ processor: 'stripe' })
+  expect(() => stripeOnly.quote({ amountCents: 10_000, method: 'paypal', coverFee: false })).toThrow('PayPal isn’t set up on this deployment.')
 })
