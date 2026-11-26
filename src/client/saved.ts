@@ -172,6 +172,8 @@ export async function settleIntent(p: Payments, ctx: RunActionCtx, c: Checkout, 
   const state = intentState(given)
   if (state !== 'paid' && state !== 'processing') return false
   const pi = await full(p, given)
+  // A schedule's first payment made on the page: the method it saved becomes the schedule's before settling starts it.
+  if (c.kind === 'onPage' && c.scheduleId) await p.saveForSchedule(ctx, c.id, { stripePaymentIntent: pi.id })
   const pm = typeof pi.payment_method === 'object' && pi.payment_method ? pi.payment_method : null
   const method = (pm && savedMethodKind(pm.type)) ?? undefined
   if (intentState(pi) === 'processing' || state === 'processing') {
@@ -308,7 +310,8 @@ export async function completeIntentReturn(p: Payments, ctx: RunActionCtx, c: Ch
   await settleIntent(p, ctx, c, await stripe.paymentIntent(p.stripeKeys(), c.processorCheckoutId, { fetch: p.fetch }))
 }
 
-const REUSABLE: ReadonlySet<string> = new Set(['requires_payment_method', 'requires_confirmation', 'requires_action'])
+/** A PaymentIntent the buyer can still pay on the page: none tried yet, declined, or waiting for them (3-D Secure). */
+export const REUSABLE_INTENT: ReadonlySet<string> = new Set(['requires_payment_method', 'requires_confirmation', 'requires_action'])
 
 type Reused = { checkoutId: string; clientSecret: string } | { checkoutId: string; orderId: string }
 
@@ -320,7 +323,8 @@ type Reused = { checkoutId: string; clientSecret: string } | { checkoutId: strin
  */
 async function retryable(p: Payments, ctx: RunActionCtx, checkoutId: string, want: Processor): Promise<{ original: Checkout; reuse: Reused | null }> {
   const given = await ctx.runQuery(p.component.checkouts.get, { id: checkoutId })
-  if (!given || given.app !== p.app || given.kind === 'hosted') throw new ConvexError('There is no payment to retry here.')
+  // A hosted or on-page checkout is paid again by starting again (an on-page one with replaces), not retried.
+  if (!given || given.app !== p.app || given.kind === 'hosted' || given.kind === 'onPage') throw new ConvexError('There is no payment to retry here.')
   const original = given.kind === 'onSession' && given.retryOf ? ((await ctx.runQuery(p.component.checkouts.get, { id: given.retryOf })) ?? given) : given
   if (original.status === 'paid' || original.status === 'refund_needed') throw new ConvexError('This is already paid.')
   if (original.status === 'processing') throw new ConvexError('A payment for this is already on its way.')
@@ -349,7 +353,7 @@ async function retryable(p: Payments, ctx: RunActionCtx, checkoutId: string, wan
     const keys = p.stripeKeys()
     const pi = await stripe.paymentIntent(keys, r.processorCheckoutId, { fetch: p.fetch })
     if (await settleIntent(p, ctx, r, pi)) throw new ConvexError('This payment is already being processed.')
-    if (want === 'stripe' && REUSABLE.has(pi.status) && pi.client_secret) return { original, reuse: { checkoutId: r.id, clientSecret: pi.client_secret } }
+    if (want === 'stripe' && REUSABLE_INTENT.has(pi.status) && pi.client_secret) return { original, reuse: { checkoutId: r.id, clientSecret: pi.client_secret } }
     if (pi.status !== 'canceled') {
       try {
         await stripe.cancelPaymentIntent(keys, pi.id, { fetch: p.fetch })

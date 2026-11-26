@@ -5,6 +5,8 @@ import { app, defined } from '../testing/app.js'
 import { fakePaypal, type FakePaypal } from '../testing/fakePaypal.js'
 import { fakeStripe, type FakeStripe } from '../testing/fakeStripe.js'
 import { stripeEvent } from '../testing/fixtures.js'
+import { checkoutReturnToken } from '../react/useCheckoutReturn.js'
+import { withParam } from './util.js'
 
 const { api, internal, createTest } = defined
 const MIN = 60_000
@@ -559,6 +561,521 @@ describe('embedded checkouts (shown on the app’s own page)', () => {
     later(3 * 60 * MIN)
     await t.action(internal.paymentsWorker.sweep, {})
     expect((await status(checkoutId)).status).toBe('abandoned')
+  })
+})
+
+describe('on-page payments (made at the payer’s press on the app’s own form)', () => {
+  const onPage = (
+    t: ReturnType<typeof setup>['t'],
+    a: {
+      processor: 'stripe' | 'paypal'
+      method: 'card' | 'ach' | 'paypal'
+      amountCents?: number
+      replaces?: string
+      refId?: string
+      email?: string
+      expiresAt?: number
+      name?: string
+      description?: string
+      context?: { buyer?: string }
+      returnPath?: string
+      limitKey?: string
+    },
+  ) => t.action(api.shop.buyOnPage, a)
+  const intentsMade = () => stripe.calls.filter((x) => x.method === 'POST' && x.path === '/v1/payment_intents')
+
+  test('Stripe: a PaymentIntent for the chosen method, no session; the browser gets its client secret, and its webhook settles it', async () => {
+    const { t, post, status, calls } = setup()
+    const started = await onPage(t, { processor: 'stripe', method: 'card' })
+    const c = await status(started.checkoutId)
+    expect(c).toMatchObject({ status: 'pending', kind: 'onPage', processor: 'stripe', method: 'card', amountCents: 2500 })
+    expect(started).toEqual({
+      checkoutId: started.checkoutId,
+      onPage: { processor: 'stripe', clientSecret: expect.stringMatching(new RegExp(`^${c.processorCheckoutId}_secret_`)), returnUrl: 'https://app.example.org/checkout/o1/return' },
+      reused: false,
+    })
+    expect(stripe.calls.some((x) => x.path === '/v1/checkout/sessions')).toBe(false)
+    const params = Object.fromEntries(intentsMade()[0].params)
+    expect(params).toMatchObject({ amount: '2500', currency: 'usd', 'metadata[app]': 'test', 'metadata[checkoutId]': started.checkoutId, 'allowed_payment_method_types[0]': 'card' })
+    expect(params).not.toHaveProperty('allowed_payment_method_types[1]')
+    expect(params).not.toHaveProperty('customer')
+    expect(params).not.toHaveProperty('setup_future_usage')
+    expect(params).not.toHaveProperty('confirm')
+    const hook = await stripe.confirm(c.processorCheckoutId!)
+    expect(await t.action(api.shop.back, { processor: 'stripe', token: c.processorCheckoutId! })).toEqual({ checkoutId: started.checkoutId, status: 'paid' })
+    expect(await post('/stripe/webhook', hook)).toEqual({ status: 200, text: 'handled' })
+    expect(await calls('onPaid')).toHaveLength(1)
+    expect(await status(started.checkoutId)).toMatchObject({ status: 'paid', paidCents: 2500, paymentRef: c.processorCheckoutId })
+  })
+
+  test('Stripe: the return page the Payment Element sends the payer to (?payment_intent=, after 3-D Secure) finds the on-page checkout and settles it before the webhook', async () => {
+    const { t, status, calls } = setup()
+    const started = await onPage(t, { processor: 'stripe', method: 'card' })
+    if (started.onPage.processor !== 'stripe') throw new Error('expected Stripe')
+    const pi = (await status(started.checkoutId)).processorCheckoutId!
+    await stripe.confirm(pi, 'auth')
+    const back = (redirectStatus: string) => {
+      const url = new URL(withParam(withParam(withParam(started.onPage.returnUrl, 'payment_intent', pi), 'payment_intent_client_secret', `${pi}_secret_x`), 'redirect_status', redirectStatus))
+      const token = checkoutReturnToken(url.search)
+      if (!token) throw new Error('no return token')
+      return t.action(api.shop.back, token)
+    }
+    expect(await back('failed')).toEqual({ checkoutId: started.checkoutId, status: 'pending' })
+    await stripe.confirm(pi, 'ok')
+    expect(await back('succeeded')).toEqual({ checkoutId: started.checkoutId, status: 'paid' })
+    expect(await calls('onPaid')).toHaveLength(1)
+  })
+
+  test('Stripe bank account: only us_bank_account, verified at once; processing, then paid', async () => {
+    const { t, post, status, calls } = setup()
+    const started = await onPage(t, { processor: 'stripe', method: 'ach' })
+    const params = Object.fromEntries(intentsMade()[0].params)
+    expect(params).toMatchObject({ 'allowed_payment_method_types[0]': 'us_bank_account', 'payment_method_options[us_bank_account][verification_method]': 'instant' })
+    const pi = (await status(started.checkoutId)).processorCheckoutId!
+    expect(await post('/stripe/webhook', await stripe.confirm(pi, 'bank'))).toEqual({ status: 200, text: 'handled' })
+    expect((await status(started.checkoutId)).status).toBe('processing')
+    await post('/stripe/webhook', await stripe.settleBank(pi, true))
+    expect((await status(started.checkoutId)).status).toBe('paid')
+    expect(await calls('onPaid')).toHaveLength(1)
+  })
+
+  test('Stripe: a declined card leaves it open; the next press with the same amount and method gets the same PaymentIntent and counts no start', async () => {
+    const { t, post, status, calls } = setup()
+    const first = await onPage(t, { processor: 'stripe', method: 'card', email: 'eve@example.org' })
+    const pi = (await status(first.checkoutId)).processorCheckoutId!
+    expect(await post('/stripe/webhook', await stripe.confirm(pi, 'decline'))).toEqual({ status: 200, text: 'handled' })
+    expect((await status(first.checkoutId)).status).toBe('pending')
+    expect(await calls('onFailed')).toHaveLength(0)
+    for (let i = 0; i < 4; i++) expect(await onPage(t, { processor: 'stripe', method: 'card', email: 'eve@example.org', replaces: first.checkoutId })).toEqual({ ...first, reused: true })
+    expect(intentsMade()).toHaveLength(1)
+    await post('/stripe/webhook', await stripe.confirm(pi, 'ok'))
+    expect((await status(first.checkoutId)).status).toBe('paid')
+    expect(await calls('onPaid')).toHaveLength(1)
+    // The payer's own starts were never used up by the presses.
+    await onPage(t, { processor: 'stripe', method: 'card', email: 'eve@example.org' })
+    await onPage(t, { processor: 'stripe', method: 'card', email: 'eve@example.org' })
+  })
+
+  test('Stripe: a changed amount or method closes the last press’s payment (canceled at Stripe, its start given back) and starts afresh', async () => {
+    const { t, status, calls } = setup()
+    const first = await onPage(t, { processor: 'stripe', method: 'card', email: 'eve@example.org' })
+    const firstPi = (await status(first.checkoutId)).processorCheckoutId!
+    const second = await onPage(t, { processor: 'stripe', method: 'card', amountCents: 3000, email: 'eve@example.org', replaces: first.checkoutId })
+    expect(second.reused).toBe(false)
+    expect(second.checkoutId).not.toBe(first.checkoutId)
+    expect(await status(first.checkoutId)).toMatchObject({ status: 'abandoned' })
+    expect(stripe.calls.some((x) => x.path === `/v1/payment_intents/${firstPi}/cancel`)).toBe(true)
+    expect(await status(second.checkoutId)).toMatchObject({ status: 'pending', amountCents: 3000 })
+    const third = await onPage(t, { processor: 'stripe', method: 'ach', amountCents: 3000, email: 'eve@example.org', replaces: second.checkoutId })
+    expect(third.reused).toBe(false)
+    expect((await status(second.checkoutId)).status).toBe('abandoned')
+    // Each closed press gave its start back: the payer still has their tries.
+    await onPage(t, { processor: 'stripe', method: 'card', email: 'eve@example.org' })
+    await onPage(t, { processor: 'stripe', method: 'card', email: 'eve@example.org' })
+    expect(await calls('onPaid')).toHaveLength(0)
+  })
+
+  test('replaces: a paid or processing payment is never replaced; one for another thing is left alone, not reused', async () => {
+    const { t, status } = setup()
+    const paid = await onPage(t, { processor: 'stripe', method: 'card', email: 'a@example.org' })
+    await stripe.confirm((await status(paid.checkoutId)).processorCheckoutId!)
+    await expect(onPage(t, { processor: 'stripe', method: 'card', email: 'a@example.org', replaces: paid.checkoutId })).rejects.toThrow('This is already paid.')
+    await expect(onPage(t, { processor: 'stripe', method: 'card', email: 'a@example.org', amountCents: 999, replaces: paid.checkoutId })).rejects.toThrow('This is already paid.')
+    expect((await status(paid.checkoutId)).status).toBe('paid')
+
+    const bank = await onPage(t, { processor: 'stripe', method: 'ach', refId: 'o2', email: 'b@example.org' })
+    await stripe.confirm((await status(bank.checkoutId)).processorCheckoutId!, 'bank')
+    await expect(onPage(t, { processor: 'stripe', method: 'ach', refId: 'o2', email: 'b@example.org', replaces: bank.checkoutId })).rejects.toThrow('A payment for this is already on its way.')
+
+    const other = await onPage(t, { processor: 'stripe', method: 'card', refId: 'o3', email: 'c@example.org' })
+    const next = await onPage(t, { processor: 'stripe', method: 'card', refId: 'o4', email: 'c@example.org', replaces: other.checkoutId })
+    expect(next.reused).toBe(false)
+    expect((await status(other.checkoutId)).status).toBe('pending')
+    const otherPi = (await status(other.checkoutId)).processorCheckoutId
+    expect(stripe.calls.some((x) => x.path === `/v1/payment_intents/${otherPi}/cancel`)).toBe(false)
+    expect(await onPage(t, { processor: 'stripe', method: 'card', refId: 'o5', email: 'd@example.org', replaces: 'not-a-checkout' })).toMatchObject({ reused: false })
+  })
+
+  test('cancel and sweep: an on-page PaymentIntent is canceled at Stripe and the checkout abandoned; one paid meanwhile settles as paid', async () => {
+    const { t, status, calls, later } = setup()
+    const left = await onPage(t, { processor: 'stripe', method: 'card', expiresAt: Date.now() + 30 * MIN })
+    const leftPi = (await status(left.checkoutId)).processorCheckoutId!
+    const closed = await onPage(t, { processor: 'stripe', method: 'card', refId: 'o2' })
+    const closedPi = (await status(closed.checkoutId)).processorCheckoutId!
+    expect(await t.action(api.payments.cancelCheckout, { checkoutId: closed.checkoutId })).toEqual({ status: 'abandoned' })
+    expect(stripe.calls.some((x) => x.path === `/v1/payment_intents/${closedPi}/cancel`)).toBe(true)
+    const paidMeanwhile = await onPage(t, { processor: 'stripe', method: 'card', refId: 'o3' })
+    await stripe.confirm((await status(paidMeanwhile.checkoutId)).processorCheckoutId!)
+    expect(await t.action(api.payments.cancelCheckout, { checkoutId: paidMeanwhile.checkoutId })).toEqual({ status: 'paid' })
+    expect(await calls('onPaid')).toHaveLength(1)
+    later(31 * MIN)
+    await t.action(internal.paymentsWorker.sweep, {})
+    expect((await status(left.checkoutId)).status).toBe('abandoned')
+    expect(stripe.calls.some((x) => x.path === `/v1/payment_intents/${leftPi}/cancel`)).toBe(true)
+  })
+
+  test('PayPal: the same order as embedded, made at the press; the next press reuses it, and a decline is tried again on it', async () => {
+    const { t, status, calls } = setup()
+    const first = await onPage(t, { processor: 'paypal', method: 'card', email: 'eve@example.org' })
+    const c = await status(first.checkoutId)
+    expect(c).toMatchObject({ kind: 'onPage', processor: 'paypal', status: 'pending' })
+    const orderId = c.processorCheckoutId!
+    expect(first).toEqual({
+      checkoutId: first.checkoutId,
+      onPage: { processor: 'paypal', orderId, clientId: expect.any(String), returnUrl: `https://app.example.org/checkout/o1/return?token=${orderId}` },
+      reused: false,
+    })
+    pp.approve(orderId)
+    pp.declineNextCapture()
+    expect(await t.action(api.shop.back, { processor: 'paypal', token: orderId })).toEqual({ checkoutId: first.checkoutId, status: 'pending', declined: true })
+    for (let i = 0; i < 4; i++) expect(await onPage(t, { processor: 'paypal', method: 'card', email: 'eve@example.org', replaces: first.checkoutId })).toEqual({ ...first, reused: true })
+    expect(pp.calls.filter((x) => x.path === '/v2/checkout/orders')).toHaveLength(1)
+    pp.approve(orderId)
+    expect(await t.action(api.shop.back, { processor: 'paypal', token: orderId })).toEqual({ checkoutId: first.checkoutId, status: 'paid' })
+    expect(await calls('onPaid')).toHaveLength(1)
+  })
+
+  test('PayPal: when PayPal won’t take the same order again, a new order under the same checkout, no new start counted; the old order is never captured', async () => {
+    const { t, post, status, calls } = setup()
+    const first = await onPage(t, { processor: 'paypal', method: 'card', email: 'eve@example.org' })
+    if (first.onPage.processor !== 'paypal') throw new Error('expected PayPal')
+    const oldOrder = first.onPage.orderId
+    const oldApproval = pp.approve(oldOrder)
+    pp.refuse((call) =>
+      call.path.endsWith('/capture') ? Response.json({ name: 'UNPROCESSABLE_ENTITY', details: [{ issue: 'MAX_NUMBER_OF_PAYMENT_ATTEMPTS_EXCEEDED' }] }, { status: 422 }) : undefined,
+    )
+    expect(await t.action(api.shop.back, { processor: 'paypal', token: oldOrder })).toEqual({ checkoutId: first.checkoutId, status: 'pending', declined: true, reordered: true })
+    pp.refuse()
+    const again = await onPage(t, { processor: 'paypal', method: 'card', email: 'eve@example.org', replaces: first.checkoutId })
+    if (again.onPage.processor !== 'paypal') throw new Error('expected PayPal')
+    expect(again).toMatchObject({ checkoutId: first.checkoutId, reused: true })
+    const newOrder = again.onPage.orderId
+    expect(newOrder).not.toBe(oldOrder)
+    expect(again.onPage.returnUrl).toBe(`https://app.example.org/checkout/o1/return?token=${newOrder}`)
+    expect((await status(first.checkoutId)).processorCheckoutId).toBe(newOrder)
+    // The old order's approval, delivered late, captures nothing.
+    expect(await post('/paypal/webhook', oldApproval)).toEqual({ status: 200, text: 'handled' })
+    expect(pp.calls.filter((x) => x.path === `/v2/checkout/orders/${oldOrder}/capture`)).toHaveLength(1)
+    pp.approve(newOrder)
+    expect(await t.action(api.shop.back, { processor: 'paypal', token: newOrder })).toEqual({ checkoutId: first.checkoutId, status: 'paid' })
+    expect(await calls('onPaid')).toHaveLength(1)
+    // No start was counted for the new order: the payer still has two more.
+    await onPage(t, { processor: 'paypal', method: 'card', email: 'eve@example.org' })
+    await onPage(t, { processor: 'paypal', method: 'card', email: 'eve@example.org' })
+  })
+
+  test('replaces: a changed payer, description, context or return page is not reused; the last press’s payment is closed and a fresh one started', async () => {
+    const { t, status, later } = setup()
+    const base = { processor: 'stripe', method: 'card', email: 'eve@example.org', limitKey: 'eve' } as const
+    let last = await onPage(t, base)
+    const changes = [{ email: 'eve2@example.org' }, { name: 'Eve' }, { description: 'A cup' }, { context: { buyer: 'b2' } }, { returnPath: '/checkout/o1/back' }]
+    for (const change of changes) {
+      later(MIN + 1000)
+      const next = await onPage(t, { ...base, ...change, replaces: last.checkoutId })
+      expect(next.reused).toBe(false)
+      expect((await status(last.checkoutId)).status).toBe('abandoned')
+      last = next
+    }
+  })
+
+  test('replaces is rate-limited before Stripe is asked', async () => {
+    const { t } = setup()
+    const first = await onPage(t, { processor: 'stripe', method: 'card', email: 'eve@example.org' })
+    const reads = () => stripe.calls.filter((x) => x.method === 'GET' && x.path.startsWith('/v1/payment_intents/')).length
+    for (let i = 0; i < 6; i++) await onPage(t, { processor: 'stripe', method: 'card', email: 'eve@example.org', replaces: first.checkoutId })
+    const before = reads()
+    await expect(onPage(t, { processor: 'stripe', method: 'card', email: 'eve@example.org', replaces: first.checkoutId })).rejects.toThrow('Too many tries')
+    expect(reads()).toBe(before)
+  })
+
+  test('PayPal: a spent order captured in the background (webhook) is re-ordered and its claim released; the next press gets the new order, which the background captures', async () => {
+    const { t, post, status } = setup()
+    const first = await onPage(t, { processor: 'paypal', method: 'card' })
+    if (first.onPage.processor !== 'paypal') throw new Error('expected PayPal')
+    const oldOrder = first.onPage.orderId
+    const approval = pp.approve(oldOrder)
+    pp.refuse((call: { path: string }) =>
+      call.path.endsWith('/capture') ? Response.json({ name: 'UNPROCESSABLE_ENTITY', details: [{ issue: 'MAX_NUMBER_OF_PAYMENT_ATTEMPTS_EXCEEDED' }] }, { status: 422 }) : undefined,
+    )
+    expect(await post('/paypal/webhook', approval)).toEqual({ status: 200, text: 'handled' })
+    pp.refuse()
+    const newOrder = (await status(first.checkoutId)).processorCheckoutId!
+    expect(newOrder).not.toBe(oldOrder)
+    expect(await onPage(t, { processor: 'paypal', method: 'card', replaces: first.checkoutId })).toMatchObject({ checkoutId: first.checkoutId, reused: true, onPage: { orderId: newOrder } })
+    expect(await post('/paypal/webhook', pp.approve(newOrder))).toEqual({ status: 200, text: 'handled' })
+    expect((await status(first.checkoutId)).status).toBe('paid')
+  })
+
+  test('PayPal: a capture PayPal refuses as completed or voided, with the order not paid, is re-ordered and the claim released', async () => {
+    const { t, status } = setup()
+    const first = await onPage(t, { processor: 'paypal', method: 'card' })
+    if (first.onPage.processor !== 'paypal') throw new Error('expected PayPal')
+    const oldOrder = first.onPage.orderId
+    pp.approve(oldOrder)
+    pp.refuse((call) => (call.path.endsWith('/capture') ? Response.json({ name: 'UNPROCESSABLE_ENTITY', details: [{ issue: 'ORDER_COMPLETED_OR_VOIDED' }] }, { status: 422 }) : undefined))
+    expect(await t.action(api.shop.back, { processor: 'paypal', token: oldOrder })).toEqual({ checkoutId: first.checkoutId, status: 'pending', declined: true, reordered: true })
+    pp.refuse()
+    expect((await status(first.checkoutId)).processorCheckoutId).not.toBe(oldOrder)
+    expect(await t.action(api.payments.cancelCheckout, { checkoutId: first.checkoutId })).toEqual({ status: 'abandoned' })
+  })
+
+  test('PayPal: a card declined at the capture (201, the order COMPLETED, its capture DECLINED) is re-ordered under the same checkout, no new start counted; its late webhook fails nothing, and the next press pays', async () => {
+    const { t, post, status, calls } = setup()
+    const first = await onPage(t, { processor: 'paypal', method: 'card', email: 'eve@example.org' })
+    if (first.onPage.processor !== 'paypal') throw new Error('expected PayPal')
+    const oldOrder = first.onPage.orderId
+    pp.approveWithCard(oldOrder, 'CCREJECT-REFUSED')
+    pp.capturesCome('DECLINED')
+    expect(await t.action(api.shop.back, { processor: 'paypal', token: oldOrder })).toEqual({ checkoutId: first.checkoutId, status: 'pending', declined: true, reordered: true })
+    pp.capturesCome('COMPLETED')
+    const newOrder = (await status(first.checkoutId)).processorCheckoutId!
+    expect(newOrder).not.toBe(oldOrder)
+    expect(await post('/paypal/webhook', pp.captureEvent(oldOrder, 'PAYMENT.CAPTURE.DECLINED'))).toEqual({ status: 200, text: 'handled' })
+    expect(await status(first.checkoutId)).toMatchObject({ status: 'pending', processorCheckoutId: newOrder })
+    expect(await calls('onFailed')).toHaveLength(0)
+    const again = await onPage(t, { processor: 'paypal', method: 'card', email: 'eve@example.org', replaces: first.checkoutId })
+    expect(again).toMatchObject({ checkoutId: first.checkoutId, reused: true, onPage: { orderId: newOrder } })
+    pp.approveWithCard(newOrder)
+    expect(await t.action(api.shop.back, { processor: 'paypal', token: newOrder })).toEqual({ checkoutId: first.checkoutId, status: 'paid' })
+    expect(await calls('onPaid')).toHaveLength(1)
+    await onPage(t, { processor: 'paypal', method: 'card', email: 'eve@example.org' })
+    await onPage(t, { processor: 'paypal', method: 'card', email: 'eve@example.org' })
+  })
+
+  test('PayPal: a card declined in a background capture (webhook) is re-ordered; the new order’s background capture isn’t answered with the old one’s', async () => {
+    const { t, post, status } = setup()
+    const first = await onPage(t, { processor: 'paypal', method: 'card' })
+    if (first.onPage.processor !== 'paypal') throw new Error('expected PayPal')
+    const oldOrder = first.onPage.orderId
+    pp.approveWithCard(oldOrder, 'CCREJECT-REFUSED')
+    pp.capturesCome('DECLINED')
+    expect(await post('/paypal/webhook', pp.approve(oldOrder))).toEqual({ status: 200, text: 'handled' })
+    pp.capturesCome('COMPLETED')
+    const newOrder = (await status(first.checkoutId)).processorCheckoutId!
+    expect(newOrder).not.toBe(oldOrder)
+    expect(await post('/paypal/webhook', pp.approve(newOrder))).toEqual({ status: 200, text: 'handled' })
+    expect((await status(first.checkoutId)).status).toBe('paid')
+  })
+
+  test('PayPal: ORDER_ALREADY_CAPTURED on an order with nothing paid is re-ordered, not settled', async () => {
+    const { t, status, calls } = setup()
+    const first = await onPage(t, { processor: 'paypal', method: 'card' })
+    if (first.onPage.processor !== 'paypal') throw new Error('expected PayPal')
+    const oldOrder = first.onPage.orderId
+    pp.approveWithCard(oldOrder)
+    pp.refuse((call) => (call.path.endsWith('/capture') ? Response.json({ name: 'UNPROCESSABLE_ENTITY', details: [{ issue: 'ORDER_ALREADY_CAPTURED' }] }, { status: 422 }) : undefined))
+    expect(await t.action(api.shop.back, { processor: 'paypal', token: oldOrder })).toEqual({ checkoutId: first.checkoutId, status: 'pending', declined: true, reordered: true })
+    pp.refuse()
+    expect((await status(first.checkoutId)).processorCheckoutId).not.toBe(oldOrder)
+    expect(await calls('onFailed')).toHaveLength(0)
+    expect(await t.action(api.payments.cancelCheckout, { checkoutId: first.checkoutId })).toEqual({ status: 'abandoned' })
+  })
+
+  test('PayPal: a press after a declined card whose re-order failed gets a new order, not the declined one', async () => {
+    const { t, status } = setup()
+    const first = await onPage(t, { processor: 'paypal', method: 'card' })
+    if (first.onPage.processor !== 'paypal') throw new Error('expected PayPal')
+    const oldOrder = first.onPage.orderId
+    pp.approveWithCard(oldOrder, 'CCREJECT-REFUSED')
+    pp.capturesCome('DECLINED')
+    pp.refuse((call) => (call.method === 'POST' && call.path === '/v2/checkout/orders' ? Response.json({ name: 'INTERNAL_SERVER_ERROR' }, { status: 500 }) : undefined))
+    expect(await t.action(api.shop.back, { processor: 'paypal', token: oldOrder })).toEqual({ checkoutId: first.checkoutId, status: 'pending', declined: true })
+    pp.refuse()
+    pp.capturesCome('COMPLETED')
+    expect(await status(first.checkoutId)).toMatchObject({ status: 'pending', processorCheckoutId: oldOrder })
+    const again = await onPage(t, { processor: 'paypal', method: 'card', replaces: first.checkoutId })
+    if (again.onPage.processor !== 'paypal') throw new Error('expected PayPal')
+    expect(again).toMatchObject({ checkoutId: first.checkoutId, reused: true })
+    expect(again.onPage.orderId).not.toBe(oldOrder)
+    pp.approveWithCard(again.onPage.orderId)
+    expect(await t.action(api.shop.back, { processor: 'paypal', token: again.onPage.orderId })).toEqual({ checkoutId: first.checkoutId, status: 'paid' })
+  })
+
+  test('replaces: a second press naming a checkout already replaced gets the replacing checkout back, not another', async () => {
+    const { t, status } = setup()
+    const first = await onPage(t, { processor: 'stripe', method: 'card', email: 'eve@example.org' })
+    const one = await onPage(t, { processor: 'stripe', method: 'card', amountCents: 4000, email: 'eve@example.org', replaces: first.checkoutId })
+    const two = await onPage(t, { processor: 'stripe', method: 'card', amountCents: 4000, email: 'eve@example.org', replaces: first.checkoutId })
+    expect(one.reused).toBe(false)
+    expect(two).toEqual({ ...one, reused: true })
+    expect(intentsMade()).toHaveLength(2)
+    expect((await status(first.checkoutId)).status).toBe('abandoned')
+    const changed = await onPage(t, { processor: 'stripe', method: 'card', amountCents: 5000, email: 'eve@example.org', replaces: first.checkoutId })
+    expect(changed.checkoutId).not.toBe(one.checkoutId)
+    expect((await status(one.checkoutId)).status).toBe('abandoned')
+    expect(await status(changed.checkoutId)).toMatchObject({ status: 'pending', amountCents: 5000 })
+  })
+
+  test('replaces: a press that finds the replacing checkout still being started asks Stripe again under its key and gets the same PaymentIntent', async () => {
+    const { t, status } = setup()
+    const first = await onPage(t, { processor: 'stripe', method: 'card', email: 'eve@example.org' })
+    let release = () => {}
+    const gate = new Promise<void>((r) => (release = r))
+    let held = false
+    vi.stubGlobal('fetch', async (input: string, init?: RequestInit) => {
+      if (!held && input.endsWith('/v1/payment_intents') && init?.method === 'POST') {
+        held = true
+        await gate
+      }
+      return await stripe.fetch(input, init)
+    })
+    const press = () => onPage(t, { processor: 'stripe', method: 'card', amountCents: 4000, email: 'eve@example.org', replaces: first.checkoutId })
+    const slow = press()
+    await vi.waitFor(() => expect(held).toBe(true))
+    const quick = await press()
+    release()
+    const late = await slow
+    expect(quick).toEqual({ ...late, reused: true })
+    expect(await status(late.checkoutId)).toMatchObject({ status: 'pending', amountCents: 4000 })
+  })
+
+  test('PayPal: a buyer coming back with the order a background capture re-ordered hears declined and re-ordered, not nothing', async () => {
+    const { t, post, status } = setup()
+    const first = await onPage(t, { processor: 'paypal', method: 'card' })
+    if (first.onPage.processor !== 'paypal') throw new Error('expected PayPal')
+    const oldOrder = first.onPage.orderId
+    pp.approveWithCard(oldOrder, 'CCREJECT-REFUSED')
+    pp.capturesCome('DECLINED')
+    expect(await post('/paypal/webhook', pp.approve(oldOrder))).toEqual({ status: 200, text: 'handled' })
+    pp.capturesCome('COMPLETED')
+    expect((await status(first.checkoutId)).processorCheckoutId).not.toBe(oldOrder)
+    expect(await t.action(api.shop.back, { processor: 'paypal', token: oldOrder })).toEqual({ checkoutId: first.checkoutId, status: 'pending', declined: true, reordered: true })
+  })
+
+  test('PayPal: a declined capture’s webhook for the checkout’s own order re-orders it even while a capture that never answered holds it', async () => {
+    const { t, post, status } = setup()
+    const first = await onPage(t, { processor: 'paypal', method: 'card' })
+    if (first.onPage.processor !== 'paypal') throw new Error('expected PayPal')
+    const oldOrder = first.onPage.orderId
+    pp.approveWithCard(oldOrder, 'CCREJECT-REFUSED')
+    pp.refuse((call) => (call.path.endsWith('/capture') ? Response.json({ name: 'INTERNAL_SERVER_ERROR' }, { status: 500 }) : undefined))
+    await expect(t.action(api.shop.back, { processor: 'paypal', token: oldOrder })).rejects.toThrow()
+    pp.refuse()
+    const declined = {
+      id: 'FAKECAPD',
+      status: 'DECLINED',
+      custom_id: `test:${first.checkoutId}`,
+      amount: { currency_code: 'USD', value: '25.00' },
+      supplementary_data: { related_ids: { order_id: oldOrder } },
+    }
+    expect(await post('/paypal/webhook', pp.event('PAYMENT.CAPTURE.DECLINED', declined))).toEqual({ status: 200, text: 'handled' })
+    const newOrder = (await status(first.checkoutId)).processorCheckoutId!
+    expect(newOrder).not.toBe(oldOrder)
+    expect(await onPage(t, { processor: 'paypal', method: 'card', replaces: first.checkoutId })).toMatchObject({ checkoutId: first.checkoutId, reused: true, onPage: { orderId: newOrder } })
+  })
+
+  test('PayPal: a declined capture’s webhook after the on-page checkout ran out of time fails it', async () => {
+    const { t, post, status, later } = setup()
+    const first = await onPage(t, { processor: 'paypal', method: 'card' })
+    if (first.onPage.processor !== 'paypal') throw new Error('expected PayPal')
+    pp.approveWithCard(first.onPage.orderId, 'CCREJECT-REFUSED')
+    pp.capturesCome('DECLINED')
+    pp.refuse((call) => (call.method === 'POST' && call.path === '/v2/checkout/orders' ? Response.json({ name: 'INTERNAL_SERVER_ERROR' }, { status: 500 }) : undefined))
+    expect(await t.action(api.shop.back, { processor: 'paypal', token: first.onPage.orderId })).toMatchObject({ status: 'pending', declined: true })
+    pp.refuse()
+    later(4 * 60 * MIN)
+    expect(await post('/paypal/webhook', pp.captureEvent(first.onPage.orderId, 'PAYMENT.CAPTURE.DECLINED'))).toEqual({ status: 200, text: 'handled' })
+    expect(await status(first.checkoutId)).toMatchObject({ status: 'failed' })
+  })
+
+  test('replaces: a press naming an old checkout after many changes follows them all to the last one', async () => {
+    const { t, later } = setup()
+    const first = await onPage(t, { processor: 'stripe', method: 'card', email: 'eve@example.org' })
+    let last = first
+    for (const amountCents of [3000, 3100, 3200, 3300, 3400, 3500]) {
+      later(MIN + 1000)
+      last = await onPage(t, { processor: 'stripe', method: 'card', amountCents, email: 'eve@example.org', replaces: last.checkoutId })
+    }
+    expect(await onPage(t, { processor: 'stripe', method: 'card', amountCents: 3500, email: 'eve@example.org', replaces: first.checkoutId })).toEqual({ ...last, reused: true })
+  })
+
+  test('replaces: a press that asks Stripe again while the first press’s request is under way is told it is still starting', async () => {
+    const { t, status } = setup()
+    const first = await onPage(t, { processor: 'stripe', method: 'card', email: 'eve@example.org' })
+    let release = () => {}
+    const gate = new Promise<void>((r) => (release = r))
+    let held = false
+    vi.stubGlobal('fetch', async (input: string, init?: RequestInit) => {
+      if (input.endsWith('/v1/payment_intents') && init?.method === 'POST') {
+        if (held)
+          return Response.json(
+            { error: { type: 'idempotency_error', code: 'idempotency_key_in_use', message: 'There is currently another in-progress request using this Idempotent Key.' } },
+            { status: 409 },
+          )
+        held = true
+        await gate
+      }
+      return await stripe.fetch(input, init)
+    })
+    const press = () => onPage(t, { processor: 'stripe', method: 'card', amountCents: 4000, email: 'eve@example.org', replaces: first.checkoutId })
+    const slow = press()
+    await vi.waitFor(() => expect(held).toBe(true))
+    await expect(press()).rejects.toThrow('still starting')
+    release()
+    expect(await status((await slow).checkoutId)).toMatchObject({ status: 'pending', amountCents: 4000 })
+  })
+
+  test('replaces: a changed press doesn’t close a checkout another press is still starting', async () => {
+    const { t, status } = setup()
+    const first = await onPage(t, { processor: 'stripe', method: 'card', email: 'eve@example.org' })
+    let release = () => {}
+    const gate = new Promise<void>((r) => (release = r))
+    let held = false
+    vi.stubGlobal('fetch', async (input: string, init?: RequestInit) => {
+      if (!held && input.endsWith('/v1/payment_intents') && init?.method === 'POST') {
+        held = true
+        await gate
+      }
+      return await stripe.fetch(input, init)
+    })
+    const slow = onPage(t, { processor: 'stripe', method: 'card', amountCents: 4000, email: 'eve@example.org', replaces: first.checkoutId })
+    await vi.waitFor(() => expect(held).toBe(true))
+    await expect(onPage(t, { processor: 'stripe', method: 'card', amountCents: 5000, email: 'eve@example.org', replaces: first.checkoutId })).rejects.toThrow('still starting')
+    release()
+    const started = await slow
+    expect(await status(started.checkoutId)).toMatchObject({ status: 'pending', amountCents: 4000 })
+  })
+
+  test('replaces: two presses at once make one new checkout and one PaymentIntent', async () => {
+    const { t, status } = setup()
+    const first = await onPage(t, { processor: 'stripe', method: 'card', email: 'eve@example.org' })
+    const press = () => onPage(t, { processor: 'stripe', method: 'card', amountCents: 4000, email: 'eve@example.org', replaces: first.checkoutId })
+    const [a, b] = await Promise.all([press(), press()])
+    expect(a.checkoutId).toBe(b.checkoutId)
+    expect(a.onPage).toEqual(b.onPage)
+    expect(new Set(intentsMade().map((x) => new URLSearchParams(x.params).get('metadata[checkoutId]')))).toEqual(new Set([first.checkoutId, a.checkoutId]))
+    expect(await status(a.checkoutId)).toMatchObject({ status: 'pending', amountCents: 4000 })
+  })
+
+  test('PayPal: a stale capture claim (a capture that never finished) doesn’t stop a re-order once PayPal has dropped the order', async () => {
+    const { t, status, later } = setup()
+    const first = await onPage(t, { processor: 'paypal', method: 'card' })
+    if (first.onPage.processor !== 'paypal') throw new Error('expected PayPal')
+    const oldOrder = first.onPage.orderId
+    pp.approve(oldOrder)
+    pp.refuse((call) => (call.path.endsWith('/capture') ? Response.json({ name: 'INTERNAL_SERVER_ERROR' }, { status: 500 }) : undefined))
+    await expect(t.action(api.shop.back, { processor: 'paypal', token: oldOrder })).rejects.toThrow()
+    later(6 * MIN)
+    pp.refuse((call) =>
+      call.method === 'GET' && call.path === `/v2/checkout/orders/${oldOrder}`
+        ? Response.json({ name: 'RESOURCE_NOT_FOUND', details: [{ issue: 'INVALID_RESOURCE_ID' }] }, { status: 404 })
+        : undefined,
+    )
+    const again = await onPage(t, { processor: 'paypal', method: 'card', replaces: first.checkoutId })
+    pp.refuse()
+    expect(again).toMatchObject({ checkoutId: first.checkoutId, reused: true })
+    if (again.onPage.processor !== 'paypal') throw new Error('expected PayPal')
+    expect(again.onPage.orderId).not.toBe(oldOrder)
+    expect((await status(first.checkoutId)).processorCheckoutId).toBe(again.onPage.orderId)
+  })
+
+  test('PayPal: a changed amount closes the last order’s checkout and makes a new one', async () => {
+    const { t, status } = setup()
+    const first = await onPage(t, { processor: 'paypal', method: 'card' })
+    const next = await onPage(t, { processor: 'paypal', method: 'card', amountCents: 4000, replaces: first.checkoutId })
+    expect(next.reused).toBe(false)
+    expect((await status(first.checkoutId)).status).toBe('abandoned')
+    expect(await status(next.checkoutId)).toMatchObject({ status: 'pending', amountCents: 4000 })
   })
 })
 

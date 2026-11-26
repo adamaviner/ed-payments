@@ -290,14 +290,15 @@ export function publicApi<C extends GenericValidator>(p: Payments<C>) {
      * The page the buyer comes back to: `token` is Stripe's session_id (or payment_intent) or PayPal's
      * token. Settles the checkout if the processor says it's paid and the webhook hasn't arrived;
      * safe to reload. Says only how it stands, nothing about the payer. PayPal's buttons on the app's
-     * page call it when the buyer approves; `declined: true` means PayPal refused what they chose.
+     * page call it when the buyer approves; `declined: true` means PayPal refused what they chose;
+     * `reordered: true` (on-page) that the checkout has a new order, got by starting again with replaces.
      */
     completeReturn: actionGeneric({
       args: { processor, token: v.string() },
-      handler: async (ctx, a): Promise<{ status: string; purpose: string; ref: { type: string; id: string }; declined?: true } | null> => {
+      handler: async (ctx, a): Promise<{ status: string; purpose: string; ref: { type: string; id: string }; declined?: true; reordered?: true } | null> => {
         await p.takeLimits(ctx, 'return', `token:${a.token.slice(0, 80)}`, 4)
         const r = await p.completeReturn(ctx, a)
-        return r && { status: r.status, purpose: r.purpose, ref: r.ref, ...(r.declined ? { declined: r.declined } : {}) }
+        return r && { status: r.status, purpose: r.purpose, ref: r.ref, ...(r.declined ? { declined: r.declined } : {}), ...(r.reordered ? { reordered: r.reordered } : {}) }
       },
     }),
     /**

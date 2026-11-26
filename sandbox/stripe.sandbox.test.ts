@@ -1,12 +1,15 @@
 // Real calls to Stripe test mode with the library's own wire code: what was checked by hand for v0.1,
-// and the saved-method calls v0.2 added. Run by `npm run test:sandbox` (vitest.sandbox.config.ts),
+// the saved-method calls v0.2 added, and on-page payments through the whole library (its test app):
+// the PaymentIntent made at the press and confirmed here with test payment methods, as Stripe.js would.
+// A card that asks for 3-D Secure needs a browser, so it is left to the app's own check in a browser. Run by `npm run test:sandbox` (vitest.sandbox.config.ts),
 // only with a test key. Everything made here is test-mode data; the customer is deleted at the end,
 // and a webhook endpoint made to check the CLI is removed again.
-import { afterAll, describe, expect, test } from 'vitest'
+import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import { stripeWebhook } from '../src/cli/webhooks.js'
 import { ProcessorError, intentState, sessionState, stripe, stripeCall, type StripeCustomer } from '../src/core/index.js'
 import { keyDiff } from '../src/testing/drift.js'
 import { fixture, stripeObjectFixtures } from '../src/testing/fixtures.js'
+import { api, endSandbox, harness, stripePost, useSandbox } from './harness.js'
 
 const secretKey = process.env.SANDBOX_STRIPE_SECRET_KEY ?? ''
 if (!/^(sk|rk)_test_/.test(secretKey)) throw new Error('The sandbox suite only runs with a Stripe test key.')
@@ -184,5 +187,53 @@ describe('the webhook CLI', () => {
       if (!(err instanceof ProcessorError) || err.status !== 403) throw err
       console.info('test:sandbox: this key has no Webhook Endpoints permission, so the CLI was refused (it would need it to register the webhook).')
     }
+  })
+})
+
+describe('on-page payments through the library', () => {
+  beforeAll(useSandbox)
+  afterAll(endSandbox)
+
+  const intentOf = (clientSecret: string) => clientSecret.slice(0, clientSecret.indexOf('_secret_'))
+  /** What Stripe.js does at the press: confirm the PaymentIntent with what the payer typed (here a test method). */
+  const confirm = (clientSecret: string, method: string, extra = '') =>
+    stripePost<{ status?: string; error?: { code?: string; decline_code?: string; payment_intent?: { status: string } } }>(
+      `/v1/payment_intents/${intentOf(clientSecret)}/confirm`,
+      `payment_method=${method}${extra}`,
+    )
+
+  test('a one-off card payment: the PaymentIntent made at the press for a card only, confirmed with a card, paid on the return', async () => {
+    const { t } = harness()
+    const started = await t.action(api.shop.buyOnPage, { processor: 'stripe', method: 'card', amountCents: 2500 })
+    if (started.onPage.processor !== 'stripe') throw new Error('expected a Stripe on-page payment')
+    expect(started).toMatchObject({ reused: false, onPage: { returnUrl: 'https://app.example.org/checkout/o1/return' } })
+    const pi = await stripe.paymentIntent(keys, intentOf(started.onPage.clientSecret), o)
+    expect(pi).toMatchObject({ status: 'requires_payment_method', amount: 2500, payment_method_types: ['card'], setup_future_usage: null })
+    expect((await confirm(started.onPage.clientSecret, 'pm_card_visa')).status).toBe('succeeded')
+    expect(await t.action(api.shop.back, { processor: 'stripe', token: pi.id })).toEqual({ checkoutId: started.checkoutId, status: 'paid' })
+    expect(await t.query(api.host.orders, {})).toMatchObject([{ checkoutId: started.checkoutId, paidCents: 2500, paymentRef: pi.id }])
+  })
+
+  test('a declined card, then the next press (replaces) gets the same PaymentIntent back, and another card pays it', async () => {
+    const { t } = harness()
+    const first = await t.action(api.shop.buyOnPage, { processor: 'stripe', method: 'card', amountCents: 2500 })
+    if (first.onPage.processor !== 'stripe') throw new Error('expected a Stripe on-page payment')
+    const declined = await confirm(first.onPage.clientSecret, 'pm_card_chargeDeclined')
+    expect(declined.error).toMatchObject({ code: 'card_declined', payment_intent: { status: 'requires_payment_method' } })
+    const again = await t.action(api.shop.buyOnPage, { processor: 'stripe', method: 'card', amountCents: 2500, replaces: first.checkoutId })
+    expect(again).toEqual({ ...first, reused: true })
+    expect((await confirm(first.onPage.clientSecret, 'pm_card_visa')).status).toBe('succeeded')
+    expect(await t.action(api.shop.back, { processor: 'stripe', token: intentOf(first.onPage.clientSecret) })).toEqual({ checkoutId: first.checkoutId, status: 'paid' })
+    expect(await t.query(api.host.orders, {})).toHaveLength(1)
+  })
+
+  test('a bank account: confirmed with the payer’s mandate, the payment is on its way (processing)', async () => {
+    const { t } = harness()
+    const started = await t.action(api.shop.buyOnPage, { processor: 'stripe', method: 'ach', amountCents: 2500 })
+    if (started.onPage.processor !== 'stripe') throw new Error('expected a Stripe on-page payment')
+    const mandate = '&mandate_data[customer_acceptance][type]=online&mandate_data[customer_acceptance][online][ip_address]=127.0.0.1&mandate_data[customer_acceptance][online][user_agent]=sandbox'
+    const confirmed = await confirm(started.onPage.clientSecret, 'pm_usBankAccount_success', mandate)
+    expect(confirmed).toMatchObject({ status: 'processing' })
+    expect(await t.action(api.shop.back, { processor: 'stripe', token: intentOf(started.onPage.clientSecret) })).toEqual({ checkoutId: started.checkoutId, status: 'processing' })
   })
 })

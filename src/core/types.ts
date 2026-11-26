@@ -12,9 +12,10 @@ export const METHODS: Record<Processor, readonly Method[]> = { stripe: ['card', 
  * How a checkout is paid. hosted: the buyer goes to Stripe Checkout or PayPal. offSession: a saved card
  * or bank account is charged with nobody present (e.g. a winning bid when the auction closes).
  * onSession: the buyer pays on the app's own page with Stripe's Payment Element (e.g. retrying a
- * declined off-session charge).
+ * declined off-session charge). onPage: a new payment made at the buyer's press on the app's own form
+ * (start with ui: 'onPage'): a Stripe PaymentIntent, or a PayPal order like an embedded one.
  */
-export type CheckoutKind = 'hosted' | 'offSession' | 'onSession'
+export type CheckoutKind = 'hosted' | 'offSession' | 'onSession' | 'onPage'
 
 /** What a saved payment method is: a card, or a US bank account (ACH). */
 export type SavedMethodKind = 'card' | 'ach'

@@ -43,6 +43,8 @@ interface Order {
   vaultId?: string
   /** Saved after the capture: the order shows vault APPROVED until PayPal finishes saving (finishSave, deliverVault), then VAULTED. */
   vaultLater?: 'waiting' | 'saved'
+  /** Card Fields put this card on the order (confirm-payment-source): it shows as payment_source.card, and its capture names the order by link. */
+  card?: { name: string; last_digits: string; expiry: string; brand: string; type: string }
 }
 
 export interface FakePaypalOptions {
@@ -88,7 +90,7 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
   }
 
   /** The order as PayPal shows it; `created` is the answer to creating it, which (as in the sandbox) has no create_time yet. */
-  function orderJson(o: Order, created = false): PaypalOrder {
+  function orderJson(o: Order, created = false, read = false): PaypalOrder {
     const base = fixture(created ? paypalObjectFixtures.orderCreated : paypalObjectFixtures.orderUnapproved) as unknown as PaypalOrder & { purchase_units: Record<string, unknown>[] }
     const unit = {
       ...base.purchase_units[0],
@@ -109,7 +111,9 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
       const { display_data: _shown, ...payee } = shown.payee as Record<string, unknown>
       shown.payee = payee
     }
-    return { ...base, id: o.id, status: o.status, purchase_units: [unit], links, ...(o.vaultId ? { payment_source: savedSource(o) } : {}) }
+    // Read back after a declined card's capture, the sandbox shows the order CREATED again, though it takes no other card.
+    const status = read && o.card && o.capture?.status === 'DECLINED' ? 'CREATED' : o.status
+    return { ...base, id: o.id, status, purchase_units: [unit], links, ...(o.vaultId ? { payment_source: savedSource(o) } : o.card ? { payment_source: { card: o.card } } : {}) }
   }
 
   /** An order's payment_source once vault-with-purchase saved its method, as the sandbox answered (order-vault-card-captured.json). */
@@ -265,10 +269,11 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
     if (path[1] === 'checkout' && path[2] === 'orders' && path[3]) {
       const o = orders.get(path[3])
       if (!o) return issue(404, 'RESOURCE_NOT_FOUND', 'INVALID_RESOURCE_ID', 'Specified resource ID does not exist.')
-      if (method === 'GET') return ok(vaultOrders.has(o.id) ? vaultOrderJson(o) : orderJson(o))
+      if (method === 'GET') return ok(vaultOrders.has(o.id) ? vaultOrderJson(o) : orderJson(o, false, true))
       if (path[4] === 'capture') {
-        if (o.status === 'COMPLETED') return Response.json(fixture(paypalObjectFixtures.errorOrderAlreadyCaptured), { status: 422 })
-        if (o.status !== 'APPROVED') return Response.json(fixture(paypalObjectFixtures.errorOrderNotApproved), { status: 422 })
+        // A declined card's order shows COMPLETED, yet capturing it again tries the same card again (another DECLINED capture), as the sandbox does.
+        if (o.status === 'COMPLETED' && !(o.card && o.capture?.status === 'DECLINED')) return Response.json(fixture(paypalObjectFixtures.errorOrderAlreadyCaptured), { status: 422 })
+        if (o.status !== 'APPROVED' && o.status !== 'COMPLETED') return Response.json(fixture(paypalObjectFixtures.errorOrderNotApproved), { status: 422 })
         if (declineNext) {
           declineNext = false
           return issue(422, 'UNPROCESSABLE_ENTITY', 'INSTRUMENT_DECLINED', 'The instrument presented was either declined by the processor or bank, or it can’t be used for this payment.')
@@ -281,8 +286,8 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
           custom_id: o.customId,
           seller_receivable_breakdown: { paypal_fee: { currency_code: 'USD', value: centsToDecimal(fee) } },
           // A capture that saved its card names its order by link, as the sandbox's did (order-vault-card-captured.json).
-          ...(o.save ? { links: [{ href: `${apiBase}/v2/checkout/orders/${o.id}`, rel: 'up', method: 'GET' }] } : { supplementary_data: { related_ids: { order_id: o.id } } }),
-          ...(o.save?.kind === 'card' ? { network_transaction_reference: { id: `FAKENTR${++n}`, network: 'VISA' } } : {}),
+          ...(o.save || o.card ? { links: [{ href: `${apiBase}/v2/checkout/orders/${o.id}`, rel: 'up', method: 'GET' }] } : { supplementary_data: { related_ids: { order_id: o.id } } }),
+          ...(o.save?.kind === 'card' || o.card ? { network_transaction_reference: { id: `FAKENTR${++n}`, network: 'VISA' } } : {}),
         }
         o.status = 'COMPLETED'
         if (o.save && captureOutcome !== 'DECLINED') {
@@ -566,6 +571,16 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
       })
       return id
     },
+    /**
+     * Card Fields put a card on the order in the browser (confirm-payment-source): APPROVED, paid by that card. A
+     * capture of it that comes back DECLINED (capturesCome) leaves the order COMPLETED, refusing another card
+     * (order-card-capture-declined.json).
+     */
+    approveWithCard(id: string, name = 'Sandbox Donor') {
+      const x = order(id)
+      x.status = 'APPROVED'
+      x.card = { name, last_digits: '1111', expiry: '2030-12', brand: 'VISA', type: 'CREDIT' }
+    },
     /** The buyer approves on PayPal's page; returns the CHECKOUT.ORDER.APPROVED webhook. */
     approve(id: string, o: { eventId?: string } = {}) {
       const x = order(id)
@@ -583,6 +598,7 @@ export function fakePaypal({ apiBase = 'https://api-m.sandbox.paypal.com', searc
           ...capture,
           ...(name === 'PAYMENT.CAPTURE.COMPLETED' && breakdown ? { seller_receivable_breakdown: breakdown } : {}),
           links: [{ href: `${apiBase}/v2/checkout/orders/${id}`, rel: 'up', method: 'GET' }],
+          supplementary_data: { related_ids: { order_id: id } },
         }),
       )
     },

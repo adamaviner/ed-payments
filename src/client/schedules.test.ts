@@ -349,6 +349,118 @@ describe('a schedule started with a payment that saves the method', () => {
     expect(await calls('scheduleChanged')).toMatchObject([{ changes: ['not_started'], previousStatus: 'starting' }])
   })
 
+  test('Stripe on-page: a PaymentIntent for the Customer saved for later, made at the press; the schedule starts when it is paid', async () => {
+    const { t, calls, schedule, status, runAt, charges } = setup()
+    const started = await t.action(api.monthly.startCheckout, { donor: 'd1', processor: 'stripe', method: 'card', ui: 'onPage' })
+    if (!('onPage' in started) || started.onPage.processor !== 'stripe') throw new Error('expected an on-page Stripe payment')
+    expect(started).toMatchObject({ reused: false, onPage: { clientSecret: expect.stringMatching(/_secret_/), returnUrl: 'https://app.example.org/donate/thanks' } })
+    expect(await schedule(started.scheduleId)).toMatchObject({ status: 'starting', paymentMethodId: null })
+    expect(stripe.calls.some((c) => c.path === '/v1/checkout/sessions')).toBe(false)
+    const params = charges()[0].params
+    expect(params.get('customer')).toMatch(/^cus_/)
+    expect(params.get('setup_future_usage')).toBe('off_session')
+    expect(params.get('allowed_payment_method_types[0]')).toBe('card')
+    const pi = (await status(started.checkoutId)).processorCheckoutId!
+    await t.fetch('/stripe/webhook', await stripe.confirm(pi))
+    const s = await schedule(started.scheduleId)
+    expect(s).toMatchObject({ status: 'active', period: '2030-02', lastPaidPeriod: '2030-01', method: 'card', paymentMethodId: expect.stringMatching(/^pm_/) })
+    expect(await calls('scheduleChanged')).toMatchObject([{ changes: ['started'], previousStatus: 'starting', status: 'active' }])
+    expect(await calls('scheduleCharged')).toMatchObject([{ first: true, period: '2030-01', checkoutId: started.checkoutId }])
+    expect((await t.action(api.monthly.verify, { donor: 'd1', paymentMethodId: s.paymentMethodId! })).kind).toBe('card')
+    await runAt('2030-02-01T15:05:00Z')
+    expect(
+      charges()
+        .slice(1)
+        .map((c) => c.params.get('payment_method')),
+    ).toEqual([s.paymentMethodId])
+    expect(await schedule(started.scheduleId)).toMatchObject({ lastPaidPeriod: '2030-02' })
+  })
+
+  test('Stripe on-page, paid through the return page (3-D Secure, a bank login): the method is saved before it settles', async () => {
+    const { t, schedule, status } = setup()
+    const started = await t.action(api.monthly.startCheckout, { donor: 'd1', processor: 'stripe', method: 'ach', ui: 'onPage' })
+    const pi = (await status(started.checkoutId)).processorCheckoutId!
+    await stripe.confirm(pi, 'bank')
+    expect(await t.action(api.payments.completeReturn, { processor: 'stripe', token: pi })).toMatchObject({ status: 'processing' })
+    expect(await schedule(started.scheduleId)).toMatchObject({ status: 'active', method: 'ach', paymentMethodId: expect.stringMatching(/^pm_/) })
+  })
+
+  test('on-page: a press with the same amount reuses the checkout and its schedule; a changed amount ends both and starts afresh', async () => {
+    const { t, calls, schedule, status, charges } = setup()
+    const first = await t.action(api.monthly.startCheckout, { donor: 'd1', processor: 'stripe', method: 'card', ui: 'onPage' })
+    const pi = (await status(first.checkoutId)).processorCheckoutId!
+    await t.fetch('/stripe/webhook', await stripe.confirm(pi, 'decline'))
+    const again = await t.action(api.monthly.startCheckout, { donor: 'd1', processor: 'stripe', method: 'card', ui: 'onPage', replaces: first.checkoutId })
+    expect(again).toEqual({ ...first, reused: true })
+    expect(charges()).toHaveLength(1)
+    expect(await t.query(api.monthly.list, { donor: 'd1' })).toHaveLength(1)
+    const changed = await t.action(api.monthly.startCheckout, { donor: 'd1', processor: 'stripe', method: 'card', amountCents: 5000, ui: 'onPage', replaces: first.checkoutId })
+    expect(changed).toMatchObject({ reused: false })
+    expect(changed.scheduleId).not.toBe(first.scheduleId)
+    expect((await status(first.checkoutId)).status).toBe('abandoned')
+    expect(await schedule(first.scheduleId)).toMatchObject({ status: 'cancelled' })
+    expect(await calls('scheduleChanged')).toMatchObject([{ scheduleId: first.scheduleId, changes: ['not_started'] }])
+    expect(await schedule(changed.scheduleId)).toMatchObject({ status: 'starting', amountCents: 5000 })
+    await t.fetch('/stripe/webhook', await stripe.confirm((await status(changed.checkoutId)).processorCheckoutId!))
+    expect(await schedule(changed.scheduleId)).toMatchObject({ status: 'active', amountCents: 5000 })
+  })
+
+  test('on-page: a second press naming a first payment already replaced gets the replacing checkout and schedule back, and keeps no extra schedule', async () => {
+    const { t, status } = setup()
+    const first = await t.action(api.monthly.startCheckout, { donor: 'd1', processor: 'stripe', method: 'card', ui: 'onPage' })
+    const one = await t.action(api.monthly.startCheckout, { donor: 'd1', processor: 'stripe', method: 'card', amountCents: 5000, ui: 'onPage', replaces: first.checkoutId })
+    const two = await t.action(api.monthly.startCheckout, { donor: 'd1', processor: 'stripe', method: 'card', amountCents: 5000, ui: 'onPage', replaces: first.checkoutId })
+    expect(one).toMatchObject({ reused: false })
+    expect(two).toEqual({ ...one, reused: true })
+    expect((await status(first.checkoutId)).status).toBe('abandoned')
+    expect((await t.query(api.monthly.list, { donor: 'd1' })).map((s) => s.status).sort()).toEqual(['cancelled', 'starting'])
+  })
+
+  test('on-page: a changed anchor day or context is not reused; the starting schedule ends and a fresh one starts', async () => {
+    const { t, schedule, status } = setup()
+    const first = await t.action(api.monthly.startCheckout, { donor: 'd1', processor: 'stripe', method: 'card', ui: 'onPage', anchorDay: 5 })
+    const moved = await t.action(api.monthly.startCheckout, { donor: 'd1', processor: 'stripe', method: 'card', ui: 'onPage', anchorDay: 6, replaces: first.checkoutId })
+    expect(moved).toMatchObject({ reused: false })
+    expect((await status(first.checkoutId)).status).toBe('abandoned')
+    expect(await schedule(first.scheduleId)).toMatchObject({ status: 'cancelled' })
+    const noted = await t.action(api.monthly.startCheckout, { donor: 'd1', processor: 'stripe', method: 'card', ui: 'onPage', anchorDay: 6, note: 'n', replaces: moved.checkoutId })
+    expect(noted).toMatchObject({ reused: false })
+    expect((await status(moved.checkoutId)).status).toBe('abandoned')
+  })
+
+  test('on-page: a schedule’s payment is not reused for a one-off, nor a one-off’s for a schedule', async () => {
+    const { t, status } = setup()
+    const monthly = await t.action(api.monthly.startCheckout, { donor: 'd1', processor: 'stripe', method: 'card', ui: 'onPage' })
+    const oneOff = await t.action(api.shop.buyOnPage, {
+      processor: 'stripe',
+      method: 'card',
+      refType: 'monthly',
+      refId: 'm-d1',
+      purpose: 'donation',
+      description: 'Monthly gift',
+      email: 'd1@example.org',
+      context: { monthlyId: 'm-d1' },
+      replaces: monthly.checkoutId,
+    })
+    expect(oneOff.reused).toBe(false)
+    expect((await status(monthly.checkoutId)).status).toBe('abandoned')
+    const monthlyAgain = await t.action(api.monthly.startCheckout, { donor: 'd1', processor: 'stripe', method: 'card', ui: 'onPage', replaces: oneOff.checkoutId })
+    expect(monthlyAgain).toMatchObject({ reused: false })
+    expect((await status(oneOff.checkoutId)).status).toBe('abandoned')
+  })
+
+  test('PayPal card on-page: the same vault-with-purchase order as embedded, only Card Fields may pay it', async () => {
+    const { t, schedule } = setup()
+    const started = await t.action(api.monthly.startCheckout, { donor: 'd1', processor: 'paypal', method: 'card', ui: 'onPage' })
+    if (!('onPage' in started) || started.onPage.processor !== 'paypal') throw new Error('expected an on-page PayPal payment')
+    expect(started.onPage.only).toBe('card')
+    const body = pp.calls.find((c) => c.path === '/v2/checkout/orders')!.body as { payment_source: { card: { attributes: Record<string, unknown> } } }
+    expect(body.payment_source.card.attributes).toMatchObject({ vault: { store_in_vault: 'ON_SUCCESS' } })
+    pp.approve(started.onPage.orderId)
+    expect(await t.action(api.payments.completeReturn, { processor: 'paypal', token: started.onPage.orderId })).toMatchObject({ status: 'paid' })
+    expect(await schedule(started.scheduleId)).toMatchObject({ status: 'active', processor: 'paypal', method: 'card', paymentMethodId: expect.stringMatching(/^paypal:/) })
+  })
+
   test('the processor is the app’s choice, and only one that takes the method', async () => {
     const { t } = setup()
     await expect(t.action(api.monthly.startCheckout, { donor: 'd1', processor: 'paypal', method: 'ach' })).rejects.toThrow(/PayPal doesn’t take ach/)

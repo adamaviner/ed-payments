@@ -228,7 +228,7 @@ async function actOnPaypal(p: Payments, ctx: RunActionCtx, event: PaypalEvent): 
       const c = await paypalCheckout(p, ctx, capture.custom_id, captureOrderId(capture))
       if (!c) return 'foreign'
       const status = event.event_type === 'PAYMENT.CAPTURE.COMPLETED' ? 'COMPLETED' : event.event_type === 'PAYMENT.CAPTURE.PENDING' ? 'PENDING' : 'DECLINED'
-      await p.settlePaypalOrder(ctx, c.id, { id: c.processorCheckoutId ?? '', status: 'COMPLETED', purchase_units: [{ payments: { captures: [{ ...capture, status }] } }] })
+      await p.settlePaypalOrder(ctx, c.id, { id: captureOrderId(capture) ?? c.processorCheckoutId ?? '', status: 'COMPLETED', purchase_units: [{ payments: { captures: [{ ...capture, status }] } }] })
       return 'handled'
     }
     case 'PAYMENT.CAPTURE.REFUNDED':

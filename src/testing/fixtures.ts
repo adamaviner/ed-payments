@@ -71,6 +71,7 @@ import pVaultCreated from './fixtures/paypal/VAULT.PAYMENT-TOKEN.CREATED.json' w
 import pVaultCreatedPaypal from './fixtures/paypal/VAULT.PAYMENT-TOKEN.CREATED-paypal.json' with { type: 'json' }
 import pOrderVaultApproved from './fixtures/paypal/order-vault-approved-captured.json' with { type: 'json' }
 import pOrderVaultCard from './fixtures/paypal/order-vault-card-captured.json' with { type: 'json' }
+import pOrderCardDeclined from './fixtures/paypal/order-card-capture-declined.json' with { type: 'json' }
 import pVaultOrderRecurring from './fixtures/paypal/vault-order-recurring.json' with { type: 'json' }
 import pOauthToken from './fixtures/paypal/oauth-token.json' with { type: 'json' }
 import pWebhooksList from './fixtures/paypal/webhooks-list.json' with { type: 'json' }
@@ -154,6 +155,7 @@ export const paypalObjectFixtures = {
   vaultOrderCaptured: pVaultOrder,
   errorInvalidPaymentSource: pErrorInvalidSource,
   orderVaultCardCaptured: pOrderVaultCard,
+  orderCardCaptureDeclined: pOrderCardDeclined,
   orderVaultApprovedCaptured: pOrderVaultApproved,
   vaultOrderRecurring: pVaultOrderRecurring,
   oauthToken: pOauthToken,

@@ -5,7 +5,7 @@ import { v, type GenericValidator, type Infer, type ObjectType } from 'convex/va
 
 const processor = v.union(v.literal('stripe'), v.literal('paypal'))
 const method = v.union(v.literal('card'), v.literal('ach'), v.literal('paypal'))
-const kind = v.union(v.literal('hosted'), v.literal('offSession'), v.literal('onSession'))
+const kind = v.union(v.literal('hosted'), v.literal('offSession'), v.literal('onSession'), v.literal('onPage'))
 
 function base<C extends GenericValidator>(context: C) {
   return {
