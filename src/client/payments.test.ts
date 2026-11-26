@@ -788,7 +788,7 @@ describe('on-page payments (made at the payer’s press on the app’s own form)
     expect(reads()).toBe(before)
   })
 
-  test('PayPal: a spent order captured in the background (webhook) is re-ordered and its claim released; the next press gets the new order', async () => {
+  test('PayPal: a spent order captured in the background (webhook) is re-ordered and its claim released; the next press gets the new order, which the background captures', async () => {
     const { t, post, status } = setup()
     const first = await onPage(t, { processor: 'paypal', method: 'card' })
     if (first.onPage.processor !== 'paypal') throw new Error('expected PayPal')
@@ -802,7 +802,8 @@ describe('on-page payments (made at the payer’s press on the app’s own form)
     const newOrder = (await status(first.checkoutId)).processorCheckoutId!
     expect(newOrder).not.toBe(oldOrder)
     expect(await onPage(t, { processor: 'paypal', method: 'card', replaces: first.checkoutId })).toMatchObject({ checkoutId: first.checkoutId, reused: true, onPage: { orderId: newOrder } })
-    expect(await t.action(api.payments.cancelCheckout, { checkoutId: first.checkoutId })).toEqual({ status: 'abandoned' })
+    expect(await post('/paypal/webhook', pp.approve(newOrder))).toEqual({ status: 200, text: 'handled' })
+    expect((await status(first.checkoutId)).status).toBe('paid')
   })
 
   test('PayPal: a capture PayPal refuses as completed or voided, with the order not paid, is re-ordered and the claim released', async () => {
@@ -816,6 +817,87 @@ describe('on-page payments (made at the payer’s press on the app’s own form)
     pp.refuse()
     expect((await status(first.checkoutId)).processorCheckoutId).not.toBe(oldOrder)
     expect(await t.action(api.payments.cancelCheckout, { checkoutId: first.checkoutId })).toEqual({ status: 'abandoned' })
+  })
+
+  test('PayPal: a card declined at the capture (201, the order COMPLETED, its capture DECLINED) is re-ordered under the same checkout, no new start counted; its late webhook fails nothing, and the next press pays', async () => {
+    const { t, post, status, calls } = setup()
+    const first = await onPage(t, { processor: 'paypal', method: 'card', email: 'eve@example.org' })
+    if (first.onPage.processor !== 'paypal') throw new Error('expected PayPal')
+    const oldOrder = first.onPage.orderId
+    pp.approveWithCard(oldOrder, 'CCREJECT-REFUSED')
+    pp.capturesCome('DECLINED')
+    expect(await t.action(api.shop.back, { processor: 'paypal', token: oldOrder })).toEqual({ checkoutId: first.checkoutId, status: 'pending', declined: true, reordered: true })
+    pp.capturesCome('COMPLETED')
+    const newOrder = (await status(first.checkoutId)).processorCheckoutId!
+    expect(newOrder).not.toBe(oldOrder)
+    const declined = pp.orders().find((o) => o.id === oldOrder)!.purchase_units![0].payments!.captures![0]
+    expect(await post('/paypal/webhook', pp.event('PAYMENT.CAPTURE.DECLINED', { ...declined }))).toEqual({ status: 200, text: 'handled' })
+    expect(await status(first.checkoutId)).toMatchObject({ status: 'pending', processorCheckoutId: newOrder })
+    expect(await calls('onFailed')).toHaveLength(0)
+    const again = await onPage(t, { processor: 'paypal', method: 'card', email: 'eve@example.org', replaces: first.checkoutId })
+    expect(again).toMatchObject({ checkoutId: first.checkoutId, reused: true, onPage: { orderId: newOrder } })
+    pp.approveWithCard(newOrder)
+    expect(await t.action(api.shop.back, { processor: 'paypal', token: newOrder })).toEqual({ checkoutId: first.checkoutId, status: 'paid' })
+    expect(await calls('onPaid')).toHaveLength(1)
+    await onPage(t, { processor: 'paypal', method: 'card', email: 'eve@example.org' })
+    await onPage(t, { processor: 'paypal', method: 'card', email: 'eve@example.org' })
+  })
+
+  test('PayPal: a card declined in a background capture (webhook) is re-ordered; the new order’s background capture isn’t answered with the old one’s', async () => {
+    const { t, post, status } = setup()
+    const first = await onPage(t, { processor: 'paypal', method: 'card' })
+    if (first.onPage.processor !== 'paypal') throw new Error('expected PayPal')
+    const oldOrder = first.onPage.orderId
+    pp.approveWithCard(oldOrder, 'CCREJECT-REFUSED')
+    pp.capturesCome('DECLINED')
+    expect(
+      await post(
+        '/paypal/webhook',
+        pp.event(
+          'CHECKOUT.ORDER.APPROVED',
+          pp.orders().find((o) => o.id === oldOrder),
+        ),
+      ),
+    ).toEqual({ status: 200, text: 'handled' })
+    pp.capturesCome('COMPLETED')
+    const newOrder = (await status(first.checkoutId)).processorCheckoutId!
+    expect(newOrder).not.toBe(oldOrder)
+    expect(await post('/paypal/webhook', pp.approve(newOrder))).toEqual({ status: 200, text: 'handled' })
+    expect((await status(first.checkoutId)).status).toBe('paid')
+  })
+
+  test('PayPal: ORDER_ALREADY_CAPTURED on an order with nothing paid is re-ordered, not settled', async () => {
+    const { t, status, calls } = setup()
+    const first = await onPage(t, { processor: 'paypal', method: 'card' })
+    if (first.onPage.processor !== 'paypal') throw new Error('expected PayPal')
+    const oldOrder = first.onPage.orderId
+    pp.approveWithCard(oldOrder)
+    pp.refuse((call) => (call.path.endsWith('/capture') ? Response.json({ name: 'UNPROCESSABLE_ENTITY', details: [{ issue: 'ORDER_ALREADY_CAPTURED' }] }, { status: 422 }) : undefined))
+    expect(await t.action(api.shop.back, { processor: 'paypal', token: oldOrder })).toEqual({ checkoutId: first.checkoutId, status: 'pending', declined: true, reordered: true })
+    pp.refuse()
+    expect((await status(first.checkoutId)).processorCheckoutId).not.toBe(oldOrder)
+    expect(await calls('onFailed')).toHaveLength(0)
+    expect(await t.action(api.payments.cancelCheckout, { checkoutId: first.checkoutId })).toEqual({ status: 'abandoned' })
+  })
+
+  test('PayPal: a press after a declined card whose re-order failed gets a new order, not the declined one', async () => {
+    const { t, status } = setup()
+    const first = await onPage(t, { processor: 'paypal', method: 'card' })
+    if (first.onPage.processor !== 'paypal') throw new Error('expected PayPal')
+    const oldOrder = first.onPage.orderId
+    pp.approveWithCard(oldOrder, 'CCREJECT-REFUSED')
+    pp.capturesCome('DECLINED')
+    pp.refuse((call) => (call.method === 'POST' && call.path === '/v2/checkout/orders' ? Response.json({ name: 'INTERNAL_SERVER_ERROR' }, { status: 500 }) : undefined))
+    expect(await t.action(api.shop.back, { processor: 'paypal', token: oldOrder })).toEqual({ checkoutId: first.checkoutId, status: 'pending', declined: true })
+    pp.refuse()
+    pp.capturesCome('COMPLETED')
+    expect(await status(first.checkoutId)).toMatchObject({ status: 'pending', processorCheckoutId: oldOrder })
+    const again = await onPage(t, { processor: 'paypal', method: 'card', replaces: first.checkoutId })
+    if (again.onPage.processor !== 'paypal') throw new Error('expected PayPal')
+    expect(again).toMatchObject({ checkoutId: first.checkoutId, reused: true })
+    expect(again.onPage.orderId).not.toBe(oldOrder)
+    pp.approveWithCard(again.onPage.orderId)
+    expect(await t.action(api.shop.back, { processor: 'paypal', token: again.onPage.orderId })).toEqual({ checkoutId: first.checkoutId, status: 'paid' })
   })
 
   test('PayPal: a stale capture claim (a capture that never finished) doesn’t stop a re-order once PayPal has dropped the order', async () => {

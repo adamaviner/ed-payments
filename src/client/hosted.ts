@@ -218,6 +218,8 @@ export async function settlePaypalOrder(p: Payments, ctx: RunActionCtx, checkout
   if (capture.status === 'PENDING') return await ctx.runMutation(p.component.checkouts.markProcessing, { id: checkoutId, paymentRef: capture.id, now: Date.now() })
   // A saved method's charge declined later (a pending capture, then PAYMENT.CAPTURE.DECLINED) marks the method too.
   const c = await ctx.runQuery(p.component.checkouts.get, { id: checkoutId })
+  // On the app's page a declined card's capture leaves the payment open: the capture re-orders it, and the payer presses again.
+  if (c?.kind === 'onPage' && (c.status === 'pending' || c.status === 'created')) return null
   return await ctx.runMutation(p.component.checkouts.settleFailed, {
     id: checkoutId,
     reason: `PayPal ${capture.status.toLowerCase()} the payment.`,
@@ -320,8 +322,11 @@ export async function capturePaypal(p: Payments, ctx: RunActionCtx, checkoutId: 
   // taken; another capture under way (or a closed checkout) means there is nothing to do here.
   // The claim also checks the order is still the checkout's, as a re-order may have replaced it since the read above.
   if (!(await ctx.runMutation(p.component.checkouts.claimCapture, { id: checkoutId, orderId, now: Date.now() })).claimed) return undefined
-  const requestId = by === 'buyer' ? `capture-${checkoutId}-${Date.now().toString(36)}` : `capture-${checkoutId}`
-  const order = await p.withPaypal(ctx, async (call) => {
+  // Per order, as a re-ordered checkout's new order must not get the old one's answer replayed.
+  const requestId = by === 'buyer' ? `capture-${orderId}-${Date.now().toString(36)}` : `capture-${orderId}`
+  // A new order only for an on-page checkout still in time; an expired one is left for the sweep to close.
+  const spent = c.kind === 'onPage' && c.expiresAt > Date.now() ? ('spent' as const) : ('declined' as const)
+  const captured = await p.withPaypal(ctx, async (call) => {
     try {
       return await paypal.captureOrder(call, orderId, requestId)
     } catch (err) {
@@ -333,10 +338,14 @@ export async function capturePaypal(p: Payments, ctx: RunActionCtx, checkoutId: 
         const now = await paypal.getOrder(call, orderId)
         if (now.status === 'COMPLETED') return now
       } else if (!(err instanceof ProcessorError && err.code && ORDER_SPENT.has(err.code))) throw err
-      // A new order only for an on-page checkout still in time; an expired one is left for the sweep to close.
-      return c.kind === 'onPage' && c.expiresAt > Date.now() ? ('spent' as const) : ('declined' as const)
+      return spent
     }
   })
+  // A card declined by Card Fields' capture comes back 201 with the order COMPLETED and its capture
+  // DECLINED, and PayPal then takes no other card on that order (order-card-capture-declined.json); a
+  // capture refused as already made, with nothing paid, is the same order. On the app's page the
+  // payment goes on under a new order, as for a spent one.
+  const order = c.kind === 'onPage' && captured && typeof captured === 'object' && !orderPaid(captured) ? spent : captured
   if (order === 'spent') {
     // PayPal won't take this order again, so no money moved: the buyer's next press pays a new one under the same checkout.
     await ctx.runMutation(p.component.checkouts.releaseCapture, { id: checkoutId })
@@ -456,6 +465,11 @@ export async function cancel(p: Payments, ctx: RunActionCtx, checkoutId: string,
   if (r.outcome === 'check_processor') r = await close(true)
   return { status: r.outcome === 'already_handled' ? r.status : 'abandoned' }
 }
+
+const PAID_OR_PENDING: ReadonlySet<string> = new Set(['COMPLETED', 'PENDING', 'PARTIALLY_REFUNDED', 'REFUNDED'])
+
+/** Whether an order's capture took money (or is taking it); a declined or failed capture, or none, did not. */
+const orderPaid = (order: PaypalOrder) => PAID_OR_PENDING.has(orderCapture(order)?.status ?? '')
 
 /** PayPal's issues when an order can't be paid again (too many tries on it, or it ran out); a new order can be. */
 const ORDER_SPENT: ReadonlySet<string> = new Set(['MAX_NUMBER_OF_PAYMENT_ATTEMPTS_EXCEEDED', 'ORDER_EXPIRED'])
@@ -584,12 +598,13 @@ async function reopen(p: Payments, ctx: RunActionCtx, c: Checkout): Promise<OnPa
     return REUSABLE_INTENT.has(pi.status) && pi.client_secret ? { processor: 'stripe', clientSecret: pi.client_secret, returnUrl: c.returnUrl } : null
   }
   const order = await p.withPaypal(ctx, (call) => getOrderOrNull(call, id))
-  if (order?.status === 'COMPLETED') {
+  if (order && orderPaid(order)) {
     await settlePaypalOrder(p, ctx, c.id, order)
     return null
   }
   const saves = c.scheduleId ? { method: c.method } : null
-  if (order && order.status !== 'VOIDED') return paypalPayment(p, id, c.returnUrl, saves)
+  // An order with a declined capture takes no other card, though PayPal reads it back as CREATED.
+  if (order && order.status !== 'VOIDED' && order.status !== 'COMPLETED' && !orderCapture(order)) return paypalPayment(p, id, c.returnUrl, saves)
   const fresh = await reorder(p, ctx, c)
   return fresh ? paypalPayment(p, fresh, c.returnUrl, saves) : null
 }
