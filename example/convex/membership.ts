@@ -72,6 +72,42 @@ export const startOnPage = action({
   },
 })
 
+/**
+ * The one-step form's fallback when a processor's script won't load (OnPagePayment's startRedirect): the same first
+ * payment as a redirect to the processor's page, closing the checkout the last press started (replaces).
+ */
+export const startRedirect = action({
+  args: {
+    email: v.string(),
+    method: v.union(v.literal('card'), v.literal('ach'), v.literal('paypal')),
+    processor: v.union(v.literal('stripe'), v.literal('paypal')),
+    replaces: v.optional(v.string()),
+  },
+  handler: async (ctx, { email, method, processor, replaces }): Promise<StartedRedirect & { scheduleId: string }> => {
+    const me = await ctx.auth.getUserIdentity()
+    if (!me) throw new ConvexError('Sign in to join.')
+    const quoted = payments.quote({ amountCents: MONTHLY_CENTS, method, coverFee: false })
+    if (quoted.processor !== processor) throw new ConvexError('The price changed. Reload the page and try again.')
+    const started = await payments.startScheduleCheckout(ctx, {
+      owner: { type: 'user', id: me.subject },
+      ref: { type: 'membership', id: me.subject },
+      purpose: 'membership',
+      description: 'Monthly membership',
+      payer: { email },
+      amountCents: quoted.totalCents,
+      context: { memberId: me.subject },
+      processor,
+      method,
+      ui: 'redirect',
+      replaces,
+      returnPath: '/membership/thanks',
+      cancelPath: '/membership',
+    })
+    if (!('redirectUrl' in started)) throw new ConvexError('The payment couldn’t be started.')
+    return started
+  },
+})
+
 /** The member stops: no more charges. */
 export const cancel = mutation({
   args: { scheduleId: v.string() },

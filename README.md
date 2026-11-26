@@ -257,7 +257,8 @@ component, built from the pieces below. The app gives the tabs it allows and the
   nothing. The server prices with `payments.quote` for `method` and should refuse a `processor` that differs (the page's
   rates are out of date): the page says what it throws.
 - **Fallback.** When Stripe.js or PayPal's script is slow or fails, the payer is offered "Pay on Stripe's site instead";
-  its press calls the app's `startRedirect({ method, processor, replaces })` (`payments.start`, a redirect) and goes to
+  its press calls the app's `startRedirect({ method, processor, replaces })`, which starts the same payment with
+  `ui: 'redirect'` and `replaces` (`payments.start`, or `startScheduleCheckout` for a schedule's first payment), and goes to
   its `redirectUrl` (`leave`, default a full page load). Nothing is started until that press.
 - **Look.** `appearance` and `paypalStyle` from `usePageTheme`, `paypalButtonStyle` for PayPal's button, and
   `classNames` (`root`, `tabList`, `tab`, `selectedTab`, `hint`, `panel`, `fallback`) added to the library's own.
@@ -284,7 +285,7 @@ const theme = usePageTheme(COLORS)
   saveForLater={monthly}
   payer={{ name, email }}
   start={(a) => startDonation({ ...form, ...a })} // payments.startOnPage(ctx, { ..., replaces: a.replaces })
-  startRedirect={(a) => startDonationRedirect({ ...form, ...a })} // payments.start(ctx, { ..., ui: 'redirect' })
+  startRedirect={(a) => startDonationRedirect({ ...form, ...a })} // the same payment with ui: 'redirect' and replaces (startScheduleCheckout when monthly)
   appearance={theme?.stripe}
   paypalStyle={theme?.paypal}
 />

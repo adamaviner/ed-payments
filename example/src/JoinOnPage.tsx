@@ -17,7 +17,7 @@ const COLORS: PageColors = { background: '--background', text: '--foreground', m
 export function JoinOnPage({ name, email }: { name: string; email: string }) {
   const theme = usePageTheme(COLORS)
   const startOnPage = useAction(api.membership.startOnPage)
-  const startRedirect = useAction(api.membership.start)
+  const startRedirect = useAction(api.membership.startRedirect)
   const label = `Pay ${dollars(MONTHLY_CENTS)} and join`
   const note = 'Charged every month until you cancel.'
   return (
@@ -35,11 +35,7 @@ export function JoinOnPage({ name, email }: { name: string; email: string }) {
       saveForLater
       payer={{ name, email }}
       start={(a) => startOnPage({ name, email, ...a })}
-      startRedirect={async (a) => {
-        const started = await startRedirect({ email, how: a.method === 'ach' ? 'bank' : a.method })
-        if (!('redirectUrl' in started)) throw new Error('The payment couldn’t be started.')
-        return started
-      }}
+      startRedirect={(a) => startRedirect({ email, ...a })}
       appearance={theme?.stripe}
       paypalStyle={theme?.paypal}
       classNames={{ tabList: 'bg-secondary' }}

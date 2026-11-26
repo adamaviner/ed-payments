@@ -163,6 +163,18 @@ test('picker: the card fields are the quoted processor’s, swapped at the price
   expect(start).not.toHaveBeenCalled()
 })
 
+test('picker: an amount being retyped (none for a moment) keeps the card fields shown, so a half-typed card stays', async () => {
+  const start = vi.fn<(a: OnPageStartArgs) => Promise<StartedOnPage>>()
+  const { rerender } = render(<OnPagePayment {...props(start)} amountCents={5_000} tabs={TABS} />)
+  await finish(paypalCardPaySdkUrl('client-1'))
+  await waitFor(() => expect(cardFields).toHaveLength(1))
+  rerender(<OnPagePayment {...props(start)} amountCents={0} tabs={TABS} />)
+  rerender(<OnPagePayment {...props(start)} amountCents={5_500} tabs={TABS} />)
+  await act(async () => {})
+  expect(cardFields).toHaveLength(1)
+  expect(scripts.some((s) => s.src === STRIPE_JS)).toBe(false)
+})
+
 test('picker: the bank tab keeps Stripe’s form, changed in place to a bank account at the bank’s total', async () => {
   const start = vi.fn<(a: OnPageStartArgs) => Promise<StartedOnPage>>()
   render(<OnPagePayment {...props(start)} amountCents={1_000} coverFee tabs={TABS} />)

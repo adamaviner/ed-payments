@@ -136,7 +136,7 @@ function allowedTabs(p: OnPagePaymentProps): OnPagePaymentTab[] {
 function useCardProcessor(p: OnPagePaymentProps): Processor {
   const cardProcessors = (['stripe', 'paypal'] as const).filter((x) => (x === 'stripe' ? p.stripePublishableKey : p.paypalClientId))
   let now: Processor | null = null
-  if (!p.retry && cardProcessors.length) {
+  if (!p.retry && cardProcessors.length && Number.isInteger(p.amountCents) && p.amountCents > 0) {
     try {
       now = quote({ amountCents: p.amountCents, method: 'card', coverFee: !!p.coverFee }, feeRates(p.fees), { cardProcessors }).processor
     } catch {
