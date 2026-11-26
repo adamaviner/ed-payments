@@ -121,7 +121,8 @@ Then register the webhooks: `npx ed-payments webhooks --stripe https://<deployme
 
 The browser side of the payment paths, for an app's React code, over the functions it exported in steps 2 and 4:
 
-- paying on the app's own page: `PaypalButtons` and `StripeEmbeddedCheckout` (an embedded checkout),
+- paying on the app's own page: `StripeOnPagePayment` and `PaypalOnPagePayment` (a new payment whose fields sit in
+  the app's form, started at the press), `PaypalButtons` and `StripeEmbeddedCheckout` (an embedded checkout),
   `PaypalCardPayment` (a schedule's first payment by card at PayPal), `StripeRetryPayment` (a retry after a decline);
 - saving a method to charge later: `PaypalCardFields`, `PaypalSaveButton`, `StripeSaveMethod`, and
   `useStripeSetupReturn` for a save that needed a redirect;
@@ -236,6 +237,58 @@ merely opening forms use up a payer's tries.
   save before checking). Pass `search` from the router in a server-rendered app; without it the address is
   read from `window.location` (none on the server, so hydration matches). On `saved`: Stripe saved the method, but what `onSaved` was to do with it (place
   the bid) didn't happen, so say so and let the payer finish with it; `savedMethods` lists it.
+
+**A new payment in the app's own form: `StripeOnPagePayment` and `PaypalOnPagePayment`.** The payment fields
+sit in the app's form with one button, and nothing is made at Stripe or PayPal until the payer presses it, so
+switching amounts, tabs or frequency uses up none of their tries. At the press the component calls the app's
+`start`: an action that prices the payment on the server and runs `payments.start` (or `startScheduleCheckout`
+for a schedule's first payment, which saves the method) with `ui: 'onPage'`, returning its `onPage`. Stripe's
+Payment Element checks the fields first (`elements.submit()`), then confirms the PaymentIntent on the page
+(`redirect: 'if_required'`: a card's 3-D Secure is answered there); PayPal's card fields call `start` from their
+`createOrder` and capture through `completeReturn`, as `PaypalCardPayment` does. Paid (or a bank payment on its
+way), the payer goes to `onPage.returnUrl` (Stripe's with `?payment_intent=` added, as after a redirect), whose page
+shows the outcome with `checkoutReturnToken` and `useCheckoutReturn`.
+
+A decline, or the app's `start` refusing, is said under the fields, and the next press calls `start` again. The
+component doesn't keep the checkout: the app's `start` remembers the `checkoutId` its last call returned and passes
+it as `replaces`, and the library returns that checkout again while the amount, processor, method and schedule are
+unchanged, or cancels it and starts afresh.
+
+```tsx
+const theme = usePageTheme(COLORS)
+const last = useRef<string | undefined>(undefined)
+const start = async () => {
+  const started = await startDonation({ ...form, replaces: last.current }) // the app's action: payments.start(ctx, { ..., ui: 'onPage', replaces })
+  last.current = started.checkoutId
+  return started.onPage
+}
+;<StripeOnPagePayment
+  publishableKey={STRIPE_PUBLISHABLE_KEY}
+  amountCents={totalCents} // as the server will price it; a new amount is shown in place
+  methods={[method]} // 'card' or 'ach', the method start passes, when the app's own tabs choose it
+  saveForLater={monthly} // a schedule's first payment: setupFutureUsage 'off_session', as the PaymentIntent
+  payer={{ name, email }} // from the app's form, so Stripe doesn't ask again
+  start={start}
+  submitLabel="Give $25"
+  appearance={theme?.stripe}
+/>
+{
+  theme && <PaypalOnPagePayment clientId={PAYPAL_CLIENT_ID} start={start} completeReturn={api.payments.completeReturn} submitLabel="Give $25" style={theme.paypal} />
+}
+```
+
+- **Options.** `onPagePaymentElementsOptions(amountCents, { saveForLater, methods })` (exported): the method types
+  (`methods`, both a card and a bank account by default, as `StripeSaveMethod`) and `setupFutureUsage: 'off_session'`
+  when saving, as the library's PaymentIntent is made. A new `methods`, `saveForLater`, `amountCents` or `appearance`
+  changes the form in place (`elements.update`), keeping what the payer typed; giving or taking away `payer` mounts it again (a new name or email doesn't). The form waits for an amount Stripe takes (whole cents
+  above zero) before it shows, and keeps the last one, with its button off, while the app's amount isn't one.
+- **`payer`** hides Stripe's own name and email fields and puts them on the payment method at the confirm (a bank
+  account needs both). Without it Stripe asks for what a method needs.
+- **PayPal's `clientId`** is a prop, since the fields load before anything is started; it is public and the same
+  for every order. Use `cardProcessorFor(amount)` to pick which component shows a card. A new `style` draws
+  PayPal's fields again, clearing a half-typed card; render them once `theme` is defined.
+- **Fallback.** If Stripe.js or PayPal's SDK doesn't load, the form says so and its button stays off; offer the same
+  payment as a redirect (`ui: 'redirect'`).
 
 **The return page: `useCheckoutReturn(completeReturn, { processor, token })`.** The app reads the
 token from its own URL (Stripe adds `session_id`, or `payment_intent` after a Payment Element's
@@ -689,8 +742,8 @@ the wire code (`stripe.*`, `paypal.*`, signatures, parsers) and `STRIPE_EVENTS` 
 
 ### `@earthdance/payments/react`
 
-`PaypalButtons`, `StripeEmbeddedCheckout`, `PaypalCardPayment`, `PaypalCardFields`, `PaypalSaveButton`,
-`StripeSaveMethod`, `StripeRetryPayment`, `useStripeSetupReturn`, `useCheckoutReturn`, `checkoutReturnToken`,
+`StripeOnPagePayment`, `PaypalOnPagePayment`, `PaypalButtons`, `StripeEmbeddedCheckout`, `PaypalCardPayment`, `PaypalCardFields`,
+`PaypalSaveButton`, `StripeSaveMethod`, `StripeRetryPayment`, `useStripeSetupReturn`, `useCheckoutReturn`, `checkoutReturnToken`,
 `usePageTheme`, `PaymentsAdminPage` and helpers; see
 "The React package" above.
 
@@ -772,6 +825,9 @@ the webhooks registered on the live deployment:
 ## Upgrade notes
 
 ### v0.10.0 (unreleased)
+
+- **`StripeOnPagePayment` and `PaypalOnPagePayment`** pay a new payment from the app's own form, started at the
+  press (`ui: 'onPage'`); see "A new payment in the app's own form". The embedded checkout stays for apps that want it.
 
 - **`usePageTheme(colors)`** reads the app's colour tokens from the page and give
   `{ dark, stripe, paypal }`: pass `stripe` as a Stripe form's `appearance` and `paypal` as the card fields'
