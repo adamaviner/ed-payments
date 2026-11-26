@@ -23,6 +23,7 @@ export {
   type StripeSaveMethodProps,
   type StripeSetupReturn,
 } from './stripe.js'
+export { usePageTheme, type PageColors, type PageTheme } from './theme.js'
 export { parseRefundAmount, refundableCents, type RefundAmount } from './refundAmount.js'
 export { errorMessage } from './errors.js'
 export type { CheckoutSummary, CompleteReturnRef, OpenRefund, PaymentIssue, PaymentRef, PaymentsAdminApi, PaymentsAuth, PaymentsPublicApi, PaypalHistoryLine, PaypalHistoryRef } from './types.js'
