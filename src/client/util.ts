@@ -13,6 +13,17 @@ export const cleanPayer = (p: Payer): Payer => ({ email: p.email.trim(), ...(p.n
 /** `url` with one more query parameter. Not encoded: Stripe's {CHECKOUT_SESSION_ID} must reach Stripe as it is, and PayPal's ids are letters and digits. */
 export const withParam = (url: string, name: string, value: string) => `${url}${url.includes('?') ? '&' : '?'}${name}=${value}`
 
+/** Whether two stored values (a checkout's context, say) are the same, field by field; a field set to undefined counts as missing, as Convex stores it. */
+export function sameValue(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null || Array.isArray(a) !== Array.isArray(b)) return false
+  const x = a as Record<string, unknown>
+  const y = b as Record<string, unknown>
+  const keys = (o: Record<string, unknown>) => Object.keys(o).filter((k) => o[k] !== undefined)
+  const xk = keys(x)
+  return xk.length === keys(y).length && xk.every((k) => Object.hasOwn(y, k) && sameValue(x[k], y[k]))
+}
+
 /** A thrown error as a sentence. */
 export const errorText = (err: unknown) => (err instanceof ConvexError ? String(err.data) : err instanceof Error ? err.message : String(err))
 

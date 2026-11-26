@@ -567,7 +567,20 @@ describe('embedded checkouts (shown on the app’s own page)', () => {
 describe('on-page payments (made at the payer’s press on the app’s own form)', () => {
   const onPage = (
     t: ReturnType<typeof setup>['t'],
-    a: { processor: 'stripe' | 'paypal'; method: 'card' | 'ach' | 'paypal'; amountCents?: number; replaces?: string; refId?: string; email?: string; expiresAt?: number },
+    a: {
+      processor: 'stripe' | 'paypal'
+      method: 'card' | 'ach' | 'paypal'
+      amountCents?: number
+      replaces?: string
+      refId?: string
+      email?: string
+      expiresAt?: number
+      name?: string
+      description?: string
+      context?: { buyer?: string }
+      returnPath?: string
+      limitKey?: string
+    },
   ) => t.action(api.shop.buyOnPage, a)
   const intentsMade = () => stripe.calls.filter((x) => x.method === 'POST' && x.path === '/v1/payment_intents')
 
@@ -662,7 +675,7 @@ describe('on-page payments (made at the payer’s press on the app’s own form)
     expect(await calls('onPaid')).toHaveLength(0)
   })
 
-  test('replaces: a paid or processing payment is never replaced; one for another thing is closed, not reused', async () => {
+  test('replaces: a paid or processing payment is never replaced; one for another thing is left alone, not reused', async () => {
     const { t, status } = setup()
     const paid = await onPage(t, { processor: 'stripe', method: 'card', email: 'a@example.org' })
     await stripe.confirm((await status(paid.checkoutId)).processorCheckoutId!)
@@ -677,7 +690,9 @@ describe('on-page payments (made at the payer’s press on the app’s own form)
     const other = await onPage(t, { processor: 'stripe', method: 'card', refId: 'o3', email: 'c@example.org' })
     const next = await onPage(t, { processor: 'stripe', method: 'card', refId: 'o4', email: 'c@example.org', replaces: other.checkoutId })
     expect(next.reused).toBe(false)
-    expect((await status(other.checkoutId)).status).toBe('abandoned')
+    expect((await status(other.checkoutId)).status).toBe('pending')
+    const otherPi = (await status(other.checkoutId)).processorCheckoutId
+    expect(stripe.calls.some((x) => x.path === `/v1/payment_intents/${otherPi}/cancel`)).toBe(false)
     expect(await onPage(t, { processor: 'stripe', method: 'card', refId: 'o5', email: 'd@example.org', replaces: 'not-a-checkout' })).toMatchObject({ reused: false })
   })
 
@@ -729,7 +744,7 @@ describe('on-page payments (made at the payer’s press on the app’s own form)
     pp.refuse((call) =>
       call.path.endsWith('/capture') ? Response.json({ name: 'UNPROCESSABLE_ENTITY', details: [{ issue: 'MAX_NUMBER_OF_PAYMENT_ATTEMPTS_EXCEEDED' }] }, { status: 422 }) : undefined,
     )
-    expect(await t.action(api.shop.back, { processor: 'paypal', token: oldOrder })).toEqual({ checkoutId: first.checkoutId, status: 'pending', declined: true })
+    expect(await t.action(api.shop.back, { processor: 'paypal', token: oldOrder })).toEqual({ checkoutId: first.checkoutId, status: 'pending', reordered: true })
     pp.refuse()
     const again = await onPage(t, { processor: 'paypal', method: 'card', email: 'eve@example.org', replaces: first.checkoutId })
     if (again.onPage.processor !== 'paypal') throw new Error('expected PayPal')
@@ -747,6 +762,69 @@ describe('on-page payments (made at the payer’s press on the app’s own form)
     // No start was counted for the new order: the payer still has two more.
     await onPage(t, { processor: 'paypal', method: 'card', email: 'eve@example.org' })
     await onPage(t, { processor: 'paypal', method: 'card', email: 'eve@example.org' })
+  })
+
+  test('replaces: a changed payer, description, context or return page is not reused; the last press’s payment is closed and a fresh one started', async () => {
+    const { t, status, later } = setup()
+    const base = { processor: 'stripe', method: 'card', email: 'eve@example.org', limitKey: 'eve' } as const
+    let last = await onPage(t, base)
+    const changes = [{ email: 'eve2@example.org' }, { name: 'Eve' }, { description: 'A cup' }, { context: { buyer: 'b2' } }, { returnPath: '/checkout/o1/back' }]
+    for (const change of changes) {
+      later(MIN + 1000)
+      const next = await onPage(t, { ...base, ...change, replaces: last.checkoutId })
+      expect(next.reused).toBe(false)
+      expect((await status(last.checkoutId)).status).toBe('abandoned')
+      last = next
+    }
+  })
+
+  test('replaces is rate-limited before Stripe is asked', async () => {
+    const { t } = setup()
+    const first = await onPage(t, { processor: 'stripe', method: 'card', email: 'eve@example.org' })
+    const reads = () => stripe.calls.filter((x) => x.method === 'GET' && x.path.startsWith('/v1/payment_intents/')).length
+    for (let i = 0; i < 6; i++) await onPage(t, { processor: 'stripe', method: 'card', email: 'eve@example.org', replaces: first.checkoutId })
+    const before = reads()
+    await expect(onPage(t, { processor: 'stripe', method: 'card', email: 'eve@example.org', replaces: first.checkoutId })).rejects.toThrow('Too many tries')
+    expect(reads()).toBe(before)
+  })
+
+  test('PayPal: a spent order captured in the background (webhook) is re-ordered and its claim released; the next press gets the new order', async () => {
+    const { t, post, status } = setup()
+    const first = await onPage(t, { processor: 'paypal', method: 'card' })
+    if (first.onPage.processor !== 'paypal') throw new Error('expected PayPal')
+    const oldOrder = first.onPage.orderId
+    const approval = pp.approve(oldOrder)
+    pp.refuse((call: { path: string }) =>
+      call.path.endsWith('/capture') ? Response.json({ name: 'UNPROCESSABLE_ENTITY', details: [{ issue: 'MAX_NUMBER_OF_PAYMENT_ATTEMPTS_EXCEEDED' }] }, { status: 422 }) : undefined,
+    )
+    expect(await post('/paypal/webhook', approval)).toEqual({ status: 200, text: 'handled' })
+    pp.refuse()
+    const newOrder = (await status(first.checkoutId)).processorCheckoutId!
+    expect(newOrder).not.toBe(oldOrder)
+    expect(await onPage(t, { processor: 'paypal', method: 'card', replaces: first.checkoutId })).toMatchObject({ checkoutId: first.checkoutId, reused: true, onPage: { orderId: newOrder } })
+    expect(await t.action(api.payments.cancelCheckout, { checkoutId: first.checkoutId })).toEqual({ status: 'abandoned' })
+  })
+
+  test('PayPal: a stale capture claim (a capture that never finished) doesn’t stop a re-order once PayPal has dropped the order', async () => {
+    const { t, status, later } = setup()
+    const first = await onPage(t, { processor: 'paypal', method: 'card' })
+    if (first.onPage.processor !== 'paypal') throw new Error('expected PayPal')
+    const oldOrder = first.onPage.orderId
+    pp.approve(oldOrder)
+    pp.refuse((call) => (call.path.endsWith('/capture') ? Response.json({ name: 'INTERNAL_SERVER_ERROR' }, { status: 500 }) : undefined))
+    await expect(t.action(api.shop.back, { processor: 'paypal', token: oldOrder })).rejects.toThrow()
+    later(6 * MIN)
+    pp.refuse((call) =>
+      call.method === 'GET' && call.path === `/v2/checkout/orders/${oldOrder}`
+        ? Response.json({ name: 'RESOURCE_NOT_FOUND', details: [{ issue: 'INVALID_RESOURCE_ID' }] }, { status: 404 })
+        : undefined,
+    )
+    const again = await onPage(t, { processor: 'paypal', method: 'card', replaces: first.checkoutId })
+    pp.refuse()
+    expect(again).toMatchObject({ checkoutId: first.checkoutId, reused: true })
+    if (again.onPage.processor !== 'paypal') throw new Error('expected PayPal')
+    expect(again.onPage.orderId).not.toBe(oldOrder)
+    expect((await status(first.checkoutId)).processorCheckoutId).toBe(again.onPage.orderId)
   })
 
   test('PayPal: a changed amount closes the last order’s checkout and makes a new one', async () => {

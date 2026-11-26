@@ -66,7 +66,7 @@ async function sweepOne(p: Payments, ctx: RunActionCtx, c: Checkout, expired: bo
     const id = c.processorCheckoutId
     const order = await p.withPaypal(ctx, (call) => getOrderOrNull(call, id))
     if (order?.status === 'APPROVED') {
-      let outcome: 'declined' | 'failed' | undefined
+      let outcome: 'declined' | 'reordered' | 'failed' | undefined
       try {
         outcome = await p.capturePaypal(ctx, c.id, id, 'background')
       } catch (err) {

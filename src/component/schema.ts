@@ -28,7 +28,7 @@ export const callbacks = v.object({
   onProcessing: v.optional(v.string()),
 })
 
-/** hosted: Stripe Checkout or PayPal. offSession: a saved method charged with nobody present. onSession: the buyer pays on the app's page. Unset on rows from v0.1: hosted. */
+/** hosted: Stripe Checkout or PayPal. offSession: a saved method charged with nobody present. onSession: the buyer pays on the app's page. onPage: a new payment made at the buyer's press on the app's own form. Unset on rows from v0.1: hosted. */
 export const checkoutKind = v.union(v.literal('hosted'), v.literal('offSession'), v.literal('onSession'), v.literal('onPage'))
 
 export const savedMethodKind = v.union(v.literal('card'), v.literal('ach'))

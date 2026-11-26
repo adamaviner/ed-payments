@@ -772,7 +772,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
       reorder: FunctionReference<
         "mutation",
         "internal",
-        { id: string; processorCheckoutId: string },
+        { id: string; now: number; processorCheckoutId: string },
         | { outcome: "reordered" }
         | {
             outcome: "already_handled";

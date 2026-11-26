@@ -234,17 +234,28 @@ export const defined = app.defineModules({
     }),
     /** The same, made at the payer's press on the host's own form (Payment Element or Card Fields); replaces is the last press's checkout. */
     buyOnPage: app.action({
-      args: { ...startArgs, replaces: v.optional(v.string()), refId: v.optional(v.string()) },
+      args: {
+        ...startArgs,
+        replaces: v.optional(v.string()),
+        refType: v.optional(v.string()),
+        refId: v.optional(v.string()),
+        purpose: v.optional(v.string()),
+        name: v.optional(v.string()),
+        description: v.optional(v.string()),
+        returnPath: v.optional(v.string()),
+        limitKey: v.optional(v.string()),
+      },
       handler: async (ctx, a): Promise<StartedOnPage> =>
         await payments.start(ctx, {
-          ref: { type: 'offering', id: a.refId ?? 'o1' },
-          purpose: 'order',
-          description: 'A bowl',
+          ref: { type: a.refType ?? 'offering', id: a.refId ?? 'o1' },
+          purpose: a.purpose ?? 'order',
+          description: a.description ?? 'A bowl',
           amountCents: a.amountCents ?? 2500,
           processor: a.processor,
           method: a.method,
-          payer: { name: 'Ana', email: a.email ?? 'ana@example.org' },
-          returnPath: '/checkout/o1/return',
+          payer: { name: a.name ?? 'Ana', email: a.email ?? 'ana@example.org' },
+          limitKey: a.limitKey,
+          returnPath: a.returnPath ?? '/checkout/o1/return',
           cancelPath: '/checkout/o1',
           expiresAt: a.expiresAt,
           context: a.context ?? {},
@@ -254,9 +265,9 @@ export const defined = app.defineModules({
     }),
     back: app.action({
       args: { processor: v.union(v.literal('stripe'), v.literal('paypal')), token: v.string() },
-      handler: async (ctx, a): Promise<{ checkoutId: string; status: string; declined?: true } | null> => {
+      handler: async (ctx, a): Promise<{ checkoutId: string; status: string; declined?: true; reordered?: true } | null> => {
         const res = await payments.completeReturn(ctx, a)
-        return res && { checkoutId: res.checkoutId, status: res.status, ...(res.declined ? { declined: res.declined } : {}) }
+        return res && { checkoutId: res.checkoutId, status: res.status, ...(res.declined ? { declined: res.declined } : {}), ...(res.reordered ? { reordered: res.reordered } : {}) }
       },
     }),
     status: app.query({ args: { id: v.string() }, handler: async (ctx, { id }) => await payments.status(ctx, id) }),
@@ -355,6 +366,8 @@ export const defined = app.defineModules({
         amountCents: v.optional(v.number()),
         ui: v.optional(v.union(v.literal('redirect'), v.literal('embedded'), v.literal('onPage'))),
         replaces: v.optional(v.string()),
+        anchorDay: v.optional(v.number()),
+        note: v.optional(v.string()),
       },
       handler: async (ctx, a) =>
         await payments.startScheduleCheckout(ctx, {
@@ -364,7 +377,8 @@ export const defined = app.defineModules({
           description: 'Monthly gift',
           payer: { email: `${a.donor}@example.org` },
           amountCents: a.amountCents ?? 2500,
-          context: { monthlyId: `m-${a.donor}` },
+          anchorDay: a.anchorDay,
+          context: { monthlyId: `m-${a.donor}`, ...(a.note ? { buyer: a.note } : {}) },
           processor: a.processor,
           method: a.method,
           returnPath: '/donate/thanks',

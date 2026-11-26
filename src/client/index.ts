@@ -480,7 +480,7 @@ export class Payments<C extends GenericValidator = GenericValidator> {
   }
 
   /** @internal See hosted.ts. */
-  async capturePaypal(ctx: RunActionCtx, checkoutId: string, orderId: string, by: 'buyer' | 'background'): Promise<'declined' | undefined> {
+  async capturePaypal(ctx: RunActionCtx, checkoutId: string, orderId: string, by: 'buyer' | 'background'): Promise<'declined' | 'reordered' | undefined> {
     return await hosted.capturePaypal(this, ctx, checkoutId, orderId, by)
   }
 
@@ -490,12 +490,14 @@ export class Payments<C extends GenericValidator = GenericValidator> {
    * processor and settles (capturing an approved PayPal order), so the page doesn't wait for a
    * webhook. Null: not ours. publicApi().completeReturn wraps this with a rate limit. PayPal's
    * buttons call it when the buyer approves; `declined` then means PayPal refused what the buyer
-   * chose and the buttons should let them choose again (the checkout is still pending).
+   * chose and the buttons should let them choose again (the checkout is still pending). `reordered`
+   * (on-page only): PayPal won't take that order again, so the checkout has a new one; start again with
+   * replaces to get it.
    */
   async completeReturn(
     ctx: RunActionCtx,
     { processor, token }: { processor: Processor; token: string },
-  ): Promise<{ checkoutId: string; ref: Ref; purpose: string; status: CheckoutStatus; declined?: true } | null> {
+  ): Promise<{ checkoutId: string; ref: Ref; purpose: string; status: CheckoutStatus; declined?: true; reordered?: true } | null> {
     return await hosted.completeReturn(this, ctx, { processor, token })
   }
 

@@ -405,10 +405,32 @@ describe('a schedule started with a payment that saves the method', () => {
     expect(await schedule(changed.scheduleId)).toMatchObject({ status: 'active', amountCents: 5000 })
   })
 
+  test('on-page: a changed anchor day or context is not reused; the starting schedule ends and a fresh one starts', async () => {
+    const { t, schedule, status } = setup()
+    const first = await t.action(api.monthly.startCheckout, { donor: 'd1', processor: 'stripe', method: 'card', ui: 'onPage', anchorDay: 5 })
+    const moved = await t.action(api.monthly.startCheckout, { donor: 'd1', processor: 'stripe', method: 'card', ui: 'onPage', anchorDay: 6, replaces: first.checkoutId })
+    expect(moved).toMatchObject({ reused: false })
+    expect((await status(first.checkoutId)).status).toBe('abandoned')
+    expect(await schedule(first.scheduleId)).toMatchObject({ status: 'cancelled' })
+    const noted = await t.action(api.monthly.startCheckout, { donor: 'd1', processor: 'stripe', method: 'card', ui: 'onPage', anchorDay: 6, note: 'n', replaces: moved.checkoutId })
+    expect(noted).toMatchObject({ reused: false })
+    expect((await status(moved.checkoutId)).status).toBe('abandoned')
+  })
+
   test('on-page: a schedule’s payment is not reused for a one-off, nor a one-off’s for a schedule', async () => {
     const { t, status } = setup()
     const monthly = await t.action(api.monthly.startCheckout, { donor: 'd1', processor: 'stripe', method: 'card', ui: 'onPage' })
-    const oneOff = await t.action(api.shop.buyOnPage, { processor: 'stripe', method: 'card', replaces: monthly.checkoutId })
+    const oneOff = await t.action(api.shop.buyOnPage, {
+      processor: 'stripe',
+      method: 'card',
+      refType: 'monthly',
+      refId: 'm-d1',
+      purpose: 'donation',
+      description: 'Monthly gift',
+      email: 'd1@example.org',
+      context: { monthlyId: 'm-d1' },
+      replaces: monthly.checkoutId,
+    })
     expect(oneOff.reused).toBe(false)
     expect((await status(monthly.checkoutId)).status).toBe('abandoned')
     const monthlyAgain = await t.action(api.monthly.startCheckout, { donor: 'd1', processor: 'stripe', method: 'card', ui: 'onPage', replaces: oneOff.checkoutId })
