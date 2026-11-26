@@ -217,11 +217,12 @@ export interface StartArgs<T> {
    */
   ui?: StartUi
   /**
-   * With ui: 'onPage', the checkout id the payer's last press started. While that checkout is unpaid with the same
-   * amount, processor, method and schedule (or none) it is returned again and nothing new is counted; otherwise it is
-   * cancelled and a new one started. A paid or processing checkout is never replaced. Reused only for the same ref and
-   * purpose, an on-page checkout with ten minutes or more left; with another ui the old checkout is only closed. A paid
-   * or processing one for the same ref and purpose is refused ("This is already paid.").
+   * With ui: 'onPage', the checkout id the payer's last press started. While that checkout is an unpaid on-page one for
+   * the same ref and purpose, amount, processor, method, payer, description, context, return page and schedule (or none),
+   * with ten minutes or more left, it is returned again and no start is counted. Otherwise one for the same ref and
+   * purpose is cancelled (its start given back) and a new one started; one for another thing is left alone. A paid or
+   * processing one for the same ref and purpose is refused ("This is already paid."). Each press with it counts against
+   * a separate 'replace' limit.
    */
   replaces?: string
 }

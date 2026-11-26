@@ -318,7 +318,8 @@ export async function capturePaypal(p: Payments, ctx: RunActionCtx, checkoutId: 
   if (by === 'background' && c.paypalDeclinedAt !== null) return 'declined'
   // Taken before PayPal is asked, so the buyer's cancel can't close it while the money is being
   // taken; another capture under way (or a closed checkout) means there is nothing to do here.
-  if (!(await ctx.runMutation(p.component.checkouts.claimCapture, { id: checkoutId, now: Date.now() })).claimed) return undefined
+  // The claim also checks the order is still the checkout's, as a re-order may have replaced it since the read above.
+  if (!(await ctx.runMutation(p.component.checkouts.claimCapture, { id: checkoutId, orderId, now: Date.now() })).claimed) return undefined
   const requestId = by === 'buyer' ? `capture-${checkoutId}-${Date.now().toString(36)}` : `capture-${checkoutId}`
   const order = await p.withPaypal(ctx, async (call) => {
     try {
@@ -327,8 +328,13 @@ export async function capturePaypal(p: Payments, ctx: RunActionCtx, checkoutId: 
       if (err instanceof ProcessorError && err.code === 'ORDER_ALREADY_CAPTURED') return await paypal.getOrder(call, orderId)
       if (err instanceof ProcessorError && err.code === 'ORDER_NOT_APPROVED') return null
       if (err instanceof ProcessorError && err.code === 'INSTRUMENT_DECLINED') return 'declined' as const
-      if (err instanceof ProcessorError && err.code && ORDER_SPENT.has(err.code)) return c.kind === 'onPage' ? ('spent' as const) : ('declined' as const)
-      throw err
+      // Completed or voided: completed means paid after all; voided can't be paid again.
+      if (err instanceof ProcessorError && err.code === 'ORDER_COMPLETED_OR_VOIDED') {
+        const now = await paypal.getOrder(call, orderId)
+        if (now.status === 'COMPLETED') return now
+      } else if (!(err instanceof ProcessorError && err.code && ORDER_SPENT.has(err.code))) throw err
+      // A new order only for an on-page checkout still in time; an expired one is left for the sweep to close.
+      return c.kind === 'onPage' && c.expiresAt > Date.now() ? ('spent' as const) : ('declined' as const)
     }
   })
   if (order === 'spent') {
@@ -387,7 +393,7 @@ export async function completeReturn(
     ref: found.ref,
     purpose: found.purpose,
     status: now?.status ?? found.status,
-    ...(outcome === 'declined' ? { declined: true as const } : outcome === 'reordered' ? { reordered: true as const } : {}),
+    ...(outcome === 'declined' ? { declined: true as const } : outcome === 'reordered' ? { declined: true as const, reordered: true as const } : {}),
   }
 }
 
@@ -511,9 +517,13 @@ export async function reuseOrClose(
   },
 ): Promise<{ checkoutId: string; onPage: OnPagePayment; scheduleId: string | null } | null> {
   if (replaces.length > 255) return null
-  await p.takeLimits(ctx, 'replace', want.payer.email, 2, want.limitKey)
+  const c = await ctx.runQuery(p.component.checkouts.get, { id: replaces })
+  if (!c || c.app !== p.app || (c.kind !== 'hosted' && c.kind !== 'onPage')) return null
+  if (c.ref.type !== want.ref.type || c.ref.id !== want.ref.id || c.purpose !== want.purpose) return null
+  // Keyed by the checkout replaced (unless the app gives a key or the payer is signed in), so presses naming another payer's email can't use up theirs.
+  await p.takeLimits(ctx, 'replace', `checkout:${c.id}`, 2, want.limitKey)
   try {
-    return await reuseOrCloseChecked(p, ctx, replaces, want)
+    return await reuseOrCloseChecked(p, ctx, c, want)
   } catch (err) {
     if (err instanceof ConvexError) throw err
     console.error(`payments: replacing checkout ${replaces} failed: ${errorText(err)}`)
@@ -521,10 +531,7 @@ export async function reuseOrClose(
   }
 }
 
-async function reuseOrCloseChecked(p: Payments, ctx: RunActionCtx, replaces: string, want: Parameters<typeof reuseOrClose>[3]) {
-  const c = await ctx.runQuery(p.component.checkouts.get, { id: replaces })
-  if (!c || c.app !== p.app || (c.kind !== 'hosted' && c.kind !== 'onPage')) return null
-  if (c.ref.type !== want.ref.type || c.ref.id !== want.ref.id || c.purpose !== want.purpose) return null
+async function reuseOrCloseChecked(p: Payments, ctx: RunActionCtx, c: Checkout, want: Parameters<typeof reuseOrClose>[3]) {
   const refuse = (status: CheckoutStatus) => {
     const sentence = paidSentence(status)
     if (sentence) throw new ConvexError(sentence)
@@ -537,7 +544,7 @@ async function reuseOrCloseChecked(p: Payments, ctx: RunActionCtx, replaces: str
       schedule.owner.type === want.schedule.owner.type &&
       schedule.owner.id === want.schedule.owner.id &&
       schedule.anchorDay === (want.schedule.anchorDay ?? anchorDayOf(Date.now())) &&
-      sameValue(schedule.context, want.context)
+      sameValue(schedule.context, want.context ?? null)
     : !c.scheduleId
   const payer = cleanPayer(want.payer)
   const same =
@@ -551,7 +558,7 @@ async function reuseOrCloseChecked(p: Payments, ctx: RunActionCtx, replaces: str
     c.payer.email === payer.email &&
     c.payer.name === payer.name &&
     c.returnUrl === p.url(want.returnPath) &&
-    sameValue(c.context, want.context) &&
+    sameValue(c.context, want.context ?? null) &&
     c.expiresAt > Date.now() + REUSE_MARGIN_MS
   if (same) {
     const onPage = await reopen(p, ctx, c)

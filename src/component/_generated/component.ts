@@ -288,7 +288,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
       claimCapture: FunctionReference<
         "mutation",
         "internal",
-        { id: string; now: number },
+        { id: string; now: number; orderId?: string },
         | { claimed: true }
         | {
             claimed: false;

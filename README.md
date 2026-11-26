@@ -624,8 +624,8 @@ schedule's first payment it is the payer's Customer's with `setup_future_usage: 
 the schedule before the payment settles), or PayPal `{ processor, orderId, clientId, returnUrl, only? }` (the same order as
 `ui: 'embedded'`). The checkout's `kind` is `onPage` in the callbacks; its PaymentIntent's webhooks, `completeReturn`
 (Stripe's `payment_intent`), the sweep and `cancel` settle or close it. Pass the `checkoutId` the payer's last press got
-as `replaces` (each press with it counts against a separate `replace` limit, twice the start limit, before Stripe or
-PayPal is asked): while that checkout is still open with ten minutes or more left, for the same `ref` and `purpose`, amount,
+as `replaces` (each press with it counts against a separate `replace` limit, twice the start limit and keyed by the
+checkout it names unless the app gives a `limitKey` or the payer is signed in, before Stripe or PayPal is asked): while that checkout is still open with ten minutes or more left, for the same `ref` and `purpose`, amount,
 processor, method, payer, description, context and return page, and the same schedule (a starting schedule of the same owner,
 anchor day and context) or none, the same client secret or order comes back with `reused: true` and no start is counted.
 Otherwise one for the same `ref` and `purpose` is cancelled (its start given back; a starting schedule ends as
@@ -633,7 +633,8 @@ Otherwise one for the same `ref` and `purpose` is cancelled (its start given bac
 already paid." / "A payment for this is already on its way."). After a PayPal card decline the same order comes back; when
 PayPal won't take it again (`MAX_NUMBER_OF_PAYMENT_ATTEMPTS_EXCEEDED`, `ORDER_EXPIRED`, or the order is gone) the library makes
 a new order under the same checkout, counting no new start, and never captures the old one; `completeReturn` then answers
-`reordered: true` (not `declined`), and the next `start` with `replaces` returns the new order.
+`declined: true` with `reordered: true`, and the next `start` with `replaces` returns the new order (`ORDER_COMPLETED_OR_VOIDED`
+counts too, once PayPal shows the order unpaid).
 
 `adminApi` functions take an optional `auth` argument, passed to `authorize.admin` as it came (for apps
 with their own session tokens); apps on Convex auth leave it out, as the caller's identity carries

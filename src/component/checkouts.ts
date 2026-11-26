@@ -396,12 +396,13 @@ export const cancel = mutation({
  * while the money is being taken. Refused when it isn't waiting, or another capture's claim is live.
  */
 export const claimCapture = mutation({
-  args: { id: v.string(), now: v.number() },
+  args: { id: v.string(), orderId: v.optional(v.string()), now: v.number() },
   returns: v.union(v.object({ claimed: v.literal(true) }), v.object({ claimed: v.literal(false), status: checkoutStatus })),
-  handler: async (ctx, { id, now }) => {
+  handler: async (ctx, { id, orderId, now }) => {
     const c = await loadCheckout(ctx, id)
     const live = c.captureClaimedAt !== undefined && now - c.captureClaimedAt < CAPTURE_CLAIM_MS
-    if ((c.status !== 'created' && c.status !== 'pending') || live) return { claimed: false as const, status: c.status }
+    const replaced = orderId !== undefined && c.processorCheckoutId !== undefined && c.processorCheckoutId !== orderId
+    if ((c.status !== 'created' && c.status !== 'pending') || live || replaced) return { claimed: false as const, status: c.status }
     await ctx.db.patch(c._id, { captureClaimedAt: now })
     return { claimed: true as const }
   },

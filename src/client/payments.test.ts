@@ -744,7 +744,7 @@ describe('on-page payments (made at the payer’s press on the app’s own form)
     pp.refuse((call) =>
       call.path.endsWith('/capture') ? Response.json({ name: 'UNPROCESSABLE_ENTITY', details: [{ issue: 'MAX_NUMBER_OF_PAYMENT_ATTEMPTS_EXCEEDED' }] }, { status: 422 }) : undefined,
     )
-    expect(await t.action(api.shop.back, { processor: 'paypal', token: oldOrder })).toEqual({ checkoutId: first.checkoutId, status: 'pending', reordered: true })
+    expect(await t.action(api.shop.back, { processor: 'paypal', token: oldOrder })).toEqual({ checkoutId: first.checkoutId, status: 'pending', declined: true, reordered: true })
     pp.refuse()
     const again = await onPage(t, { processor: 'paypal', method: 'card', email: 'eve@example.org', replaces: first.checkoutId })
     if (again.onPage.processor !== 'paypal') throw new Error('expected PayPal')
@@ -802,6 +802,19 @@ describe('on-page payments (made at the payer’s press on the app’s own form)
     const newOrder = (await status(first.checkoutId)).processorCheckoutId!
     expect(newOrder).not.toBe(oldOrder)
     expect(await onPage(t, { processor: 'paypal', method: 'card', replaces: first.checkoutId })).toMatchObject({ checkoutId: first.checkoutId, reused: true, onPage: { orderId: newOrder } })
+    expect(await t.action(api.payments.cancelCheckout, { checkoutId: first.checkoutId })).toEqual({ status: 'abandoned' })
+  })
+
+  test('PayPal: a capture PayPal refuses as completed or voided, with the order not paid, is re-ordered and the claim released', async () => {
+    const { t, status } = setup()
+    const first = await onPage(t, { processor: 'paypal', method: 'card' })
+    if (first.onPage.processor !== 'paypal') throw new Error('expected PayPal')
+    const oldOrder = first.onPage.orderId
+    pp.approve(oldOrder)
+    pp.refuse((call) => (call.path.endsWith('/capture') ? Response.json({ name: 'UNPROCESSABLE_ENTITY', details: [{ issue: 'ORDER_COMPLETED_OR_VOIDED' }] }, { status: 422 }) : undefined))
+    expect(await t.action(api.shop.back, { processor: 'paypal', token: oldOrder })).toEqual({ checkoutId: first.checkoutId, status: 'pending', declined: true, reordered: true })
+    pp.refuse()
+    expect((await status(first.checkoutId)).processorCheckoutId).not.toBe(oldOrder)
     expect(await t.action(api.payments.cancelCheckout, { checkoutId: first.checkoutId })).toEqual({ status: 'abandoned' })
   })
 
