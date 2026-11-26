@@ -166,17 +166,17 @@ export const chargeWinner = internalMutation({
  */
 export const retryBidPayment = action({
   args: { bidId: v.id('bids') },
-  handler: async (ctx, { bidId }): Promise<string> => {
+  handler: async (ctx, { bidId }): Promise<{ checkoutId: string; clientSecret: string }> => {
     const me = await signedIn(ctx)
     const checkoutId = await ctx.runQuery(internal.shop.retryableCheckout, { bidId, userId: me.subject })
-    return (await payments.retryOnSession(ctx, { checkoutId })).clientSecret
+    return await payments.retryOnSession(ctx, { checkoutId })
   },
 })
 
 /** The retry page's PayPal button: the same payment with PayPal's buttons (PaypalButtons). */
 export const retryBidWithPaypal = action({
   args: { bidId: v.id('bids') },
-  handler: async (ctx, { bidId }): Promise<StartedEmbedded> => {
+  handler: async (ctx, { bidId }): Promise<Awaited<ReturnType<typeof payments.retryWithPaypal>>> => {
     const me = await signedIn(ctx)
     const checkoutId = await ctx.runQuery(internal.shop.retryableCheckout, { bidId, userId: me.subject })
     return await payments.retryWithPaypal(ctx, { checkoutId, returnPath: `/bids/${bidId}/paid` })

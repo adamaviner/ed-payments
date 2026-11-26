@@ -35,23 +35,30 @@ export const start = action({
 })
 
 /**
- * Starts a membership when the payer presses the button on the one-step form (src/JoinOnPage.tsx), paid with Stripe's
- * Payment Element or PayPal's card fields right there. `replaces` is the checkout the last press started: after a
- * decline, the library returns it again while nothing that matters changed.
+ * Starts a membership when the payer presses the button on the one-step form (src/JoinOnPage.tsx, OnPagePayment). The
+ * page shows the card fields of the processor the quote gives, so the server prices with the same quote and refuses
+ * any other. `replaces` is the checkout the last press started, which OnPagePayment keeps.
  */
 export const startOnPage = action({
-  args: { name: v.string(), email: v.string(), how: v.union(v.literal('card'), v.literal('bank')), replaces: v.optional(v.string()) },
-  handler: async (ctx, { name, email, how, replaces }): Promise<StartedOnPage & { scheduleId: string }> => {
+  args: {
+    name: v.string(),
+    email: v.string(),
+    method: v.union(v.literal('card'), v.literal('ach'), v.literal('paypal')),
+    processor: v.union(v.literal('stripe'), v.literal('paypal')),
+    replaces: v.optional(v.string()),
+  },
+  handler: async (ctx, { name, email, method, processor, replaces }): Promise<StartedOnPage & { scheduleId: string }> => {
     const me = await ctx.auth.getUserIdentity()
     if (!me) throw new ConvexError('Sign in to join.')
-    const [processor, method] = how === 'bank' ? (['stripe', 'ach'] as const) : ([payments.cardProcessorFor(MONTHLY_CENTS).processor, 'card'] as const)
+    const quoted = payments.quote({ amountCents: MONTHLY_CENTS, method, coverFee: false })
+    if (quoted.processor !== processor) throw new ConvexError('The price changed. Reload the page and try again.')
     const started = await payments.startScheduleCheckout(ctx, {
       owner: { type: 'user', id: me.subject },
       ref: { type: 'membership', id: me.subject },
       purpose: 'membership',
       description: 'Monthly membership',
       payer: { email, name },
-      amountCents: MONTHLY_CENTS,
+      amountCents: quoted.totalCents,
       context: { memberId: me.subject },
       processor,
       method,
