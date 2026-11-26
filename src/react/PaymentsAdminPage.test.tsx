@@ -19,6 +19,7 @@ const checkout: CheckoutSummary = {
   amountCents: 10000,
   paidCents: 10000,
   refundedCents: 1000,
+  context: { itemId: 'i1' },
   createdAt: Date.UTC(2026, 10, 14, 15),
 }
 

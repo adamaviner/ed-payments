@@ -8,10 +8,11 @@ import { createFunctionHandle } from 'convex/server'
 import { ConvexError } from 'convex/values'
 import { DEFAULT_CHARGE_HOUR_UTC, DEFAULT_RETRY_DAYS, anchorDayOf, isAnchorDay } from '../core/schedule.js'
 import { isMethodFor, type Method, type Payer, type Processor, type Ref } from '../core/types.js'
-import type { Payments, RunActionCtx, RunMutationCtx, RunQueryCtx, SchedulerCtx, StartUi, StartedEmbedded, StartedOnPage, StartedRedirect } from './index.js'
+import type { Payments, RunActionCtx, RunMutationCtx, RunQueryCtx, SchedulerCtx, StartArgs, StartUi, StartedEmbedded, StartedOnPage, StartedRedirect } from './index.js'
 import { getOrderOrNull, orderVault } from '../core/paypal.js'
-import { MAX_REPLACED_HOPS, STALE_PRESS, paypalSavedArgs, reuseOrClose, type Replaced } from './hosted.js'
-import { ensureCustomer } from './saved.js'
+import { MAX_REPLACED_HOPS, STALE_PRESS, paypalSavedArgs, reuseOrClose, start, type Replaced } from './hosted.js'
+import { ensureCustomer, verifyOwner } from './saved.js'
+import { savePaypalMethod } from './paypalVault.js'
 import { cleanPayer, errorText } from './util.js'
 
 export type ScheduleView = NonNullable<Awaited<ReturnType<Payments['getSchedule']>>>
@@ -59,6 +60,32 @@ export interface StartScheduleCheckoutArgs<T> extends ScheduleBaseArgs<T> {
   expiresAt?: number
   limitKey?: string
   stripeCustomerId?: string
+}
+
+export interface StartOnPageArgs<T> extends Omit<StartArgs<T>, 'ui'> {
+  /**
+   * A schedule's first payment instead of a one-off: whose method it saves (owner), the day of the month and a Stripe
+   * Customer to adopt, as for startScheduleCheckout. Its ref, purpose, description, payer, amount and context are the press's.
+   */
+  schedule?: { owner: Ref; anchorDay?: number; stripeCustomerId?: string }
+}
+
+/**
+ * One on-page start for a whole attempt to pay for one thing (one ref): a one-off, or a schedule's first payment.
+ * Switching between them, or changing the amount or method, is another press with replaces, under the same ref and
+ * purpose, so the reuse, double-press and dead-start rules of start apply across the switch, and the first payment in
+ * the chain to settle is the one paid.
+ */
+export async function startOnPage<T>(p: Payments, ctx: RunActionCtx, a: StartOnPageArgs<T>): Promise<StartedOnPage & { scheduleId?: string }> {
+  const { schedule, ...rest } = a
+  if (schedule) {
+    const first = await startScheduleCheckout(p, ctx, { ...rest, ...schedule, ui: 'onPage' })
+    if (!('onPage' in first)) throw new Error('An on-page start returned no on-page payment.')
+    return first
+  }
+  const started = await start(p, ctx, { ...rest, ui: 'onPage' })
+  if (!('onPage' in started)) throw new Error('An on-page start returned no on-page payment.')
+  return started
 }
 
 /** Throws unless the app wired what schedules need: the three schedule callbacks and worker().schedules. */
@@ -269,6 +296,30 @@ async function mine(p: Payments, ctx: RunQueryCtx, scheduleId: string) {
   const s = await ctx.runQuery(p.component.schedules.get, { id: scheduleId })
   if (!s || s.app !== p.app) throw new ConvexError('There is no such schedule.')
   return s
+}
+
+/**
+ * The payer gives a schedule a new method: a Stripe PaymentMethod (`paymentMethodId`, from StripeSaveMethod, checked
+ * as the schedule owner's and recorded) or a PayPal setup token (`paypalSetupTokenId`, saved to the owner's vault as for
+ * savePaypalMethod), and the schedule is switched to it in the same call, with a new amount when the app recomputes a fee.
+ * Limited per schedule (else per signed-in user or limitKey), before anything is asked of a processor.
+ */
+export async function changeScheduleMethod(
+  p: Payments,
+  ctx: RunActionCtx,
+  a: { scheduleId: string; paymentMethodId?: string; paypalSetupTokenId?: string; amountCents?: number; by?: string; limitKey?: string },
+): Promise<ScheduleView> {
+  if (!a.paymentMethodId === !a.paypalSetupTokenId) throw new ConvexError('Give one new method: a paymentMethodId or a PayPal setup token.')
+  if (a.amountCents !== undefined && (!Number.isInteger(a.amountCents) || a.amountCents < 1)) throw new ConvexError('A schedule needs an amount of at least one cent.')
+  await p.takeLimits(ctx, 'scheduleMethod', `schedule:${a.scheduleId.slice(0, 64)}`, 1, a.limitKey)
+  const s = await mine(p, ctx, a.scheduleId)
+  // Refused as updateSchedule would, before a PayPal approval is spent on a schedule that can't take it.
+  if (s.status === 'cancelled') throw new ConvexError('This schedule was cancelled.')
+  if (s.status === 'starting') throw new ConvexError('This schedule hasn’t started yet.')
+  const saved = a.paypalSetupTokenId
+    ? await savePaypalMethod(p, ctx, { owner: s.owner, setupTokenId: a.paypalSetupTokenId, recurring: true, limitKey: a.limitKey })
+    : await verifyOwner(p, ctx, { owner: s.owner, paymentMethodId: a.paymentMethodId ?? '' })
+  return await updateSchedule(p, ctx, { scheduleId: s.id, paymentMethodId: saved.paymentMethodId, amountCents: a.amountCents, by: a.by })
 }
 
 export async function updateSchedule(

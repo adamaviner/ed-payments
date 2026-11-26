@@ -39,6 +39,14 @@ function notDisputed(c: Doc<'checkouts'>) {
   if (c.disputed) throw new ConvexError('This payment is disputed by the buyer; refund it once the dispute has ended.')
 }
 
+/** Where a checkout's refunds stand, for onRefunded. */
+const refundState = (c: Doc<'checkouts'>, refundedCents: number) => ({
+  refundedCents,
+  paidCents: c.paidCents ?? 0,
+  paymentRef: c.paymentRef ?? null,
+  full: refundedCents >= (c.paidCents ?? 0),
+})
+
 /** Counts a refund as done: adds it to the checkout's refundedCents and tells the host. */
 async function counted(ctx: MutationCtx, r: Doc<'refunds'>, now: number) {
   const c = await loadCheckout(ctx, r.checkoutId)
@@ -48,7 +56,7 @@ async function counted(ctx: MutationCtx, r: Doc<'refunds'>, now: number) {
     ctx,
     { ...c, refundedCents },
     'onRefunded',
-    { refundId: r._id, amountCents: r.amountCents, refundedCents, paidCents: c.paidCents ?? 0, origin: r.origin, ...(r.hostData ? { hostData: r.hostData } : {}) },
+    { refundId: r._id, amountCents: r.amountCents, ...refundState(c, refundedCents), origin: r.origin, ...(r.hostData ? { hostData: r.hostData } : {}) },
     now,
   )
 }
@@ -292,8 +300,7 @@ export const recordExternal = mutation({
         {
           refundId: match._id,
           amountCents: match.amountCents,
-          refundedCents,
-          paidCents: c.paidCents ?? 0,
+          ...refundState(c, refundedCents),
           origin: match.origin,
           reversed: true,
           ...(match.hostData ? { hostData: match.hostData } : {}),

@@ -197,7 +197,7 @@ export const failStart = mutation({
 /** A bank payment was accepted and the money is on its way (days, for ACH). The host's onProcessing is told (e.g. to pause a deadline). */
 export const markProcessing = mutation({
   args: { id: v.string(), paymentRef: v.optional(v.string()), method: v.optional(method), now: v.optional(v.number()) },
-  returns: v.union(v.object({ outcome: v.literal('processing') }), already),
+  returns: v.union(v.object({ outcome: v.literal('processing'), closed: v.optional(v.array(v.string())) }), already),
   handler: async (ctx, { id, paymentRef, method, now }) => {
     const c = await loadCheckout(ctx, id)
     // Like settlePaid, money on its way to a checkout that expired or failed is still money taken.
@@ -205,11 +205,12 @@ export const markProcessing = mutation({
     const patch = { status: 'processing' as const, paymentRef: paymentRef ?? c.paymentRef, method: method ?? c.method, lastError: undefined }
     await ctx.db.patch(c._id, patch)
     await resolveIssue(ctx, c._id, 'charge_unknown', now ?? Date.now())
-    // The buyer cancelled it: the money will be owed back when it arrives (settlePaid), so the sale isn't going ahead.
-    if (c.cancelledByBuyerAt !== undefined) return { outcome: 'processing' as const }
+    // The buyer cancelled it, or another payment in its chain of presses came first: the money will be
+    // owed back when it arrives (settlePaid), so the sale isn't going ahead.
+    if (cancelledByBuyer(c) || (await paidInChain(ctx, c))) return { outcome: 'processing' as const }
     await scheduleProcessing(ctx, { ...c, ...patch }, now ?? Date.now())
-    await notifyHost(ctx, { ...c, ...patch }, 'onProcessing', { paymentRef: patch.paymentRef ?? null }, now ?? Date.now())
-    return { outcome: 'processing' as const }
+    await notifyHost(ctx, { ...c, ...patch }, 'onProcessing', { paymentRef: patch.paymentRef ?? null, amountCents: c.amountCents }, now ?? Date.now())
+    return { outcome: 'processing' as const, ...(await closeChain(ctx, c, now ?? Date.now())) }
   },
 })
 
@@ -234,7 +235,11 @@ export const settlePaid = mutation({
     method: v.optional(method),
     now: v.number(),
   },
-  returns: v.union(v.object({ outcome: v.literal('paid') }), v.object({ outcome: v.literal('refund_needed'), reason: v.string(), refundId: v.string() }), already),
+  returns: v.union(
+    v.object({ outcome: v.literal('paid'), closed: v.optional(v.array(v.string())) }),
+    v.object({ outcome: v.literal('refund_needed'), reason: v.string(), refundId: v.string() }),
+    already,
+  ),
   handler: async (ctx, { id, paymentRef, paidCents, processorFeeCents, processorCheckoutId, method, now }) => {
     const loaded = await loadCheckout(ctx, id)
     if (!SETTLEABLE.has(loaded.status)) return { outcome: 'already_handled' as const, status: loaded.status }
@@ -250,13 +255,13 @@ export const settlePaid = mutation({
     })
     await resolveIssue(ctx, c._id, 'charge_unknown', now)
     // The buyer cancelled before the money arrived: they were told it wasn't taken, so it goes back.
-    const cancelled = c.cancelledByBuyerAt !== undefined
+    const cancelled = cancelledByBuyer(c)
     let refusal: string | null = cancelled
       ? 'The buyer cancelled this payment before it arrived.'
       : paidCents === c.amountCents
         ? null
         : `The processor took ${dollars(paidCents)}, not the ${dollars(c.amountCents)} asked.`
-    // A charge and its on-session retries (and a schedule's period) pay for one thing: the second to arrive is owed back.
+    // A charge and its on-session retries (a schedule's period, a chain of presses) pay for one thing: the second to arrive is owed back.
     const duplicate = !refusal && (await paidElsewhere(ctx, c))
     if (duplicate) refusal = 'This was already paid by another payment.'
     if (!refusal && c.callbacks.onPaid) {
@@ -267,7 +272,7 @@ export const settlePaid = mutation({
     if (refusal === null) {
       await ctx.db.patch(c._id, { status: 'paid' })
       await schedulePaid(ctx, { ...c, status: 'paid' }, { paidCents, paymentRef }, now)
-      return { outcome: 'paid' as const }
+      return { outcome: 'paid' as const, ...(await closeChain(ctx, c, now)) }
     }
     console.warn(`payments: ${c.processor} payment ${paymentRef} for checkout ${c._id} needs a refund: ${refusal}`)
     await ctx.db.patch(c._id, { status: 'refund_needed', lastError: refusal })
@@ -414,16 +419,23 @@ export const CAPTURE_CLAIM_MS = 5 * 60_000
  * was taken, then call again with `checked`.
  */
 export const cancel = mutation({
-  args: { id: v.string(), giveBack: v.optional(v.object({ key: v.string(), windowMs: v.number() })), checked: v.optional(v.boolean()), now: v.number() },
+  args: {
+    id: v.string(),
+    giveBack: v.optional(v.object({ key: v.string(), windowMs: v.number() })),
+    checked: v.optional(v.boolean()),
+    /** Closed by another press (replaces): a starting schedule of it ends without telling the app. */
+    replaced: v.optional(v.boolean()),
+    now: v.number(),
+  },
   returns: v.union(v.object({ outcome: v.literal('abandoned') }), v.object({ outcome: v.literal('being_paid') }), v.object({ outcome: v.literal('check_processor') }), already),
-  handler: async (ctx, { id, giveBack, checked, now }) => {
+  handler: async (ctx, { id, giveBack, checked, replaced, now }) => {
     const c = await loadCheckout(ctx, id)
     if (c.status !== 'created' && c.status !== 'pending') return { outcome: 'already_handled' as const, status: c.status }
     if (c.captureClaimedAt !== undefined && now - c.captureClaimedAt < CAPTURE_CLAIM_MS) return { outcome: 'being_paid' as const }
     if (c.captureClaimedAt !== undefined && !checked) return { outcome: 'check_processor' as const }
-    await ctx.db.patch(c._id, { status: 'abandoned', settledAt: now, cancelledByBuyerAt: now })
+    await ctx.db.patch(c._id, { status: 'abandoned', settledAt: now, cancelledByBuyerAt: now, ...(replaced ? { closedBy: 'press' as const } : {}) })
     if (giveBack && c.createdAt > now - giveBack.windowMs) await giveBackOne(ctx, giveBack.key, now, giveBack.windowMs)
-    await scheduleAbandoned(ctx, c, now)
+    await scheduleAbandoned(ctx, c, now, { quiet: replaced })
     return { outcome: 'abandoned' as const }
   },
 })
@@ -486,12 +498,85 @@ async function paidElsewhere(ctx: MutationCtx, c: Doc<'checkouts'>): Promise<boo
   const rootId = c.retryOf ?? c._id
   const isPaid = (x: Doc<'checkouts'> | null) => !!x && x._id !== c._id && (x.status === 'paid' || x.status === 'processing')
   if (c.retryOf && isPaid(await ctx.db.get(c.retryOf))) return true
+  if (await paidInChain(ctx, c)) return true
   const siblings = await ctx.db
     .query('checkouts')
     .withIndex('by_retryOf', (q) => q.eq('retryOf', rootId))
     .take(50)
   if (siblings.some(isPaid)) return true
   return !!c.scheduleId && !!c.schedulePeriod && (await periodPaid(ctx, c.scheduleId, c.schedulePeriod, c._id))
+}
+
+/**
+ * A press that replaced another closed it as the buyer's cancel does (closedBy 'press'), but the two are one attempt to
+ * pay for one thing: a payment on the replaced one is still the attempt's, and the chain decides which pays (paidInChain).
+ * One the buyer cancelled themselves (Edit) stays cancelled even when a later press names it.
+ */
+const cancelledByBuyer = (c: Doc<'checkouts'>) => c.cancelledByBuyerAt !== undefined && c.closedBy !== 'press'
+
+/**
+ * The other checkouts linked to c by presses (replacedBy, either way): one attempt to pay for one thing, of which the
+ * first payment to settle is the one paid. createReplacing links only checkouts of one app, ref and purpose. Off-session
+ * charges are never replaced.
+ */
+async function chainOf(ctx: QueryCtx, c: Doc<'checkouts'>): Promise<Doc<'checkouts'>[]> {
+  if (c.kind !== 'hosted' && c.kind !== 'onPage') return []
+  const seen = new Map<string, Doc<'checkouts'>>([[c._id, c]])
+  const todo: Doc<'checkouts'>[] = [c]
+  for (let x = todo.pop(); x && seen.size < MAX_CHAIN; x = todo.pop()) {
+    const next = x.replacedBy ? await ctx.db.get(x.replacedBy) : null
+    const before = await ctx.db
+      .query('checkouts')
+      .withIndex('by_replacedBy', (q) => q.eq('replacedBy', x._id))
+      .take(MAX_CHAIN)
+    for (const y of next ? [next, ...before] : before) {
+      if (seen.has(y._id)) continue
+      seen.set(y._id, y)
+      todo.push(y)
+    }
+  }
+  return [...seen.values()].filter((x) => x._id !== c._id)
+}
+
+/** Far more presses than one attempt makes (each is rate-limited); the walk stops there. */
+const MAX_CHAIN = 100
+
+/** How another checkout in a checkout's chain of presses stands when it was paid or is being paid by bank; null when none was. */
+export const chainPaid = query({
+  args: { id: v.string() },
+  returns: v.union(v.literal('paid'), v.literal('processing'), v.null()),
+  handler: async (ctx, { id }) => {
+    const nid = ctx.db.normalizeId('checkouts', id)
+    const c = nid ? await ctx.db.get(nid) : null
+    const paid = c ? (await chainOf(ctx, c)).find(counts) : undefined
+    return paid?.status === 'paid' || paid?.status === 'processing' ? paid.status : null
+  },
+})
+
+/** Whether another checkout in c's chain of presses was paid, or is being paid by bank. */
+async function paidInChain(ctx: QueryCtx, c: Doc<'checkouts'>): Promise<boolean> {
+  return (await chainOf(ctx, c)).some(counts)
+}
+
+/**
+ * A payment that came first in its chain: paid, or a bank payment on its way that was told to the app. One on a checkout
+ * the chain or the buyer had closed is owed back when it arrives, so it never counts, even while it is processing.
+ */
+const counts = (x: Doc<'checkouts'>) => (x.status === 'paid' || x.status === 'processing') && x.closedBy !== 'chain' && !cancelledByBuyer(x)
+
+/**
+ * c's payment came first in its chain of presses: the others still open are closed, so the buyer's other tab can't pay
+ * them (a payment that comes anyway is owed back). A starting schedule of theirs ends without telling the app, as for a
+ * replaced one. One a PayPal capture holds right now is left to settle, and is owed back. Returns the ids closed, for the
+ * client to close at the processor too (none: nothing).
+ */
+async function closeChain(ctx: MutationCtx, c: Doc<'checkouts'>, now: number): Promise<{ closed?: string[] }> {
+  const open = (await chainOf(ctx, c)).filter((x) => (x.status === 'created' || x.status === 'pending') && !(x.captureClaimedAt !== undefined && now - x.captureClaimedAt < CAPTURE_CLAIM_MS))
+  for (const x of open) {
+    await ctx.db.patch(x._id, { status: 'abandoned', settledAt: now, closedBy: 'chain' })
+    await scheduleAbandoned(ctx, x, now, { quiet: true })
+  }
+  return open.length ? { closed: open.map((x) => x._id) } : {}
 }
 
 /** Whether a payment other than `except` paid (or is paying, by bank) a schedule's period. */

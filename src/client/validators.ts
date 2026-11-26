@@ -62,6 +62,10 @@ export function callbackArgs<C extends GenericValidator>(context: C) {
       refundedCents: v.number(),
       paidCents: v.number(),
       origin: v.union(v.literal('requested'), v.literal('needed'), v.literal('external')),
+      /** The refunded payment's reference (as on paid). */
+      paymentRef: v.union(v.string(), v.null()),
+      /** Everything paid has gone back (refundedCents reached paidCents). */
+      full: v.boolean(),
       /** What the app passed to requestRefund as hostData (e.g. its admin's answer to a question); unset for others. */
       hostData: v.optional(v.record(v.string(), v.string())),
       /**
@@ -83,7 +87,7 @@ export function callbackArgs<C extends GenericValidator>(context: C) {
       amountCents: v.union(v.number(), v.null()),
     },
     /** processing: a bank payment was accepted and the money is on its way (days); paid or failed follows. */
-    processing: { ...b, paymentRef: v.union(v.string(), v.null()) },
+    processing: { ...b, paymentRef: v.union(v.string(), v.null()), /** What was asked, as on paid. */ amountCents: v.number() },
     /** issues: the nightly digest of new issues (differences from the processors, disputes, charges with an unknown outcome). */
     issues: { issues: v.array(issueArg) },
   }

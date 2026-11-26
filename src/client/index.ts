@@ -26,7 +26,19 @@ import {
 } from 'convex/server'
 import { ConvexError, v, type GenericValidator, type Infer } from 'convex/values'
 import type { ComponentApi } from '../component/_generated/component.js'
-import { cheaperCardProcessor, DEFAULT_FEE_RATES, feeRates, feeSchedule, type CardProcessorChoice, type FeeRates, type FeeRatesInput, type FeeSchedule } from '../core/fees.js'
+import {
+  cheaperCardProcessor,
+  DEFAULT_FEE_RATES,
+  feeRates,
+  feeSchedule,
+  quote,
+  type CardProcessorChoice,
+  type FeeRates,
+  type FeeRatesInput,
+  type FeeSchedule,
+  type Quote,
+  type QuoteArgs,
+} from '../core/fees.js'
 import { PAYPAL_LIVE_API, PAYPAL_SANDBOX_API, paypalToken, paypalTokenOf, type PaypalKeys, type PaypalOrder } from '../core/paypal.js'
 import type { StripeKeys, StripeSession } from '../core/stripe.js'
 import { METHOD_NOT_SAVED } from '../core/declines.js'
@@ -38,7 +50,18 @@ import { paypalHistory, type PaypalHistory, type PaypalHistoryArgs, type PaypalH
 import { reconcile, type ReconcileResult } from './reconcile.js'
 import { chargeNow, removeSavedMethod, retryOnSession, retryWithPaypal, savedMethods, setupPaymentMethod, verifyMethodOwner, type SavedMethod, type VerifiedMethod } from './saved.js'
 import { savePaypalMethod, setupPaypalMethod } from './paypalVault.js'
-import { runSchedules, startSchedule, startScheduleCheckout, updateSchedule, type ScheduleView, type StartScheduleArgs, type StartScheduleCheckoutArgs } from './schedules.js'
+import {
+  changeScheduleMethod,
+  runSchedules,
+  startOnPage,
+  startSchedule,
+  startScheduleCheckout,
+  updateSchedule,
+  type ScheduleView,
+  type StartOnPageArgs,
+  type StartScheduleArgs,
+  type StartScheduleCheckoutArgs,
+} from './schedules.js'
 import { cleanPayer } from './util.js'
 import {
   callbackArgs,
@@ -73,6 +96,7 @@ export type {
   ScheduleView,
   StartScheduleArgs,
   StartScheduleCheckoutArgs,
+  StartOnPageArgs,
 }
 export * from './validators.js'
 export { fromEnv, isLive, stripeProblems, paypalProblems, type KeySource, type Problem } from './env.js'
@@ -342,9 +366,25 @@ export class Payments<C extends GenericValidator = GenericValidator> {
    */
   cardProcessorFor(amountCents: number): CardProcessorChoice {
     const choice = cheaperCardProcessor(amountCents, this.fees)
-    const has = { stripe: !!this.options.stripe?.()?.secretKey, paypal: !!this.options.paypal?.()?.clientId }
-    if (!has[choice.processor] && has[choice.processor === 'stripe' ? 'paypal' : 'stripe']) return { ...choice, processor: choice.processor === 'stripe' ? 'paypal' : 'stripe' }
-    return choice
+    const has = this.cardProcessors()
+    return has.length === 1 ? { ...choice, processor: has[0] } : choice
+  }
+
+  /**
+   * What a payment costs and who takes it at this app's rates (core's quote): a card goes to the cheaper processor for
+   * the amount among those this deployment has keys for. Price on the server with it before startOnPage; the page shows
+   * the same quote from core's quote with the same rates.
+   */
+  quote(a: QuoteArgs): Quote {
+    const has = this.cardProcessors()
+    const needs = a.method === 'ach' ? 'stripe' : a.method === 'paypal' ? 'paypal' : null
+    if (needs && has.length && !has.includes(needs)) throw new ConvexError(`${needs === 'stripe' ? 'Stripe' : 'PayPal'} isn’t set up on this deployment.`)
+    return quote(a, this.fees, { cardProcessors: has.length ? has : undefined })
+  }
+
+  /** The processors this deployment has keys for. */
+  private cardProcessors(): Processor[] {
+    return (['stripe', 'paypal'] as const).filter((x) => (x === 'stripe' ? !!this.options.stripe?.()?.secretKey : !!this.options.paypal?.()?.clientId))
   }
 
   /** @internal */
@@ -557,8 +597,12 @@ export class Payments<C extends GenericValidator = GenericValidator> {
     return await savePaypalMethod(this, ctx, a)
   }
 
-  /** The owner's saved cards, bank accounts and PayPal accounts at both processors, newest first, each with whether a charge of it was declined. Rate-limited. */
-  async savedMethods(ctx: RunActionCtx, a: { owner: Ref; stripeCustomerId?: string; limitKey?: string }): Promise<SavedMethod[]> {
+  /**
+   * The owner's saved cards, bank accounts and PayPal accounts at both processors, newest first, each with whether a
+   * charge of it was declined. With forAmountCents: only those not declined, cheapest to charge that amount first (at
+   * this app's rates; the newest first among equals), each with its feeCents. Rate-limited.
+   */
+  async savedMethods(ctx: RunActionCtx, a: { owner: Ref; stripeCustomerId?: string; limitKey?: string; forAmountCents?: number }): Promise<SavedMethod[]> {
     return await savedMethods(this, ctx, a)
   }
 
@@ -723,6 +767,30 @@ export class Payments<C extends GenericValidator = GenericValidator> {
   async startScheduleCheckout(ctx: RunActionCtx, a: StartScheduleCheckoutArgs<Infer<C>>): Promise<(StartedRedirect | StartedEmbedded | StartedOnPage) & { scheduleId: string }>
   async startScheduleCheckout(ctx: RunActionCtx, a: StartScheduleCheckoutArgs<Infer<C>>): Promise<(StartedRedirect | StartedEmbedded | StartedOnPage) & { scheduleId: string }> {
     return await startScheduleCheckout(this, ctx, a)
+  }
+
+  /**
+   * The on-page start for a whole attempt to pay for one thing: a one-off, or with `schedule` a schedule's first
+   * payment that saves the method. The app keeps one ref (and purpose) for the attempt; switching one-off and
+   * monthly, the amount or the method is another press with `replaces` (the checkout the last press got), and the
+   * reuse, double-press and dead-start rules of start apply. Within a chain of presses the first payment to settle is
+   * the one paid: the others are closed, and a payment on any of them later is owed back (refund_needed), so the app
+   * hears one onPaid per attempt. A schedule a press closes ends without a scheduleChanged callback. Rate-limited like start.
+   */
+  async startOnPage(ctx: RunActionCtx, a: StartOnPageArgs<Infer<C>>): Promise<StartedOnPage & { scheduleId?: string }> {
+    return await startOnPage(this, ctx, a)
+  }
+
+  /**
+   * Saves a new method for a schedule's owner and switches the schedule to it in one call: a Stripe paymentMethodId
+   * (checked as the owner's) or a PayPal setup token (saved to the owner's vault). amountCents, when given, changes the
+   * amount too (a fee recomputed for the new method). Gate it with the app's own check (e.g. a signed link). Rate-limited.
+   */
+  async changeScheduleMethod(
+    ctx: RunActionCtx,
+    a: { scheduleId: string; paymentMethodId?: string; paypalSetupTokenId?: string; amountCents?: number; by?: string; limitKey?: string },
+  ): Promise<ScheduleView> {
+    return await changeScheduleMethod(this, ctx, a)
   }
 
   /**

@@ -97,6 +97,28 @@ describe('Stripe on the app’s page', () => {
   })
 })
 
+describe('startOnPage: one ref for the whole attempt', () => {
+  test('a one-off, then monthly under the same ref (replaces): the one-off is canceled at Stripe and can’t be paid; the first payment starts the schedule, and the app hears no not-started', async () => {
+    const { t, calls, schedule } = harness()
+    const donor = `sbsw${run}`
+    const gift = `g${run}`
+    const oneOff = await t.action(api.give.onPage, { processor: 'stripe', method: 'card', amountCents: 1500, gift, donor, email: `${donor}@example.org` })
+    if (oneOff.onPage.processor !== 'stripe') throw new Error('expected an on-page Stripe payment')
+    const monthly = await t.action(api.give.onPage, { processor: 'stripe', method: 'card', amountCents: 1500, gift, donor, email: `${donor}@example.org`, monthly: true, replaces: oneOff.checkoutId })
+    if (monthly.onPage.processor !== 'stripe' || !monthly.scheduleId) throw new Error('expected an on-page Stripe first payment')
+    customers.push((await t.action(api.monthly.setup, { donor })).stripeCustomerId)
+    expect(await t.query(api.shop.status, { id: oneOff.checkoutId })).toMatchObject({ status: 'abandoned' })
+    const intentOf = (secret: string) => secret.slice(0, secret.indexOf('_secret_'))
+    const stale = await stripePost<{ status?: string; error?: { code?: string } }>(`/v1/payment_intents/${intentOf(oneOff.onPage.clientSecret)}/confirm`, 'payment_method=pm_card_visa')
+    expect(stale.status).not.toBe('succeeded')
+    expect(await stripePost<{ status: string }>(`/v1/payment_intents/${intentOf(monthly.onPage.clientSecret)}/confirm`, 'payment_method=pm_card_visa')).toMatchObject({ status: 'succeeded' })
+    expect(await t.action(api.payments.completeReturn, { processor: 'stripe', token: intentOf(monthly.onPage.clientSecret) })).toMatchObject({ status: 'paid' })
+    expect(await schedule(monthly.scheduleId)).toMatchObject({ status: 'active', methodLabel: expect.stringContaining('4242') })
+    expect(await calls('scheduleChanged')).toMatchObject([{ changes: ['started'] }])
+    await t.mutation(api.monthly.cancel, { scheduleId: monthly.scheduleId, reason: 'Sandbox done' })
+  })
+})
+
 describe.runIf(paypalOn)('PayPal', () => {
   test('a card saved with its first payment, then charged as a recurring payment next month, refunded, cancelled', async () => {
     const { t, settle, calls, schedule, hourly } = harness()

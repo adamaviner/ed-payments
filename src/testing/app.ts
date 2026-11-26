@@ -292,15 +292,15 @@ export const defined = app.defineModules({
         await payments.setupPaymentMethod(ctx, { owner: { type: 'user', id: a.user }, payer: { email: a.email } }),
     }),
     methods: app.action({
-      args: { user: v.string(), stripeCustomerId: v.optional(v.string()) },
-      handler: async (ctx, a) => await payments.savedMethods(ctx, { owner: { type: 'user', id: a.user }, stripeCustomerId: a.stripeCustomerId }),
+      args: { user: v.string(), stripeCustomerId: v.optional(v.string()), forAmountCents: v.optional(v.number()) },
+      handler: async (ctx, a) => await payments.savedMethods(ctx, { owner: { type: 'user', id: a.user }, stripeCustomerId: a.stripeCustomerId, forAmountCents: a.forAmountCents }),
     }),
     verify: app.action({
       args: { user: v.string(), paymentMethodId: v.string() },
       handler: async (ctx, a) => await payments.verifyMethodOwner(ctx, { owner: { type: 'user', id: a.user }, paymentMethodId: a.paymentMethodId }),
     }),
     charge: app.mutation({
-      args: { user: v.string(), bidId: v.string(), paymentMethodId: v.string(), amountCents: v.optional(v.number()), key: v.optional(v.string()) },
+      args: { user: v.string(), bidId: v.string(), paymentMethodId: v.string(), amountCents: v.optional(v.number()), key: v.optional(v.string()), stripeCustomerId: v.optional(v.string()) },
       handler: async (ctx, a): Promise<string> =>
         await payments.chargeSaved(ctx, {
           ref: { type: 'bid', id: a.bidId },
@@ -310,6 +310,7 @@ export const defined = app.defineModules({
           payer: { email: 'ana@example.org' },
           owner: { type: 'user', id: a.user },
           paymentMethodId: a.paymentMethodId,
+          stripeCustomerId: a.stripeCustomerId,
           idempotencyKey: a.key ?? `bid-${a.bidId}`,
           context: { bidId: a.bidId },
         }),
@@ -405,6 +406,15 @@ export const defined = app.defineModules({
       args: { donor: v.string(), paymentMethodId: v.string() },
       handler: async (ctx, a) => await payments.verifyMethodOwner(ctx, { owner: { type: 'donor', id: a.donor }, paymentMethodId: a.paymentMethodId }),
     }),
+    changeMethod: app.action({
+      args: { scheduleId: v.string(), paymentMethodId: v.optional(v.string()), paypalSetupTokenId: v.optional(v.string()), amountCents: v.optional(v.number()) },
+      handler: async (ctx, a) => await payments.changeScheduleMethod(ctx, { ...a, by: 'donor' }),
+    }),
+    paypalSetup: app.action({
+      args: { donor: v.string(), kind: v.union(v.literal('card'), v.literal('paypal')) },
+      handler: async (ctx, a): Promise<{ setupTokenId: string; clientId: string }> =>
+        await payments.setupPaypalMethod(ctx, { owner: { type: 'donor', id: a.donor }, payer: { email: `${a.donor}@example.org` }, kind: a.kind, recurring: true }),
+    }),
     methods: app.action({
       args: { donor: v.string() },
       handler: async (ctx, a) => await payments.savedMethods(ctx, { owner: { type: 'donor', id: a.donor } }),
@@ -415,6 +425,36 @@ export const defined = app.defineModules({
         await payments.removeSavedMethod(ctx, { owner: { type: 'donor', id: a.donor }, paymentMethodId: a.paymentMethodId })
         return null
       },
+    }),
+  },
+  /** A gift on the host's own form, the way ed-schedule's donate page uses startOnPage: one ref for the whole attempt, one-off or monthly. */
+  give: {
+    onPage: app.action({
+      args: {
+        processor: v.union(v.literal('stripe'), v.literal('paypal')),
+        method: v.union(v.literal('card'), v.literal('ach'), v.literal('paypal')),
+        amountCents: v.optional(v.number()),
+        monthly: v.optional(v.boolean()),
+        replaces: v.optional(v.string()),
+        email: v.optional(v.string()),
+        gift: v.optional(v.string()),
+        donor: v.optional(v.string()),
+      },
+      handler: async (ctx, a): Promise<StartedOnPage & { scheduleId?: string }> =>
+        await payments.startOnPage(ctx, {
+          ref: { type: 'gift', id: a.gift ?? 'g1' },
+          purpose: 'donation',
+          description: a.monthly ? 'Monthly gift' : 'Gift',
+          amountCents: a.amountCents ?? 2500,
+          processor: a.processor,
+          method: a.method,
+          payer: { email: a.email ?? 'd1@example.org' },
+          returnPath: '/donate/thanks',
+          cancelPath: '/donate',
+          context: {},
+          replaces: a.replaces,
+          ...(a.monthly ? { schedule: { owner: { type: 'donor', id: a.donor ?? 'd1' } } } : {}),
+        }),
     }),
   },
   payments: { ...payments.adminApi({ skipApproval: true }), ...payments.publicApi() },

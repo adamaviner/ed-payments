@@ -213,6 +213,39 @@ describe('a schedule on a saved method', () => {
     await expect(t.mutation(api.monthly.update, { scheduleId, amountCents: 100 })).rejects.toThrow(/cancelled/)
   })
 
+  test('the view names its method as savedMethods does', async () => {
+    const { t, schedule, saved, start } = setup()
+    const pm = await saved()
+    const { scheduleId } = await start(pm)
+    const [method] = await t.action(api.monthly.methods, { donor: 'd1' })
+    expect(await schedule(scheduleId)).toMatchObject({ paymentMethodId: pm, methodLabel: method.label })
+  })
+
+  test('changeScheduleMethod: a new Stripe card, checked as the owner’s, saved and switched to in one call, with a new amount', async () => {
+    const { t, schedule, calls, saved, start } = setup()
+    const { scheduleId } = await start(await saved())
+    const { stripeCustomerId } = await t.action(api.monthly.setup, { donor: 'd1' })
+    const fresh = stripe.saveMethod(stripeCustomerId)
+    const view = await t.action(api.monthly.changeMethod, { scheduleId, paymentMethodId: fresh, amountCents: 3100 })
+    expect(view).toMatchObject({ paymentMethodId: fresh, amountCents: 3100, methodLabel: expect.any(String) })
+    expect(await schedule(scheduleId)).toMatchObject({ paymentMethodId: fresh, amountCents: 3100 })
+    expect((await calls('scheduleChanged')).at(-1)).toMatchObject({ changes: expect.arrayContaining(['amount', 'method']) })
+    const { stripeCustomerId: someoneElse } = await t.action(api.monthly.setup, { donor: 'd2' })
+    await expect(t.action(api.monthly.changeMethod, { scheduleId, paymentMethodId: stripe.saveMethod(someoneElse) })).rejects.toThrow(/couldn’t be used/)
+    expect(await schedule(scheduleId)).toMatchObject({ paymentMethodId: fresh })
+  })
+
+  test('changeScheduleMethod: a PayPal setup token is saved to the owner’s vault and the schedule switched to it', async () => {
+    const { t, schedule, saved, start } = setup()
+    const { scheduleId } = await start(await saved())
+    const { setupTokenId } = await t.action(api.monthly.paypalSetup, { donor: 'd1', kind: 'card' })
+    pp.approveSetup(setupTokenId, { card: { last4: '0004' } })
+    const view = await t.action(api.monthly.changeMethod, { scheduleId, paypalSetupTokenId: setupTokenId })
+    expect(view).toMatchObject({ processor: 'paypal', method: 'card', paymentMethodId: expect.stringMatching(/^paypal:/), methodLabel: expect.stringContaining('0004') })
+    expect(await schedule(scheduleId)).toMatchObject({ processor: 'paypal', paymentMethodId: view.paymentMethodId })
+    await expect(t.action(api.monthly.changeMethod, { scheduleId })).rejects.toThrow(/one new method/)
+  })
+
   test('a method in use can’t be removed; one detached at Stripe cancels its schedules', async () => {
     const { t, calls, schedule, saved, start } = setup()
     const pm = await saved()
@@ -399,7 +432,7 @@ describe('a schedule started with a payment that saves the method', () => {
     expect(changed.scheduleId).not.toBe(first.scheduleId)
     expect((await status(first.checkoutId)).status).toBe('abandoned')
     expect(await schedule(first.scheduleId)).toMatchObject({ status: 'cancelled' })
-    expect(await calls('scheduleChanged')).toMatchObject([{ scheduleId: first.scheduleId, changes: ['not_started'] }])
+    expect(await calls('scheduleChanged')).toEqual([])
     expect(await schedule(changed.scheduleId)).toMatchObject({ status: 'starting', amountCents: 5000 })
     await t.fetch('/stripe/webhook', await stripe.confirm((await status(changed.checkoutId)).processorCheckoutId!))
     expect(await schedule(changed.scheduleId)).toMatchObject({ status: 'active', amountCents: 5000 })
@@ -465,6 +498,109 @@ describe('a schedule started with a payment that saves the method', () => {
     const { t } = setup()
     await expect(t.action(api.monthly.startCheckout, { donor: 'd1', processor: 'paypal', method: 'ach' })).rejects.toThrow(/PayPal doesn’t take ach/)
     expect(await t.query(api.bids.cardProcessor, { amountCents: 2500 })).toMatchObject({ processor: expect.stringMatching(/stripe|paypal/) })
+  })
+})
+
+describe('startOnPage: one ref for the whole attempt, one-off or monthly', () => {
+  type Press = { processor?: 'stripe' | 'paypal'; method?: 'card' | 'ach' | 'paypal'; amountCents?: number; monthly?: boolean; replaces?: string }
+  const press = (t: ReturnType<typeof setup>['t'], a: Press = {}) => t.action(api.give.onPage, { processor: 'stripe', method: 'card', ...a })
+
+  test('switching one-off and monthly is another press with replaces: the last press’s payment and schedule close, and the same press again reuses', async () => {
+    const { t, calls, schedule, status } = setup()
+    const oneOff = await press(t)
+    expect(oneOff).toMatchObject({ reused: false })
+    expect(oneOff).not.toHaveProperty('scheduleId')
+    const monthly = await press(t, { monthly: true, replaces: oneOff.checkoutId })
+    expect(monthly).toMatchObject({ reused: false, scheduleId: expect.any(String) })
+    expect((await status(oneOff.checkoutId)).status).toBe('abandoned')
+    expect(await schedule(monthly.scheduleId!)).toMatchObject({ status: 'starting', owner: { type: 'donor', id: 'd1' }, ref: { type: 'gift', id: 'g1' } })
+    expect(await press(t, { monthly: true, replaces: monthly.checkoutId })).toEqual({ ...monthly, reused: true })
+    const back = await press(t, { replaces: oneOff.checkoutId })
+    expect(back).toMatchObject({ reused: false })
+    expect((await status(monthly.checkoutId)).status).toBe('abandoned')
+    expect(await schedule(monthly.scheduleId!)).toMatchObject({ status: 'cancelled' })
+    await t.fetch('/stripe/webhook', await stripe.confirm((await status(back.checkoutId)).processorCheckoutId!))
+    expect(await calls('onPaid')).toHaveLength(1)
+    expect(await calls('scheduleChanged')).toEqual([])
+  })
+
+  test('a late payment on a checkout a press replaced is owed back: one onPaid for the attempt', async () => {
+    const { t, calls, status } = setup()
+    const first = await press(t)
+    const second = await press(t, { amountCents: 3000, replaces: first.checkoutId })
+    await t.fetch('/stripe/webhook', await stripe.confirm((await status(second.checkoutId)).processorCheckoutId!))
+    await t.fetch('/stripe/webhook', await stripe.confirm((await status(first.checkoutId)).processorCheckoutId!))
+    expect(await status(second.checkoutId)).toMatchObject({ status: 'paid' })
+    expect(await status(first.checkoutId)).toMatchObject({ status: 'refund_needed' })
+    expect(await calls('onPaid')).toHaveLength(1)
+    expect(await calls('onRefundNeeded')).toMatchObject([{ checkoutId: first.checkoutId, reason: 'This was already paid by another payment.' }])
+  })
+
+  test('the first payment to settle is the one paid, even on a replaced checkout; the open one is closed (canceled at Stripe) and a payment on it is owed back', async () => {
+    const { t, calls, schedule, status } = setup()
+    const monthly = await press(t, { monthly: true })
+    const oneOff = await press(t, { replaces: monthly.checkoutId })
+    const openPi = (await status(oneOff.checkoutId)).processorCheckoutId!
+    await t.fetch('/stripe/webhook', await stripe.confirm((await status(monthly.checkoutId)).processorCheckoutId!))
+    expect(await status(monthly.checkoutId)).toMatchObject({ status: 'paid' })
+    expect(await schedule(monthly.scheduleId!)).toMatchObject({ status: 'active' })
+    expect(await calls('scheduleChanged')).toMatchObject([{ scheduleId: monthly.scheduleId, changes: ['started'] }])
+    expect(await status(oneOff.checkoutId)).toMatchObject({ status: 'abandoned' })
+    expect(stripe.calls.some((x) => x.path === `/v1/payment_intents/${openPi}/cancel`)).toBe(true)
+    await t.fetch('/stripe/webhook', await stripe.confirm(openPi))
+    expect(await status(oneOff.checkoutId)).toMatchObject({ status: 'refund_needed' })
+    expect(await calls('onPaid')).toHaveLength(1)
+  })
+
+  test('once a payment in the chain came first, the next press naming the closed checkout is told it is paid, not given a new payment', async () => {
+    const { t, status } = setup()
+    const first = await press(t)
+    const second = await press(t, { amountCents: 3000, replaces: first.checkoutId })
+    await t.fetch('/stripe/webhook', await stripe.confirm((await status(first.checkoutId)).processorCheckoutId!))
+    expect(await status(second.checkoutId)).toMatchObject({ status: 'abandoned' })
+    await expect(press(t, { amountCents: 3000, replaces: second.checkoutId })).rejects.toThrow('This is already paid.')
+    await expect(press(t, { monthly: true, replaces: second.checkoutId })).rejects.toThrow('This is already paid.')
+  })
+
+  test('two bank payments on their way: the first stays the one paid, and the one that came second is owed back', async () => {
+    const { t, calls, status } = setup()
+    const a = await press(t, { method: 'ach' })
+    const b = await press(t, { method: 'ach', amountCents: 3000, replaces: a.checkoutId })
+    const piA = (await status(a.checkoutId)).processorCheckoutId!
+    const piB = (await status(b.checkoutId)).processorCheckoutId!
+    await t.fetch('/stripe/webhook', await stripe.confirm(piA, 'bank'))
+    await t.fetch('/stripe/webhook', await stripe.confirm(piB, 'bank'))
+    await t.fetch('/stripe/webhook', await stripe.settleBank(piA, true))
+    expect(await status(a.checkoutId)).toMatchObject({ status: 'paid' })
+    await t.fetch('/stripe/webhook', await stripe.settleBank(piB, true))
+    expect(await status(b.checkoutId)).toMatchObject({ status: 'refund_needed' })
+    expect(await calls('onPaid')).toMatchObject([{ checkoutId: a.checkoutId }])
+    expect(await calls('onProcessing')).toMatchObject([{ checkoutId: a.checkoutId }])
+  })
+
+  test('a payment the buyer cancelled (Edit) before pressing again is owed back when it arrives, and its schedule stays ended', async () => {
+    const { t, calls, schedule, status } = setup()
+    const first = await press(t, { monthly: true })
+    await t.action(api.payments.cancelCheckout, { checkoutId: first.checkoutId })
+    const again = await press(t, { monthly: true, amountCents: 3000, replaces: first.checkoutId })
+    expect(again.reused).toBe(false)
+    await t.fetch('/stripe/webhook', await stripe.confirm((await status(first.checkoutId)).processorCheckoutId!))
+    expect(await status(first.checkoutId)).toMatchObject({ status: 'refund_needed', lastError: 'The buyer cancelled this payment before it arrived.' })
+    expect(await schedule(first.scheduleId!)).toMatchObject({ status: 'cancelled' })
+    expect(await calls('onPaid')).toEqual([])
+  })
+
+  test('a bank payment on its way counts as the first: a later card payment in the chain is owed back', async () => {
+    const { t, calls, status } = setup()
+    const bank = await press(t, { method: 'ach' })
+    const card = await press(t, { replaces: bank.checkoutId })
+    await t.fetch('/stripe/webhook', await stripe.confirm((await status(bank.checkoutId)).processorCheckoutId!, 'bank'))
+    expect(await status(bank.checkoutId)).toMatchObject({ status: 'processing' })
+    expect(await status(card.checkoutId)).toMatchObject({ status: 'abandoned' })
+    await t.fetch('/stripe/webhook', await stripe.confirm((await status(card.checkoutId)).processorCheckoutId!))
+    expect(await status(card.checkoutId)).toMatchObject({ status: 'refund_needed' })
+    expect(await calls('onProcessing')).toHaveLength(1)
+    expect(await calls('onPaid')).toHaveLength(0)
   })
 })
 

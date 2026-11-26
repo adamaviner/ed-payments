@@ -268,6 +268,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           giveBack?: { key: string; windowMs: number };
           id: string;
           now: number;
+          replaced?: boolean;
         },
         | { outcome: "abandoned" }
         | { outcome: "being_paid" }
@@ -283,6 +284,13 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
               | "abandoned"
               | "refund_needed";
           },
+        Name
+      >;
+      chainPaid: FunctionReference<
+        "query",
+        "internal",
+        { id: string },
+        "paid" | "processing" | null,
         Name
       >;
       claimCapture: FunctionReference<
@@ -685,7 +693,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           now?: number;
           paymentRef?: string;
         },
-        | { outcome: "processing" }
+        | { closed?: Array<string>; outcome: "processing" }
         | {
             outcome: "already_handled";
             status:
@@ -932,7 +940,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           processorCheckoutId?: string;
           processorFeeCents?: number;
         },
-        | { outcome: "paid" }
+        | { closed?: Array<string>; outcome: "paid" }
         | { outcome: "refund_needed"; reason: string; refundId: string }
         | {
             outcome: "already_handled";
@@ -1578,6 +1586,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           lastError: string | null;
           lastPaidPeriod: string | null;
           method: "card" | "ach" | "paypal";
+          methodLabel: string | null;
           nextChargeAt: number | null;
           owner: { id: string; type: string };
           pausedUntil: number | null;
@@ -1684,6 +1693,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           lastError: string | null;
           lastPaidPeriod: string | null;
           method: "card" | "ach" | "paypal";
+          methodLabel: string | null;
           nextChargeAt: number | null;
           owner: { id: string; type: string };
           pausedUntil: number | null;
@@ -1726,6 +1736,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           lastError: string | null;
           lastPaidPeriod: string | null;
           method: "card" | "ach" | "paypal";
+          methodLabel: string | null;
           nextChargeAt: number | null;
           owner: { id: string; type: string };
           pausedUntil: number | null;
@@ -1768,6 +1779,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           lastError: string | null;
           lastPaidPeriod: string | null;
           method: "card" | "ach" | "paypal";
+          methodLabel: string | null;
           nextChargeAt: number | null;
           owner: { id: string; type: string };
           pausedUntil: number | null;
@@ -1817,6 +1829,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           lastError: string | null;
           lastPaidPeriod: string | null;
           method: "card" | "ach" | "paypal";
+          methodLabel: string | null;
           nextChargeAt: number | null;
           owner: { id: string; type: string };
           pausedUntil: number | null;
@@ -1878,6 +1891,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           lastError: string | null;
           lastPaidPeriod: string | null;
           method: "card" | "ach" | "paypal";
+          methodLabel: string | null;
           nextChargeAt: number | null;
           owner: { id: string; type: string };
           pausedUntil: number | null;
@@ -1931,6 +1945,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           lastError: string | null;
           lastPaidPeriod: string | null;
           method: "card" | "ach" | "paypal";
+          methodLabel: string | null;
           nextChargeAt: number | null;
           owner: { id: string; type: string };
           pausedUntil: number | null;

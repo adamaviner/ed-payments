@@ -40,6 +40,8 @@ export const scheduleView = v.object({
   processor,
   method,
   paymentMethodId: v.union(v.string(), v.null()),
+  /** The method's label as savedMethods gives it ("Visa •••• 4242"); null without a method. */
+  methodLabel: v.union(v.string(), v.null()),
   amountCents: v.number(),
   interval: v.literal('month'),
   anchorDay: v.number(),
@@ -65,7 +67,8 @@ export type ScheduleView = Infer<typeof scheduleView>
 const LIVE: ReadonlySet<Doc<'schedules'>['status']> = new Set(['active', 'paused', 'past_due'])
 const nextOf = (s: Doc<'schedules'>) => (LIVE.has(s.status) ? s.nextChargeAt : null)
 
-export function viewSchedule(s: Doc<'schedules'>): ScheduleView {
+export async function viewSchedule(ctx: QueryCtx, s: Doc<'schedules'>): Promise<ScheduleView> {
+  const saved = s.paymentMethodId ? await findSavedMethod(ctx, s.paymentMethodId) : null
   return {
     id: s._id,
     app: s.app,
@@ -77,6 +80,7 @@ export function viewSchedule(s: Doc<'schedules'>): ScheduleView {
     processor: s.processor,
     method: s.method,
     paymentMethodId: s.paymentMethodId ?? null,
+    methodLabel: saved?.label ?? null,
     amountCents: s.amountCents,
     interval: s.interval,
     anchorDay: s.anchorDay,
@@ -214,7 +218,7 @@ export const get = query({
   handler: async (ctx, { id }) => {
     const nid = ctx.db.normalizeId('schedules', id)
     const s = nid ? await ctx.db.get(nid) : null
-    return s ? viewSchedule(s) : null
+    return s ? await viewSchedule(ctx, s) : null
   },
 })
 
@@ -228,7 +232,7 @@ export const forOwner = query({
       .withIndex('by_owner', (q) => q.eq('app', app).eq('owner.type', owner.type).eq('owner.id', owner.id))
       .order('desc')
       .take(50)
-    return rows.map(viewSchedule)
+    return await Promise.all(rows.map((s) => viewSchedule(ctx, s)))
   },
 })
 
@@ -241,7 +245,7 @@ export const forRef = query({
       .withIndex('by_ref', (q) => q.eq('ref.type', ref.type).eq('ref.id', ref.id))
       .order('desc')
       .take(50)
-    return rows.map(viewSchedule)
+    return await Promise.all(rows.map((s) => viewSchedule(ctx, s)))
   },
 })
 
@@ -474,8 +478,8 @@ type CheckoutDoc = Doc<'checkouts'>
  * A schedule that never started because its first checkout expired or failed, whose first payment
  * arrived anyway on a checkout the payer didn't cancel: it starts after all.
  */
-const revivable = (s: Doc<'schedules'>, c: Pick<CheckoutDoc, 'schedulePeriod' | 'cancelledByBuyerAt'>) =>
-  s.status === 'cancelled' && s.neverStarted === true && c.cancelledByBuyerAt === undefined && c.schedulePeriod === s.firstPeriod
+const revivable = (s: Doc<'schedules'>, c: Pick<CheckoutDoc, 'schedulePeriod' | 'cancelledByBuyerAt' | 'closedBy'>) =>
+  s.status === 'cancelled' && s.neverStarted === true && (c.cancelledByBuyerAt === undefined || c.closedBy === 'press') && c.schedulePeriod === s.firstPeriod
 
 /** A schedule's first payment arrived (or is on its way): it starts. */
 async function start(ctx: MutationCtx, s: Doc<'schedules'>, c: CheckoutDoc, now: number) {
@@ -528,15 +532,18 @@ export async function scheduleFailed(ctx: MutationCtx, c: CheckoutDoc, f: { reas
   )
 }
 
-/** A starting schedule's first checkout was abandoned or failed: the schedule never starts. */
-export async function scheduleAbandoned(ctx: MutationCtx, c: CheckoutDoc, now: number) {
+/**
+ * A starting schedule's first checkout was abandoned or failed: the schedule never starts. Quiet: closed by another press
+ * in the same attempt (replaces, or another payment of the chain came first), which the app follows by the press itself.
+ */
+export async function scheduleAbandoned(ctx: MutationCtx, c: CheckoutDoc, now: number, o: { quiet?: boolean } = {}) {
   const s = c.scheduleId ? await ctx.db.get(c.scheduleId) : null
-  if (s?.status === 'starting') await notStarted(ctx, s, 'The first payment wasn’t completed.', now)
+  if (s?.status === 'starting') await notStarted(ctx, s, 'The first payment wasn’t completed.', now, o.quiet)
 }
 
-async function notStarted(ctx: MutationCtx, s: Doc<'schedules'>, reason: string, now: number) {
+async function notStarted(ctx: MutationCtx, s: Doc<'schedules'>, reason: string, now: number, quiet = false) {
   await ctx.db.patch(s._id, { status: 'cancelled', endReason: reason, endedAt: now, updatedAt: now, neverStarted: true })
-  await changed(ctx, s, ['not_started'], { reason, now })
+  if (!quiet) await changed(ctx, s, ['not_started'], { reason, now })
 }
 
 const paypalSaved = v.object({
@@ -767,7 +774,7 @@ export const update = mutation({
     }
     await ctx.db.patch(s._id, patch)
     if (changes.length) await changed(ctx, s, changes, { by, now })
-    return viewSchedule(await load(ctx, id))
+    return await viewSchedule(ctx, await load(ctx, id))
   },
 })
 
@@ -782,7 +789,7 @@ export const pause = mutation({
     if (until > now + MAX_AHEAD_MS) throw new ConvexError('A pause can’t be longer than two years.')
     await ctx.db.patch(s._id, { status: 'paused', pausedUntil: until, failures: 0, firstFailedAt: undefined, periodAttempts: 0, ...restartAt(s, until), updatedAt: now })
     await changed(ctx, s, ['paused'], { by, now })
-    return viewSchedule(await load(ctx, id))
+    return await viewSchedule(ctx, await load(ctx, id))
   },
 })
 
@@ -807,7 +814,7 @@ export const resume = mutation({
       updatedAt: now,
     })
     await changed(ctx, s, ['resumed'], { by, now })
-    return viewSchedule(await load(ctx, id))
+    return await viewSchedule(ctx, await load(ctx, id))
   },
 })
 
@@ -817,10 +824,10 @@ export const cancel = mutation({
   returns: scheduleView,
   handler: async (ctx, { id, app, by, now, reason }) => {
     const s = await owned(ctx, id, app)
-    if (s.status === 'cancelled') return viewSchedule(s)
+    if (s.status === 'cancelled') return await viewSchedule(ctx, s)
     await ctx.db.patch(s._id, { status: 'cancelled', endReason: reason, endedBy: by, endedAt: now, updatedAt: now })
     await changed(ctx, s, ['cancelled'], { reason, by, now })
-    return viewSchedule(await load(ctx, id))
+    return await viewSchedule(ctx, await load(ctx, id))
   },
 })
 

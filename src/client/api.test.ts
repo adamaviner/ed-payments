@@ -118,11 +118,12 @@ describe('adminApi', () => {
   test('an admin refunds part of a paid checkout through the page’s functions; the ledger records who', async () => {
     const t = createTest()
     await t.mutation(api.host.addAdmin, { token: 'boss', name: 'Bo' })
-    const { checkoutId } = await t.action(api.shop.buy, { processor: 'stripe', method: 'card' })
+    const { checkoutId } = await t.action(api.shop.buy, { processor: 'stripe', method: 'card', context: { bidId: 'b7' } })
     const sessionId = (await t.query(api.shop.status, { id: checkoutId }))!.processorCheckoutId!
     await t.fetch('/stripe/webhook', await stripe.pay(sessionId))
     const listed = await t.query(api.payments.refundable, { auth: 'boss', paginationOpts: page })
-    expect(listed.page).toMatchObject([{ id: checkoutId, paidCents: 2500, refundedCents: 0, description: 'A bowl' }])
+    // The checkout's context comes with it, so the page's refund question needs nothing else loaded.
+    expect(listed.page).toMatchObject([{ id: checkoutId, paidCents: 2500, refundedCents: 0, description: 'A bowl', context: { bidId: 'b7' } }])
     const refundId = await t.mutation(api.payments.requestRefund, { auth: 'boss', checkoutId, amountCents: 1000, reason: 'Chipped' })
     expect(await t.query(api.payments.openCount, { auth: 'boss' })).toBe(1)
     expect(await t.query(api.payments.openRefunds, { auth: 'boss' })).toMatchObject([{ id: refundId, requestedBy: 'Bo', checkout: { id: checkoutId, paymentRef: expect.stringMatching(/^pi_/) } }])
@@ -254,6 +255,20 @@ describe('worker and crons', () => {
     expect(Object.keys(own.crons)).toEqual(['payments sweep', 'payments reconcile', 'payments issues digest', 'payments cleanup'])
   })
 
+  test('a dispute sends the issues digest at once, not at the nightly run', async () => {
+    const t = createTest()
+    const { checkoutId } = await t.action(api.shop.buy, { processor: 'stripe', method: 'card' })
+    const sessionId = (await t.query(api.shop.status, { id: checkoutId }))!.processorCheckoutId!
+    await t.fetch('/stripe/webhook', await stripe.pay(sessionId))
+    const pi = (await t.query(api.shop.status, { id: checkoutId }))!.paymentRef!
+    await t.fetch('/stripe/webhook', await stripe.dispute(pi, 'created'))
+    await t.finishAllScheduledFunctions(() => vi.runAllTimers())
+    const sent = (await t.query(api.host.calls, {})).filter((x) => x.name === 'onIssues')
+    expect(sent).toHaveLength(1)
+    expect(sent[0].args).toMatchObject({ issues: [{ kind: 'dispute', checkoutId }] })
+    expect(await t.mutation(internal.paymentsWorker.issuesDigest, {})).toBe(0)
+  })
+
   test('the issues digest hands new issues to the app once', async () => {
     const t = createTest()
     const { checkoutId } = await t.action(api.shop.buy, { processor: 'stripe', method: 'card' })
@@ -276,6 +291,8 @@ describe('rate limits on the saved-method entries', () => {
     ['savedMethods', 12, (t) => t.action(api.bids.methods, { user: 'u1' })],
     ['verifyMethodOwner', 12, (t) => t.action(api.bids.verify, { user: 'u1', paymentMethodId: 'pm_nobody' })],
     ['removeSavedMethod', 3, (t) => t.action(api.bids.remove, { user: 'u1', paymentMethodId: 'pm_nobody' })],
+    ['changeScheduleMethod', 3, (t) => t.action(api.monthly.changeMethod, { scheduleId: 'nothing', paymentMethodId: 'pm_nobody' })],
+    ['startOnPage', 3, (t) => t.action(api.give.onPage, { processor: 'stripe', method: 'card', email: 'u1@example.org' })],
   ]
   test.each(cases)('%s is limited per payer', async (_name, allowed, call) => {
     const t = createTest()
@@ -297,4 +314,17 @@ test('a PayPal webhook sent more than ten minutes ago is refused before PayPal i
   const res = await t.fetch('/paypal/webhook', hook)
   expect(res.status).toBe(400)
   expect(pp.calls.filter((c) => c.path === '/v1/notifications/verify-webhook-signature')).toHaveLength(0)
+})
+
+test('payments.quote prices with the app’s fee rates, and gives a card only to a processor the app has keys for', () => {
+  expect(payments.quote({ amountCents: 10_000, method: 'card', coverFee: true })).toEqual({ processor: 'paypal', method: 'card', amountCents: 10_000, feeCents: 254, totalCents: 10_254 })
+  const stripeOnly = definePayments(app.components.payments, {
+    app: 'test',
+    context,
+    stripe: () => ({ secretKey: 'sk_test_fake', webhookSecret: 'whsec_fake' }),
+    fees: { paypal: { card: { basisPoints: 199, fixedCents: 49, capCents: null } } },
+  }).withCallbacks(wiring)
+  expect(stripeOnly.quote({ amountCents: 10_000, method: 'card', coverFee: true })).toMatchObject({ processor: 'stripe', feeCents: 330 })
+  expect(stripeOnly.quote({ amountCents: 10_000, method: 'ach', coverFee: false })).toMatchObject({ processor: 'stripe' })
+  expect(() => stripeOnly.quote({ amountCents: 10_000, method: 'paypal', coverFee: false })).toThrow('PayPal isn’t set up on this deployment.')
 })

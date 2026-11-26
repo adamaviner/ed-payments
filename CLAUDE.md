@@ -39,7 +39,7 @@ the v0.2 plan ("own all payment paths, bids included").
 
 ## Money invariants (tests must cover any change to them)
 
-- One payment per thing: a second payment for the same retry chain OR the same schedule period settles as refund_needed.
+- One payment per thing: a second payment for the same retry chain, the same schedule period OR the same chain of presses (replaces) settles as refund_needed. In a chain of presses the first payment to settle is the one paid, even on a replaced checkout, and the others are closed.
 - State flags are fields, never `lastError` text.
 - Index scans use cursors; a row that is skipped must leave the scanned range.
 

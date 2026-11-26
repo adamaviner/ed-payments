@@ -9,6 +9,7 @@ import { customerOf, intentState, savedMethodKind, savedMethodLabel, stripe, str
 import { getOrderOrNull, paypal, paypalTokenOf } from '../core/paypal.js'
 import { ProcessorError, tagFor, type Payer, type Processor, type Ref, type SavedMethodKind } from '../core/types.js'
 import { declineCodeOf, declineKind, type DeclineInfo } from '../core/declines.js'
+import { estimateProcessingFee } from '../core/fees.js'
 import type { Checkout, Payments, RunActionCtx } from './index.js'
 import { chargePaypalNow, paypalMethods, removePaypalMethod, verifyPaypalOwner } from './paypalVault.js'
 import { errorText, withParam } from './util.js'
@@ -23,6 +24,8 @@ export interface SavedMethod {
   label: string
   /** An off-session charge of it was declined; don't offer it again. */
   declined: boolean
+  /** With savedMethods' forAmountCents: what charging it that amount costs at the app's rates. */
+  feeCents?: number
   /** When it was saved (ms). */
   createdAt: number
 }
@@ -86,7 +89,9 @@ async function recordMethods(p: Payments, ctx: RunActionCtx, stripeCustomerId: s
 }
 
 /** Both processors' saved methods of the owner, newest first, leaving out removed ones. A processor the app hasn't set up is skipped. */
-export async function savedMethods(p: Payments, ctx: RunActionCtx, a: { owner: Ref; stripeCustomerId?: string; limitKey?: string }): Promise<SavedMethod[]> {
+export async function savedMethods(p: Payments, ctx: RunActionCtx, a: { owner: Ref; stripeCustomerId?: string; limitKey?: string; forAmountCents?: number }): Promise<SavedMethod[]> {
+  const amount = a.forAmountCents
+  if (amount !== undefined && (!Number.isInteger(amount) || amount < 0)) throw new ConvexError('An amount is whole cents, zero or more.')
   // Each list asks Stripe; a page shows it on load, so it may be asked more often than a payment is started.
   await p.takeLimits(ctx, 'methods', ownerTag(a.owner), 4, a.limitKey)
   const out: SavedMethod[] = []
@@ -98,7 +103,13 @@ export async function savedMethods(p: Payments, ctx: RunActionCtx, a: { owner: R
     }
   }
   if (p.options.paypal?.()) out.push(...(await paypalMethods(p, ctx, a.owner)))
-  return out.sort((x, y) => y.createdAt - x.createdAt)
+  const newest = out.sort((x, y) => y.createdAt - x.createdAt)
+  if (amount === undefined) return newest
+  // Sorted by fee in a stable sort, so of methods costing the same the newest stays first.
+  return newest
+    .filter((m) => !m.declined)
+    .map((m) => ({ ...m, feeCents: estimateProcessingFee(amount, p.feeSchedule(m.processor, m.kind)) }))
+    .sort((x, y) => x.feeCents - y.feeCents)
 }
 
 export type VerifiedMethod = SavedMethod & {
@@ -114,7 +125,7 @@ export async function verifyMethodOwner(p: Payments, ctx: RunActionCtx, a: { own
 }
 
 /** verifyMethodOwner without the rate limit, for the library's own calls. */
-async function verifyOwner(p: Payments, ctx: RunActionCtx, a: { owner: Ref; paymentMethodId: string; stripeCustomerId?: string }): Promise<VerifiedMethod> {
+export async function verifyOwner(p: Payments, ctx: RunActionCtx, a: { owner: Ref; paymentMethodId: string; stripeCustomerId?: string }): Promise<VerifiedMethod> {
   if (paypalTokenOf(a.paymentMethodId)) return await verifyPaypalOwner(p, ctx, a.owner, a.paymentMethodId)
   const customer = await ensureCustomer(p, ctx, a.owner, null, a.stripeCustomerId)
   if (!customer || !/^pm_[A-Za-z0-9_]+$/.test(a.paymentMethodId)) throw new ConvexError(UNUSABLE)
@@ -177,10 +188,10 @@ export async function settleIntent(p: Payments, ctx: RunActionCtx, c: Checkout, 
   const pm = typeof pi.payment_method === 'object' && pi.payment_method ? pi.payment_method : null
   const method = (pm && savedMethodKind(pm.type)) ?? undefined
   if (intentState(pi) === 'processing' || state === 'processing') {
-    await ctx.runMutation(p.component.checkouts.markProcessing, { id: c.id, paymentRef: pi.id, method, now: Date.now() })
+    await closeAtProcessor(p, ctx, await ctx.runMutation(p.component.checkouts.markProcessing, { id: c.id, paymentRef: pi.id, method, now: Date.now() }))
     if (intentState(pi) !== 'paid') return true
   }
-  await ctx.runMutation(p.component.checkouts.settlePaid, {
+  const res = await ctx.runMutation(p.component.checkouts.settlePaid, {
     id: c.id,
     paymentRef: pi.id,
     paidCents: pi.amount_received,
@@ -189,7 +200,27 @@ export async function settleIntent(p: Payments, ctx: RunActionCtx, c: Checkout, 
     method,
     now: Date.now(),
   })
+  await closeAtProcessor(p, ctx, res)
   return true
+}
+
+/**
+ * The checkouts settling a chain's first payment closed in the ledger (closeChain) are closed at Stripe too, so the
+ * buyer's other tab can't pay them: a PaymentIntent canceled, a session expired. PayPal orders need nothing, as a closed
+ * checkout's order is never captured. Best effort: a payment that comes anyway is owed back.
+ */
+export async function closeAtProcessor(p: Payments, ctx: RunActionCtx, settled: object) {
+  for (const id of 'closed' in settled && Array.isArray(settled.closed) ? settled.closed : []) {
+    if (typeof id !== 'string') continue
+    const c = await ctx.runQuery(p.component.checkouts.get, { id })
+    if (c?.processor !== 'stripe' || !c.processorCheckoutId) continue
+    try {
+      if (c.kind === 'onPage') await stripe.cancelPaymentIntent(p.stripeKeys(), c.processorCheckoutId, { fetch: p.fetch })
+      else await stripe.expireSession(p.stripeKeys(), c.processorCheckoutId, { fetch: p.fetch })
+    } catch (err) {
+      console.warn(`payments: couldn’t close ${c.processorCheckoutId} at Stripe after another payment in its chain came first: ${errorText(err)}`)
+    }
+  }
 }
 
 const declineText = (err: ProcessorError) => (err.code === 'authentication_required' ? 'The card needs the buyer to confirm the payment, which can’t happen without them.' : err.message)

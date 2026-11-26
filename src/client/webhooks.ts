@@ -157,7 +157,13 @@ async function onStripeDispute(p: Payments, ctx: RunActionCtx, type: string, d: 
     amountCents: d.amount,
     now: Date.now(),
   })
+  if (type === 'charge.dispute.created') await digestNow(p, ctx, res)
   return res === 'foreign' ? 'foreign' : 'handled'
+}
+
+/** A dispute opened has a deadline to answer: the issues digest goes to the app now, not at the nightly run. */
+async function digestNow(p: Payments, ctx: RunActionCtx, recorded: 'foreign' | 'recorded') {
+  if (recorded === 'recorded' && ctx.scheduler) await ctx.scheduler.runAfter(0, p.wiring.worker.issuesDigest, {})
 }
 
 /**
@@ -272,6 +278,7 @@ async function actOnPaypal(p: Payments, ctx: RunActionCtx, event: PaypalEvent): 
         amountCents: moneyCents(d.dispute_amount) ?? undefined,
         now: Date.now(),
       })
+      if (event.event_type === 'CUSTOMER.DISPUTE.CREATED') await digestNow(p, ctx, res)
       return res === 'foreign' ? 'foreign' : 'handled'
     }
     default:

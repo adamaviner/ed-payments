@@ -24,7 +24,7 @@ The README has the API and the "Adopt in 5 steps" set-up.
 5. **One instance, all callbacks.** `definePayments(...).withCallbacks(...)` once, in `convex/payments.ts`.
    Every callback is required, even if it only logs. Use `payments.args.*` as their `args`.
 6. **Who may do what is the app's.** Gate your own actions (`setupPaymentMethod`, `setupPaypalMethod`,
-   `savePaypalMethod`, `removeSavedMethod`, `chargeSaved`, `retryOnSession`, `retryWithPaypal`, and every schedule function) with your own login; the admin functions go through `authorize.admin` (and `authorize.request` for those who may only ask for refunds, `authorize.stepUp` for a second check before a refund is approved or sent).
+   `savePaypalMethod`, `removeSavedMethod`, `chargeSaved`, `retryOnSession`, `retryWithPaypal`, and every schedule function, `changeScheduleMethod` included) with your own login; the admin functions go through `authorize.admin` (and `authorize.request` for those who may only ask for refunds, `authorize.stepUp` for a second check before a refund is approved or sent).
    A `stripeCustomerId` passed to adopt an existing Customer must come from your own records, never
    from the browser: the library records it as that owner's for good.
 7. **Webhooks with the CLI.** Register them with `npx ed-payments webhooks`, not by hand, and run it
@@ -38,8 +38,11 @@ The README has the API and the "Adopt in 5 steps" set-up.
    `@source '../node_modules/@earthdance/payments/dist';` to your CSS. Never show a refund or payment
    as done before the server says so.
 10. **Paying on your own page:** with the fields in your own form, `<StripeOnPagePayment>` / `<PaypalOnPagePayment>`
-    whose `start` calls your action around `start(ctx, { ..., ui: 'onPage', replaces })` at the press (pass the
-    `checkoutId` your last press got as `replaces`; never start when the form opens). Or `start(ctx, { ..., ui: 'embedded' })`, then `<PaypalButtons>` or
+    whose `start` calls your action around `startOnPage(ctx, { ..., replaces, schedule? })` at the press (pass the
+    `checkoutId` your last press got as `replaces`; never start when the form opens). Keep one `ref` for the whole
+    attempt (one-off or monthly, any amount or method): don't make a new ref per change, don't keep your own
+    replaced-press or dead-start handling, and record the amount, method and frequency from the callbacks, as the
+    library pays only the first payment of a chain of presses and owes the rest back. Price with `payments.quote`. Or `start(ctx, { ..., ui: 'embedded' })`, then `<PaypalButtons>` or
     `<StripeEmbeddedCheckout>` with the returned `embedded`; never load PayPal's or Stripe's scripts
     yourself or capture from the browser. Give them an `onFallback` that starts the same purchase as a
     redirect, so a blocked script never strands the buyer. When the buyer leaves the payment step
@@ -47,16 +50,18 @@ The README has the API and the "Adopt in 5 steps" set-up.
 11. **Saving for later in PayPal's vault:** `setupPaypalMethod` in your action, `<PaypalCardFields>` or
     `<PaypalSaveButton>` with the setup token, then `savePaypalMethod` with the id `onSaved` gives you;
     store only the returned `paymentMethodId` (`paypal:…`). Pick where a new card goes with
-    `cardProcessorFor(amount)`, not by hand. Before `removeSavedMethod`, check nothing of yours (an open
+    `quote` (or `cardProcessorFor(amount)`), not by hand; to offer a saved method, `savedMethods({ owner, forAmountCents })`
+    gives the usable ones cheapest first. Don't branch on the `paypal:` prefix: `chargeSaved` knows a PayPal method itself. Before `removeSavedMethod`, check nothing of yours (an open
     bid) still relies on the method. Never send card numbers to your server: Card Fields keep them in PayPal's frames.
 12. **Repeating charges are schedules.** Never write your own cron that calls `chargeSaved` every month:
     `startSchedule` (a saved method) or `startScheduleCheckout` (a first payment that saves it) and the
     exported `worker().schedules` own the dates, the idempotency keys, the retries (3, 5, 7 days, then
     lapsed; hard declines at once) and processor-side removal. The processor for a new card is yours to
-    choose (`cardProcessorFor` on the monthly amount) and pass in. Record a period in `scheduleCharged`, send
+    choose (`quote` on the monthly amount) and pass in. Record a period in `scheduleCharged`, send
     the failed-charge email from `scheduleFailed` on `attempt === 1` (and staff on `final`), and confirmations
     from `scheduleChanged`. Changes go through `updateSchedule` / `pauseSchedule` / `resumeSchedule` /
-    `cancelSchedule`, after your own check that the caller may (e.g. a signed link).
+    `cancelSchedule`, and a new method through `changeScheduleMethod` (saves it and switches in one call; show
+    the schedule's `methodLabel`, don't keep your own copy), after your own check that the caller may (e.g. a signed link).
 
 13. **Saving with Stripe, or paying a retry:** show the form first and create the intent on submit.
     Use `<StripeSaveMethod>` (its `createSetupIntent` calls your action around `setupPaymentMethod`) or
