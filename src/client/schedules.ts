@@ -2,15 +2,15 @@
 // and decides what follows each charge (schedules.ts there); this side makes the charges, as
 // off-session checkouts keyed `schedule-<id>-<period>`, from the app's hourly cron (worker().schedules)
 // and from startSchedule when the first charge is due at once. startScheduleCheckout begins one for a
-// new payer with a payment that also saves their method: Stripe's embedded Checkout with
-// setup_future_usage, or PayPal's buttons / Card Fields with vault-with-purchase.
+// new payer with a payment that also saves their method: Stripe's embedded Checkout or on-page
+// PaymentIntent with setup_future_usage, or PayPal's buttons / Card Fields with vault-with-purchase.
 import { createFunctionHandle } from 'convex/server'
 import { ConvexError } from 'convex/values'
 import { DEFAULT_CHARGE_HOUR_UTC, DEFAULT_RETRY_DAYS, anchorDayOf, isAnchorDay } from '../core/schedule.js'
 import { isMethodFor, type Method, type Payer, type Processor, type Ref } from '../core/types.js'
 import type { Payments, RunActionCtx, RunMutationCtx, RunQueryCtx, SchedulerCtx, StartUi, StartedEmbedded, StartedOnPage, StartedRedirect } from './index.js'
 import { getOrderOrNull, orderVault } from '../core/paypal.js'
-import { paypalSavedArgs } from './hosted.js'
+import { paypalSavedArgs, reuseOrClose } from './hosted.js'
 import { ensureCustomer } from './saved.js'
 import { cleanPayer, errorText } from './util.js'
 
@@ -114,6 +114,11 @@ export async function startSchedule<T>(p: Payments, ctx: SchedulerCtx, a: StartS
 export async function startScheduleCheckout<T>(p: Payments, ctx: RunActionCtx, a: StartScheduleCheckoutArgs<T>): Promise<(StartedRedirect | StartedEmbedded | StartedOnPage) & { scheduleId: string }> {
   if (!isMethodFor(a.processor, a.method)) throw new ConvexError(`${a.processor === 'stripe' ? 'Stripe' : 'PayPal'} doesn’t take ${a.method} payments here.`)
   checkBase(p, a)
+  const ui = a.ui ?? 'embedded'
+  if (a.replaces) {
+    const reused = await reuseOrClose(p, ctx, a.replaces, { ...a, ui, schedule: { owner: a.owner, anchorDay: a.anchorDay } })
+    if (reused?.scheduleId) return { checkoutId: reused.checkoutId, onPage: reused.onPage, reused: true, scheduleId: reused.scheduleId }
+  }
   const callbacks = await handles(p)
   let stripeCustomerId: string | undefined
   let paypalCustomerId: string | undefined
@@ -161,7 +166,7 @@ export async function startScheduleCheckout<T>(p: Payments, ctx: RunActionCtx, a
         expiresAt: a.expiresAt,
         limitKey: a.limitKey,
         context: a.context,
-        ui: a.ui ?? 'embedded',
+        ui,
       },
       { scheduleId, schedulePeriod: schedule?.period ?? '', stripeCustomerId, paypalCustomerId },
     )

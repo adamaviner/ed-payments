@@ -31,8 +31,8 @@ export async function sweep(p: Payments, ctx: RunActionCtx & { scheduler: Schedu
     if (!look) continue
     try {
       const before = c.status
-      // A PayPal retry on the app's page is a PayPal order like a hosted one; off-session charges and Stripe's own go through sweepIntent.
-      const asOrder = c.kind === 'hosted' || (c.kind === 'onSession' && c.processor === 'paypal')
+      // A PayPal retry or on-page payment is a PayPal order like a hosted one; off-session charges and Stripe's PaymentIntents go through sweepIntent.
+      const asOrder = c.kind === 'hosted' || (c.kind !== 'offSession' && c.processor === 'paypal')
       const acted = asOrder ? (await sweepOne(p, ctx, c, expired), true) : await sweepIntent(p, ctx, c, expired, now)
       if (!acted) continue
       out.checked++
@@ -66,7 +66,7 @@ async function sweepOne(p: Payments, ctx: RunActionCtx, c: Checkout, expired: bo
     const id = c.processorCheckoutId
     const order = await p.withPaypal(ctx, (call) => getOrderOrNull(call, id))
     if (order?.status === 'APPROVED') {
-      let outcome: 'declined' | 'failed' | undefined
+      let outcome: 'declined' | 'reordered' | 'failed' | undefined
       try {
         outcome = await p.capturePaypal(ctx, c.id, id, 'background')
       } catch (err) {

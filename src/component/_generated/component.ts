@@ -78,7 +78,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           disputed: boolean;
           expiresAt: number;
           id: string;
-          kind: "hosted" | "offSession" | "onSession";
+          kind: "hosted" | "offSession" | "onSession" | "onPage";
           lastError: string | null;
           lastTriedAt: number | null;
           method: "card" | "ach" | "paypal";
@@ -128,7 +128,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           disputed: boolean;
           expiresAt: number;
           id: string;
-          kind: "hosted" | "offSession" | "onSession";
+          kind: "hosted" | "offSession" | "onSession" | "onPage";
           lastError: string | null;
           lastTriedAt: number | null;
           method: "card" | "ach" | "paypal";
@@ -178,7 +178,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           disputed: boolean;
           expiresAt: number;
           id: string;
-          kind: "hosted" | "offSession" | "onSession";
+          kind: "hosted" | "offSession" | "onSession" | "onPage";
           lastError: string | null;
           lastTriedAt: number | null;
           method: "card" | "ach" | "paypal";
@@ -228,7 +228,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           disputed: boolean;
           expiresAt: number;
           id: string;
-          kind: "hosted" | "offSession" | "onSession";
+          kind: "hosted" | "offSession" | "onSession" | "onPage";
           lastError: string | null;
           lastTriedAt: number | null;
           method: "card" | "ach" | "paypal";
@@ -288,7 +288,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
       claimCapture: FunctionReference<
         "mutation",
         "internal",
-        { id: string; now: number },
+        { id: string; now: number; orderId?: string },
         | { claimed: true }
         | {
             claimed: false;
@@ -322,7 +322,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           context?: any;
           description: string;
           expiresAt: number;
-          kind?: "hosted" | "offSession" | "onSession";
+          kind?: "hosted" | "offSession" | "onSession" | "onPage";
           limits?: Array<{
             key: string;
             max: number;
@@ -365,7 +365,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           description: string;
           expiresAt: number;
           failed?: { declineCode: string; reason: string };
-          kind?: "hosted" | "offSession" | "onSession";
+          kind?: "hosted" | "offSession" | "onSession" | "onPage";
           limits?: Array<{
             key: string;
             max: number;
@@ -419,7 +419,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             disputed: boolean;
             expiresAt: number;
             id: string;
-            kind: "hosted" | "offSession" | "onSession";
+            kind: "hosted" | "offSession" | "onSession" | "onPage";
             lastError: string | null;
             lastTriedAt: number | null;
             method: "card" | "ach" | "paypal";
@@ -472,7 +472,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           disputed: boolean;
           expiresAt: number;
           id: string;
-          kind: "hosted" | "offSession" | "onSession";
+          kind: "hosted" | "offSession" | "onSession" | "onPage";
           lastError: string | null;
           lastTriedAt: number | null;
           method: "card" | "ach" | "paypal";
@@ -529,7 +529,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           disputed: boolean;
           expiresAt: number;
           id: string;
-          kind: "hosted" | "offSession" | "onSession";
+          kind: "hosted" | "offSession" | "onSession" | "onPage";
           lastError: string | null;
           lastTriedAt: number | null;
           method: "card" | "ach" | "paypal";
@@ -591,7 +591,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             disputed: boolean;
             expiresAt: number;
             id: string;
-            kind: "hosted" | "offSession" | "onSession";
+            kind: "hosted" | "offSession" | "onSession" | "onPage";
             lastError: string | null;
             lastTriedAt: number | null;
             method: "card" | "ach" | "paypal";
@@ -720,7 +720,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             disputed: boolean;
             expiresAt: number;
             id: string;
-            kind: "hosted" | "offSession" | "onSession";
+            kind: "hosted" | "offSession" | "onSession" | "onPage";
             lastError: string | null;
             lastTriedAt: number | null;
             method: "card" | "ach" | "paypal";
@@ -769,6 +769,24 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         null,
         Name
       >;
+      reorder: FunctionReference<
+        "mutation",
+        "internal",
+        { id: string; now: number; processorCheckoutId: string },
+        | { outcome: "reordered" }
+        | {
+            outcome: "already_handled";
+            status:
+              | "created"
+              | "pending"
+              | "processing"
+              | "paid"
+              | "failed"
+              | "abandoned"
+              | "refund_needed";
+          },
+        Name
+      >;
       retriesOf: FunctionReference<
         "query",
         "internal",
@@ -787,7 +805,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           disputed: boolean;
           expiresAt: number;
           id: string;
-          kind: "hosted" | "offSession" | "onSession";
+          kind: "hosted" | "offSession" | "onSession" | "onPage";
           lastError: string | null;
           lastTriedAt: number | null;
           method: "card" | "ach" | "paypal";

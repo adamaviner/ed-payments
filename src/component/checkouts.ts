@@ -125,6 +125,25 @@ export const attach = mutation({
   },
 })
 
+/**
+ * An on-page PayPal checkout whose order PayPal won't take again (too many tries, expired): the
+ * payment goes on under a new order. The old order is never captured (capturePaypal takes only the
+ * checkout's own), and its decline was the old order's, so the new one may be captured by the
+ * webhook or the sweep once the buyer approves it. Refused while a capture holds the checkout; a stale
+ * claim is ignored, as the caller has just found the old order unpaid at PayPal (gone, voided or spent).
+ */
+export const reorder = mutation({
+  args: { id: v.string(), processorCheckoutId: v.string(), now: v.number() },
+  returns: v.union(v.object({ outcome: v.literal('reordered') }), already),
+  handler: async (ctx, { id, processorCheckoutId, now }) => {
+    const c = await loadCheckout(ctx, id)
+    const live = c.captureClaimedAt !== undefined && now - c.captureClaimedAt < CAPTURE_CLAIM_MS
+    if (c.status !== 'pending' || c.kind !== 'onPage' || c.processor !== 'paypal' || live) return { outcome: 'already_handled' as const, status: c.status }
+    await ctx.db.patch(c._id, { processorCheckoutId, paypalDeclinedAt: undefined, captureClaimedAt: undefined })
+    return { outcome: 'reordered' as const }
+  },
+})
+
 /** The processor couldn't make its checkout; start throws to the buyer, and the row is closed. */
 export const failStart = mutation({
   args: { id: v.string(), error: v.string(), now: v.number() },
@@ -377,12 +396,13 @@ export const cancel = mutation({
  * while the money is being taken. Refused when it isn't waiting, or another capture's claim is live.
  */
 export const claimCapture = mutation({
-  args: { id: v.string(), now: v.number() },
+  args: { id: v.string(), orderId: v.optional(v.string()), now: v.number() },
   returns: v.union(v.object({ claimed: v.literal(true) }), v.object({ claimed: v.literal(false), status: checkoutStatus })),
-  handler: async (ctx, { id, now }) => {
+  handler: async (ctx, { id, orderId, now }) => {
     const c = await loadCheckout(ctx, id)
     const live = c.captureClaimedAt !== undefined && now - c.captureClaimedAt < CAPTURE_CLAIM_MS
-    if ((c.status !== 'created' && c.status !== 'pending') || live) return { claimed: false as const, status: c.status }
+    const replaced = orderId !== undefined && c.processorCheckoutId !== undefined && c.processorCheckoutId !== orderId
+    if ((c.status !== 'created' && c.status !== 'pending') || live || replaced) return { claimed: false as const, status: c.status }
     await ctx.db.patch(c._id, { captureClaimedAt: now })
     return { claimed: true as const }
   },

@@ -28,8 +28,8 @@ export const callbacks = v.object({
   onProcessing: v.optional(v.string()),
 })
 
-/** hosted: Stripe Checkout or PayPal. offSession: a saved method charged with nobody present. onSession: the buyer pays on the app's page. Unset on rows from v0.1: hosted. */
-export const checkoutKind = v.union(v.literal('hosted'), v.literal('offSession'), v.literal('onSession'))
+/** hosted: Stripe Checkout or PayPal. offSession: a saved method charged with nobody present. onSession: the buyer pays on the app's page. onPage: a new payment made at the buyer's press on the app's own form. Unset on rows from v0.1: hosted. */
+export const checkoutKind = v.union(v.literal('hosted'), v.literal('offSession'), v.literal('onSession'), v.literal('onPage'))
 
 export const savedMethodKind = v.union(v.literal('card'), v.literal('ach'))
 
@@ -113,7 +113,7 @@ export default defineSchema({
     declineKind: v.optional(declineKind),
     /** onSession: the checkout this one retries (a declined offSession charge). */
     retryOf: v.optional(v.id('checkouts')),
-    /** Stripe's Checkout Session id, PayPal's order id, or (offSession, onSession) Stripe's PaymentIntent id. */
+    /** Stripe's Checkout Session id, PayPal's order id, or (offSession, onSession, onPage) Stripe's PaymentIntent id. */
     processorCheckoutId: v.optional(v.string()),
     /** Stripe's PaymentIntent id, or PayPal's capture id: what refunds and disputes point at. */
     paymentRef: v.optional(v.string()),

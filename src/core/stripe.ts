@@ -120,6 +120,8 @@ export interface StripePaymentIntent {
   customer?: string | { id: string } | null
   payment_method?: string | StripePaymentMethod | null
   last_payment_error?: { message?: string; code?: string; decline_code?: string; advice_code?: string } | null
+  /** off_session: what pays it is saved to its Customer (a schedule's first payment made on the page). */
+  setup_future_usage?: 'off_session' | 'on_session' | null
   created: number
 }
 
@@ -297,12 +299,21 @@ export interface PaymentIntentInput {
   /** offSession: confirm now with the saved method and nobody present; a card that needs the buyer to authenticate is refused (error_on_requires_action). onSession: the browser confirms it. */
   offSession: boolean
   paymentMethod?: string
+  /** On-session only: the types the browser's form offers (all of SAVED_METHOD_TYPES when not given). */
+  types?: readonly SavedMethodType[]
+  /** On-session only: save what pays it to the Customer for charging later with nobody present (a schedule's first payment). */
+  saveForLater?: boolean
 }
 
 export function paymentIntentParams(i: PaymentIntentInput): FormParams {
   const metadata = { app: i.app, checkoutId: i.checkoutId }
-  const common = { amount: i.amountCents, currency: 'usd', customer: i.customer, description: i.description.slice(0, 1000), metadata, allowed_payment_method_types: [...SAVED_METHOD_TYPES] }
-  if (!i.offSession) return { ...common, payment_method_options: SAVED_METHOD_OPTIONS }
+  const types = i.types?.length ? i.types : SAVED_METHOD_TYPES
+  const common = { amount: i.amountCents, currency: 'usd', customer: i.customer, description: i.description.slice(0, 1000), metadata, allowed_payment_method_types: [...types] }
+  if (!i.offSession) {
+    // Options only for a type the intent allows, as the browser's form passes them (retryPaymentElementsOptions).
+    const options = types.includes('us_bank_account') ? { payment_method_options: SAVED_METHOD_OPTIONS } : {}
+    return { ...common, ...options, ...(i.saveForLater ? { setup_future_usage: 'off_session' } : {}) }
+  }
   return { ...common, payment_method: i.paymentMethod, off_session: true, confirm: true, error_on_requires_action: true }
 }
 

@@ -89,12 +89,17 @@ describe('fake Stripe answers in Stripe’s shapes', () => {
     expect(drift(await json(await stripe.fetch(`${S}/v1/setup_intents`, post({ customer: customer.id, usage: 'off_session' }))), fixture(stripeObjectFixtures.setupIntent))).toEqual([])
   })
 
-  test('PaymentIntents: on-session, paid off-session, processing, declined, read, expanded, canceled, listed', async () => {
+  test('PaymentIntents: on-session (and saving for later), paid off-session, processing, declined, read, expanded, canceled, listed', async () => {
     const stripe = fakeStripe()
     const customer = (await json(await stripe.fetch(`${S}/v1/customers`, post({ email: 'a@example.org' })))) as { id: string }
     const charge = (pm: string) => stripe.fetch(`${S}/v1/payment_intents`, post({ amount: '2500', currency: 'usd', customer: customer.id, payment_method: pm, confirm: 'true', off_session: 'true' }))
     const on = (await json(await stripe.fetch(`${S}/v1/payment_intents`, post({ amount: '2500', currency: 'usd', customer: customer.id })))) as { id: string }
     expect(drift(on, fixture(stripeObjectFixtures.paymentIntentOnSession))).toEqual([])
+    const saving = await json(
+      await stripe.fetch(`${S}/v1/payment_intents`, post({ amount: '2500', currency: 'usd', customer: customer.id, setup_future_usage: 'off_session', 'allowed_payment_method_types[0]': 'card' })),
+    )
+    expect(saving).toMatchObject({ setup_future_usage: 'off_session' })
+    expect(drift(saving, fixture(stripeObjectFixtures.paymentIntentOnSession))).toEqual([])
     const paid = (await json(await charge(stripe.saveMethod(customer.id, 'ok')))) as { id: string }
     expect(drift(paid, fixture(stripeObjectFixtures.paymentIntentOffSession))).toEqual([])
     expect(drift(await json(await stripe.fetch(`${S}/v1/payment_intents/${paid.id}`)), fixture(stripeObjectFixtures.paymentIntentOffSession))).toEqual([])

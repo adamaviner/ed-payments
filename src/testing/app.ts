@@ -3,7 +3,7 @@
 import { createFunctionHandle, cronJobs, defineSchema, defineTable, httpRouter } from 'convex/server'
 import { v } from 'convex/values'
 import { defineTestApp } from 'convex-test'
-import { definePayments, paidReturns, type PaymentsWiring, type StartedEmbedded } from '../client/index.js'
+import { definePayments, paidReturns, type PaymentsWiring, type StartedEmbedded, type StartedOnPage } from '../client/index.js'
 import { PAYPAL_SANDBOX_API } from '../core/paypal.js'
 import paymentsTest from '../test.js'
 import { FAKE_STRIPE_WEBHOOK_SECRET } from './fakeStripe.js'
@@ -232,11 +232,42 @@ export const defined = app.defineModules({
           ui: 'embedded',
         }),
     }),
+    /** The same, made at the payer's press on the host's own form (Payment Element or Card Fields); replaces is the last press's checkout. */
+    buyOnPage: app.action({
+      args: {
+        ...startArgs,
+        replaces: v.optional(v.string()),
+        refType: v.optional(v.string()),
+        refId: v.optional(v.string()),
+        purpose: v.optional(v.string()),
+        name: v.optional(v.string()),
+        description: v.optional(v.string()),
+        returnPath: v.optional(v.string()),
+        limitKey: v.optional(v.string()),
+      },
+      handler: async (ctx, a): Promise<StartedOnPage> =>
+        await payments.start(ctx, {
+          ref: { type: a.refType ?? 'offering', id: a.refId ?? 'o1' },
+          purpose: a.purpose ?? 'order',
+          description: a.description ?? 'A bowl',
+          amountCents: a.amountCents ?? 2500,
+          processor: a.processor,
+          method: a.method,
+          payer: { name: a.name ?? 'Ana', email: a.email ?? 'ana@example.org' },
+          limitKey: a.limitKey,
+          returnPath: a.returnPath ?? '/checkout/o1/return',
+          cancelPath: '/checkout/o1',
+          expiresAt: a.expiresAt,
+          context: a.context ?? {},
+          ui: 'onPage',
+          replaces: a.replaces,
+        }),
+    }),
     back: app.action({
       args: { processor: v.union(v.literal('stripe'), v.literal('paypal')), token: v.string() },
-      handler: async (ctx, a): Promise<{ checkoutId: string; status: string; declined?: true } | null> => {
+      handler: async (ctx, a): Promise<{ checkoutId: string; status: string; declined?: true; reordered?: true } | null> => {
         const res = await payments.completeReturn(ctx, a)
-        return res && { checkoutId: res.checkoutId, status: res.status, ...(res.declined ? { declined: res.declined } : {}) }
+        return res && { checkoutId: res.checkoutId, status: res.status, ...(res.declined ? { declined: res.declined } : {}), ...(res.reordered ? { reordered: res.reordered } : {}) }
       },
     }),
     status: app.query({ args: { id: v.string() }, handler: async (ctx, { id }) => await payments.status(ctx, id) }),
@@ -333,6 +364,10 @@ export const defined = app.defineModules({
         processor: v.union(v.literal('stripe'), v.literal('paypal')),
         method: v.union(v.literal('card'), v.literal('ach'), v.literal('paypal')),
         amountCents: v.optional(v.number()),
+        ui: v.optional(v.union(v.literal('redirect'), v.literal('embedded'), v.literal('onPage'))),
+        replaces: v.optional(v.string()),
+        anchorDay: v.optional(v.number()),
+        note: v.optional(v.string()),
       },
       handler: async (ctx, a) =>
         await payments.startScheduleCheckout(ctx, {
@@ -342,11 +377,14 @@ export const defined = app.defineModules({
           description: 'Monthly gift',
           payer: { email: `${a.donor}@example.org` },
           amountCents: a.amountCents ?? 2500,
-          context: { monthlyId: `m-${a.donor}` },
+          anchorDay: a.anchorDay,
+          context: { monthlyId: `m-${a.donor}`, ...(a.note ? { buyer: a.note } : {}) },
           processor: a.processor,
           method: a.method,
           returnPath: '/donate/thanks',
           cancelPath: '/donate',
+          ui: a.ui,
+          replaces: a.replaces,
         }),
     }),
     update: app.mutation({

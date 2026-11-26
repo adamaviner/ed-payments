@@ -209,14 +209,20 @@ export interface StartArgs<T> {
   context: T
   /**
    * redirect (default): send the buyer to the processor's page. embedded: show it on the app's own page,
-   * with `PaypalButtons` or `StripeEmbeddedCheckout` from `@earthdance/payments/react`. Either way the
-   * buyer ends on returnPath and the webhooks settle the payment.
+   * with `PaypalButtons` or `StripeEmbeddedCheckout` from `@earthdance/payments/react`. onPage: a new
+   * payment made when the payer presses pay on the app's own form (a Stripe PaymentIntent for the
+   * method chosen, confirmed by the Payment Element in deferred-intent mode; or a PayPal order like
+   * embedded's, for Card Fields or the PayPal button). Either way the buyer ends on returnPath (Stripe
+   * adds payment_intent after a redirect such as 3-D Secure) and the webhooks settle the payment.
    */
   ui?: StartUi
   /**
-   * With ui: 'onPage', the checkout id the payer's last press started. While that checkout is unpaid with the same
-   * amount, processor, method and schedule (or none) it is returned again and nothing new is counted; otherwise it is
-   * cancelled and a new one started. A paid or processing checkout is never replaced.
+   * With ui: 'onPage', the checkout id the payer's last press started. While that checkout is an unpaid on-page one for
+   * the same ref and purpose, amount, processor, method, payer, description, context, return page and schedule (or none),
+   * with ten minutes or more left, it is returned again and no start is counted. Otherwise one for the same ref and
+   * purpose is cancelled (its start given back) and a new one started; one for another thing is left alone. A paid or
+   * processing one for the same ref and purpose is refused ("This is already paid."). Each press with it counts against
+   * a separate 'replace' limit.
    */
   replaces?: string
 }
@@ -438,8 +444,9 @@ export class Payments<C extends GenericValidator = GenericValidator> {
   /**
    * Starts a checkout from an action: makes the row, asks the processor for its checkout (keyed by
    * the row's id, so a retry gets the same one), and returns where to send the buyer, or with
-   * `ui: 'embedded'` what the app's page needs to show it. Rate-limited per signed-in user (else per
-   * payer email, or limitKey) and overall.
+   * `ui: 'embedded'` what the app's page needs to show it, or with `ui: 'onPage'` what the app's
+   * form needs to confirm it (see replaces). Rate-limited per signed-in user (else per payer email,
+   * or limitKey) and overall; a reused checkout counts nothing.
    */
   async start(ctx: RunActionCtx, a: StartArgs<Infer<C>> & { ui: 'onPage' }): Promise<StartedOnPage>
   async start(ctx: RunActionCtx, a: StartArgs<Infer<C>> & { ui: 'embedded' }): Promise<StartedEmbedded>
@@ -474,7 +481,7 @@ export class Payments<C extends GenericValidator = GenericValidator> {
   }
 
   /** @internal See hosted.ts. */
-  async capturePaypal(ctx: RunActionCtx, checkoutId: string, orderId: string, by: 'buyer' | 'background'): Promise<'declined' | undefined> {
+  async capturePaypal(ctx: RunActionCtx, checkoutId: string, orderId: string, by: 'buyer' | 'background'): Promise<'declined' | 'reordered' | undefined> {
     return await hosted.capturePaypal(this, ctx, checkoutId, orderId, by)
   }
 
@@ -484,12 +491,14 @@ export class Payments<C extends GenericValidator = GenericValidator> {
    * processor and settles (capturing an approved PayPal order), so the page doesn't wait for a
    * webhook. Null: not ours. publicApi().completeReturn wraps this with a rate limit. PayPal's
    * buttons call it when the buyer approves; `declined` then means PayPal refused what the buyer
-   * chose and the buttons should let them choose again (the checkout is still pending).
+   * chose and the buttons should let them choose again (the checkout is still pending). `reordered`
+   * (on-page only): PayPal won't take that order again, so the checkout has a new one; start again with
+   * replaces to get it.
    */
   async completeReturn(
     ctx: RunActionCtx,
     { processor, token }: { processor: Processor; token: string },
-  ): Promise<{ checkoutId: string; ref: Ref; purpose: string; status: CheckoutStatus; declined?: true } | null> {
+  ): Promise<{ checkoutId: string; ref: Ref; purpose: string; status: CheckoutStatus; declined?: true; reordered?: true } | null> {
     return await hosted.completeReturn(this, ctx, { processor, token })
   }
 
@@ -702,12 +711,16 @@ export class Payments<C extends GenericValidator = GenericValidator> {
   /**
    * A schedule for a new payer, its first payment saving the method: Stripe's embedded Checkout
    * (card or bank account, saved with setup_future_usage; Checkout tells the payer, and shows a
-   * bank account's mandate) or PayPal (a PayPal account agreeing to recurring charges with
+   * bank account's mandate), or with ui: 'onPage' a PaymentIntent for the Customer saved the same
+   * way (the Payment Element shows the wording; replaces reuses the last press's checkout and schedule) or PayPal (a PayPal account agreeing to recurring charges with
    * PaypalButtons, or a card in PaypalCardPayment, saved with vault-with-purchase). The app picks the
    * processor (e.g. the cheaper for the monthly amount). The schedule starts when that payment is
    * paid (or on its way, for a bank account); if it never is, scheduleChanged says not_started.
    * Rate-limited like start.
    */
+  async startScheduleCheckout(ctx: RunActionCtx, a: StartScheduleCheckoutArgs<Infer<C>> & { ui: 'onPage' }): Promise<StartedOnPage & { scheduleId: string }>
+  async startScheduleCheckout(ctx: RunActionCtx, a: StartScheduleCheckoutArgs<Infer<C>> & { ui?: 'embedded' | 'redirect' }): Promise<(StartedRedirect | StartedEmbedded) & { scheduleId: string }>
+  async startScheduleCheckout(ctx: RunActionCtx, a: StartScheduleCheckoutArgs<Infer<C>>): Promise<(StartedRedirect | StartedEmbedded | StartedOnPage) & { scheduleId: string }>
   async startScheduleCheckout(ctx: RunActionCtx, a: StartScheduleCheckoutArgs<Infer<C>>): Promise<(StartedRedirect | StartedEmbedded | StartedOnPage) & { scheduleId: string }> {
     return await startScheduleCheckout(this, ctx, a)
   }
