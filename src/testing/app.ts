@@ -438,6 +438,7 @@ export const defined = app.defineModules({
         replaces: v.optional(v.string()),
         email: v.optional(v.string()),
         gift: v.optional(v.string()),
+        donor: v.optional(v.string()),
       },
       handler: async (ctx, a): Promise<StartedOnPage & { scheduleId?: string }> =>
         await payments.startOnPage(ctx, {
@@ -452,7 +453,7 @@ export const defined = app.defineModules({
           cancelPath: '/donate',
           context: {},
           replaces: a.replaces,
-          ...(a.monthly ? { schedule: { owner: { type: 'donor', id: 'd1' } } } : {}),
+          ...(a.monthly ? { schedule: { owner: { type: 'donor', id: a.donor ?? 'd1' } } } : {}),
         }),
     }),
   },
