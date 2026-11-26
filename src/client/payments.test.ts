@@ -5,6 +5,8 @@ import { app, defined } from '../testing/app.js'
 import { fakePaypal, type FakePaypal } from '../testing/fakePaypal.js'
 import { fakeStripe, type FakeStripe } from '../testing/fakeStripe.js'
 import { stripeEvent } from '../testing/fixtures.js'
+import { checkoutReturnToken } from '../react/useCheckoutReturn.js'
+import { withParam } from './util.js'
 
 const { api, internal, createTest } = defined
 const MIN = 60_000
@@ -591,6 +593,24 @@ describe('on-page payments (made at the payer’s press on the app’s own form)
     expect(await post('/stripe/webhook', hook)).toEqual({ status: 200, text: 'handled' })
     expect(await calls('onPaid')).toHaveLength(1)
     expect(await status(started.checkoutId)).toMatchObject({ status: 'paid', paidCents: 2500, paymentRef: c.processorCheckoutId })
+  })
+
+  test('Stripe: the return page the Payment Element sends the payer to (?payment_intent=, after 3-D Secure) finds the on-page checkout and settles it before the webhook', async () => {
+    const { t, status, calls } = setup()
+    const started = await onPage(t, { processor: 'stripe', method: 'card' })
+    if (started.onPage.processor !== 'stripe') throw new Error('expected Stripe')
+    const pi = (await status(started.checkoutId)).processorCheckoutId!
+    await stripe.confirm(pi, 'auth')
+    const back = (redirectStatus: string) => {
+      const url = new URL(withParam(withParam(withParam(started.onPage.returnUrl, 'payment_intent', pi), 'payment_intent_client_secret', `${pi}_secret_x`), 'redirect_status', redirectStatus))
+      const token = checkoutReturnToken(url.search)
+      if (!token) throw new Error('no return token')
+      return t.action(api.shop.back, token)
+    }
+    expect(await back('failed')).toEqual({ checkoutId: started.checkoutId, status: 'pending' })
+    await stripe.confirm(pi, 'ok')
+    expect(await back('succeeded')).toEqual({ checkoutId: started.checkoutId, status: 'paid' })
+    expect(await calls('onPaid')).toHaveLength(1)
   })
 
   test('Stripe bank account: only us_bank_account, verified at once; processing, then paid', async () => {
