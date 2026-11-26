@@ -9,6 +9,7 @@ import { customerOf, intentState, savedMethodKind, savedMethodLabel, stripe, str
 import { getOrderOrNull, paypal, paypalTokenOf } from '../core/paypal.js'
 import { ProcessorError, tagFor, type Payer, type Processor, type Ref, type SavedMethodKind } from '../core/types.js'
 import { declineCodeOf, declineKind, type DeclineInfo } from '../core/declines.js'
+import { estimateProcessingFee } from '../core/fees.js'
 import type { Checkout, Payments, RunActionCtx } from './index.js'
 import { chargePaypalNow, paypalMethods, removePaypalMethod, verifyPaypalOwner } from './paypalVault.js'
 import { errorText, withParam } from './util.js'
@@ -23,6 +24,8 @@ export interface SavedMethod {
   label: string
   /** An off-session charge of it was declined; don't offer it again. */
   declined: boolean
+  /** With savedMethods' forAmountCents: what charging it that amount costs at the app's rates. */
+  feeCents?: number
   /** When it was saved (ms). */
   createdAt: number
 }
@@ -86,7 +89,7 @@ async function recordMethods(p: Payments, ctx: RunActionCtx, stripeCustomerId: s
 }
 
 /** Both processors' saved methods of the owner, newest first, leaving out removed ones. A processor the app hasn't set up is skipped. */
-export async function savedMethods(p: Payments, ctx: RunActionCtx, a: { owner: Ref; stripeCustomerId?: string; limitKey?: string }): Promise<SavedMethod[]> {
+export async function savedMethods(p: Payments, ctx: RunActionCtx, a: { owner: Ref; stripeCustomerId?: string; limitKey?: string; forAmountCents?: number }): Promise<SavedMethod[]> {
   // Each list asks Stripe; a page shows it on load, so it may be asked more often than a payment is started.
   await p.takeLimits(ctx, 'methods', ownerTag(a.owner), 4, a.limitKey)
   const out: SavedMethod[] = []
@@ -98,7 +101,15 @@ export async function savedMethods(p: Payments, ctx: RunActionCtx, a: { owner: R
     }
   }
   if (p.options.paypal?.()) out.push(...(await paypalMethods(p, ctx, a.owner)))
-  return out.sort((x, y) => y.createdAt - x.createdAt)
+  const newest = out.sort((x, y) => y.createdAt - x.createdAt)
+  const amount = a.forAmountCents
+  if (amount === undefined) return newest
+  if (!Number.isInteger(amount) || amount < 0) throw new ConvexError('An amount is whole cents, zero or more.')
+  // Sorted by fee in a stable sort, so of methods costing the same the newest stays first.
+  return newest
+    .filter((m) => !m.declined)
+    .map((m) => ({ ...m, feeCents: estimateProcessingFee(amount, p.feeSchedule(m.processor, m.kind)) }))
+    .sort((x, y) => x.feeCents - y.feeCents)
 }
 
 export type VerifiedMethod = SavedMethod & {

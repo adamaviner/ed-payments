@@ -151,6 +151,31 @@ describe('charging a PayPal method with nobody present', () => {
     expect(await t.action(api.bids.methods, { user: 'u1' })).toMatchObject([{ paymentMethodId: card.paymentMethodId, declined: true }])
   })
 
+  test('savedMethods for an amount: cheapest to charge first, each with its fee, declined ones left out', async () => {
+    const { t, save, charge } = setup()
+    const declined = await save({ last4: '0002' })
+    pp.setVaultBehaviour(declined.paymentMethodId.slice('paypal:'.length), 'decline')
+    await charge(declined.paymentMethodId)
+    const paypalCard = await save({ last4: '0004' })
+    const { stripeCustomerId } = await t.action(api.bids.setup, { user: 'u1', email: 'ana@example.org' })
+    const stripeCard = stripe.saveMethod(stripeCustomerId)
+    await t.action(api.bids.verify, { user: 'u1', paymentMethodId: stripeCard })
+    const listed = await t.action(api.bids.methods, { user: 'u1', forAmountCents: 10_000 })
+    expect(listed.map((m) => [m.paymentMethodId, m.feeCents])).toEqual([
+      [paypalCard.paymentMethodId, 248],
+      [stripeCard, 320],
+    ])
+    expect((await t.action(api.bids.methods, { user: 'u1' })).map((m) => m.paymentMethodId)).toContain(declined.paymentMethodId)
+  })
+
+  test('chargeSaved knows a PayPal method by itself: a customer id the app passes with it (PayPal’s, as an app may store) is ignored', async () => {
+    const { t, status, save, settle } = setup()
+    const card = await save()
+    const id = await t.mutation(api.bids.charge, { user: 'u1', bidId: 'b9', paymentMethodId: card.paymentMethodId, stripeCustomerId: 'PAYPALCUSTOMER1' })
+    await settle()
+    expect(await status(id)).toMatchObject({ status: 'paid', processor: 'paypal', stripeCustomerId: null })
+  })
+
   test('no answer: tried again a minute later under the same PayPal-Request-Id, then paid', async () => {
     const { status, save, charge } = setup()
     const card = await save()

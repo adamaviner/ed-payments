@@ -595,8 +595,12 @@ export class Payments<C extends GenericValidator = GenericValidator> {
     return await savePaypalMethod(this, ctx, a)
   }
 
-  /** The owner's saved cards, bank accounts and PayPal accounts at both processors, newest first, each with whether a charge of it was declined. Rate-limited. */
-  async savedMethods(ctx: RunActionCtx, a: { owner: Ref; stripeCustomerId?: string; limitKey?: string }): Promise<SavedMethod[]> {
+  /**
+   * The owner's saved cards, bank accounts and PayPal accounts at both processors, newest first, each with whether a
+   * charge of it was declined. With forAmountCents: only those not declined, cheapest to charge that amount first (at
+   * this app's rates; the newest first among equals), each with its feeCents. Rate-limited.
+   */
+  async savedMethods(ctx: RunActionCtx, a: { owner: Ref; stripeCustomerId?: string; limitKey?: string; forAmountCents?: number }): Promise<SavedMethod[]> {
     return await savedMethods(this, ctx, a)
   }
 

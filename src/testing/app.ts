@@ -292,15 +292,15 @@ export const defined = app.defineModules({
         await payments.setupPaymentMethod(ctx, { owner: { type: 'user', id: a.user }, payer: { email: a.email } }),
     }),
     methods: app.action({
-      args: { user: v.string(), stripeCustomerId: v.optional(v.string()) },
-      handler: async (ctx, a) => await payments.savedMethods(ctx, { owner: { type: 'user', id: a.user }, stripeCustomerId: a.stripeCustomerId }),
+      args: { user: v.string(), stripeCustomerId: v.optional(v.string()), forAmountCents: v.optional(v.number()) },
+      handler: async (ctx, a) => await payments.savedMethods(ctx, { owner: { type: 'user', id: a.user }, stripeCustomerId: a.stripeCustomerId, forAmountCents: a.forAmountCents }),
     }),
     verify: app.action({
       args: { user: v.string(), paymentMethodId: v.string() },
       handler: async (ctx, a) => await payments.verifyMethodOwner(ctx, { owner: { type: 'user', id: a.user }, paymentMethodId: a.paymentMethodId }),
     }),
     charge: app.mutation({
-      args: { user: v.string(), bidId: v.string(), paymentMethodId: v.string(), amountCents: v.optional(v.number()), key: v.optional(v.string()) },
+      args: { user: v.string(), bidId: v.string(), paymentMethodId: v.string(), amountCents: v.optional(v.number()), key: v.optional(v.string()), stripeCustomerId: v.optional(v.string()) },
       handler: async (ctx, a): Promise<string> =>
         await payments.chargeSaved(ctx, {
           ref: { type: 'bid', id: a.bidId },
@@ -310,6 +310,7 @@ export const defined = app.defineModules({
           payer: { email: 'ana@example.org' },
           owner: { type: 'user', id: a.user },
           paymentMethodId: a.paymentMethodId,
+          stripeCustomerId: a.stripeCustomerId,
           idempotencyKey: a.key ?? `bid-${a.bidId}`,
           context: { bidId: a.bidId },
         }),
